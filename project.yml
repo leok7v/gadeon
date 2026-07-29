@@ -1,0 +1,142 @@
+name: Gadeon
+options:
+  bundleIdPrefix: io.github.leok7v
+  # Pin LastUpgradeCheck to the running Xcode (encoded major/minor/patch, e.g.
+  # 26.6.0 -> "2660"). Xcode only runs its "update to recommended settings"
+  # diff when this stamp is older than the IDE, so matching it silences that
+  # prompt at the root -- no need to pre-apply each individual recommended
+  # setting. Bump on an Xcode major upgrade.
+  xcodeVersion: "2660"
+  deploymentTarget:
+    macOS: "15.0"
+    iOS: "18.0"
+# Show config/ (entitlements + xcconfig) in the Xcode navigator; not compiled.
+fileGroups:
+  - config
+# MD (Markdown transcript rendering) rides as a local SwiftPM package -- unlike
+# LLM it has no arch-sensitive code (no Float16), so the external-package
+# EXCLUDED_ARCHS gap that forced LLM into a native framework does not bite,
+# and Bundle.module (highlights.ini) needs SwiftPM packaging.
+packages:
+  MD:
+    path: MD
+settings:
+  base:
+    DEVELOPMENT_TEAM: 692R843P25
+    DEAD_CODE_STRIPPING: YES
+    # Apple Silicon only: the ANE and Float16 (used throughout the engine) do
+    # not exist on Intel, so any x86_64 compile fails. LLM is a native
+    # framework target (below), NOT an external SwiftPM package, precisely so it
+    # inherits these and every build (Debug/Release/"Any Mac"/archive) is arm64-
+    # only -- an external package ignored them and failed on Float16 in Release.
+    # The Mac App Store accepts an Apple-Silicon-only app; Intel could not run
+    # the ANE models anyway.
+    EXCLUDED_ARCHS[sdk=macosx*]: x86_64
+    EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+    # No "Apple Vision (Designed for iPad)" destination -- untested there and
+    # the ANE models are unvalidated on visionOS. Declared project-wide AND on
+    # each target below: declaring iOS support makes xcodegen write YES at the
+    # TARGET level, and a target setting beats a project one, so the
+    # project-wide value alone was silently overridden.
+    SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
+targets:
+  # LLM as a NATIVE framework target (not an external SwiftPM package) so it
+  # inherits the project arch settings -- EXCLUDED_ARCHS reaches it, so Release
+  # and "Any Mac" builds are arm64-only like the app. Package.swift stays as the
+  # home of gadeon-cli (built via `swift build`); the app links this
+  # target instead of the package product. Same sources, no Swift changes.
+  LLM:
+    type: framework
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - LLM/src
+      - LLM/metal
+    # Compiler settings set directly, NOT via platform.xcconfig -- that xcconfig
+    # carries app-only settings (the *-iOS/-macOS source split) a framework
+    # must not inherit. Versions come from version.xcconfig (YY.MM.DD /
+    # YYMMDD.HHMM date stamps, shared with the app).
+    configFiles:
+      Debug: config/version.xcconfig
+      Release: config/version.xcconfig
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.leok7v.gadeon.LLM
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        DEFINES_MODULE: YES
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+  # The single app target: Hub-download-only, ANE-only. The bundled-model and
+  # device-CPU bring-up targets are gone -- gadeon-cli and a HF round-trip cover
+  # local emit work -- so the app ships no weights.
+  Gadeon:
+    type: application
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - App
+    dependencies:
+      - target: LLM
+      - package: MD
+    configFiles:
+      Debug: config/platform.xcconfig
+      Release: config/platform.xcconfig
+    settings:
+      base:
+        # The bundle id is the container identity: model store, defaults,
+        # precook + e5 caches all hang off it, so changing it factory-resets
+        # every install (macOS models move by hand between containers).
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.leok7v.gadeon
+        INFOPLIST_KEY_CFBundleDisplayName: Gadeon
+        GENERATE_INFOPLIST_FILE: YES
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        # Entitlements set at the TARGET level (not the xcconfig) so Xcode's
+        # Signing & Capabilities tab actually shows them. Split by SDK: macOS
+        # gets the App Sandbox set (network client + user-selected files); iOS
+        # gets the memory entitlements (increased-memory-limit +
+        # extended-virtual-addressing). iOS needs no sandbox keys -- it is not
+        # App-Sandboxed: network is open and the document/photo pickers grant
+        # file access out-of-process.
+        CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: config/macos.entitlements
+        CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]: config/ios.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Mac App Store validation rejects an archive without a category.
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        # iPhone stays portrait-only (a chat composer on a narrow landscape
+        # strip is useless, and the per-idiom restriction remains supported).
+        # iPad allows every orientation: iPadOS's windowing makes the app a
+        # resizable window, ignores UIRequiresFullScreen, and requires all
+        # orientations -- the adaptive layout handles any shape anyway.
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+# Explicit scheme so `xcodebuild -scheme Gadeon` works and survives regenerate.
+# Run on Release too (not just archive) -- the framework-target fix makes Release
+# build in the GUI, and it is the config we run on device.
+schemes:
+  Gadeon:
+    build:
+      targets:
+        Gadeon: all
+    run:
+      config: Release
+      # Both DECLARED but UNCHECKED (isEnabled: false), so they survive a
+      # regenerate as ready toggles without firing. OS_ACTIVITY_MODE=disable
+      # silences the Xcode/ViewBridge log firehose but ALSO suppresses our own
+      # os_log entirely (only the report() stderr line survives) -- leave it
+      # off so os_log reaches Console.app; re-check it if the firehose is too
+      # noisy. ANE_CACHE_MODE is redundant now that hardlink is the default;
+      # kept as a ready OFF switch (check it to disable the shadow).
+      environmentVariables:
+        - variable: OS_ACTIVITY_MODE
+          value: disable
+          isEnabled: false
+        - variable: ANE_CACHE_MODE
+          value: disable
+          isEnabled: false
+    archive:
+      config: Release

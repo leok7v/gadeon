@@ -1,0 +1,210 @@
+// GGUF v3 reader: mmap the file, parse header + KV metadata + tensor directory,
+// expose each tensor's dims / ggml type / base pointer into the mapped data
+// region. Mirrors the layout llama.cpp writes; validated against a Python parse
+// of the real Q2_0 file.
+import Foundation
+
+enum GGUFType: Int32 {
+    case f32 = 0, f16 = 1
+    case q4_0 = 2, q4_1 = 3, q5_0 = 6, q5_1 = 7, q8_0 = 8, q8_1 = 9
+    case q2k = 10, q3k = 11, q4k = 12, q5k = 13, q6k = 14, q8k = 15
+    case bf16 = 30
+    case q1_0 = 41         // PrismML 1-bit, 128/block, 18 bytes
+    case q2_0 = 42         // PrismML ternary, 128/block, 34 bytes {f16 d; u8 qs[32]}
+}
+
+// A single metadata value. Scalars are kept; arrays keep only their element count
+// unless they are the small numeric arrays we actually read (e.g. rope sections).
+enum GGUFValue {
+    case int(Int64)
+    case double(Double)
+    case string(String)
+    case ints([Int64])
+    case doubles([Double])
+    case strings([String])
+    case bool(Bool)
+}
+
+struct GGUFTensor {
+    let name: String
+    let dims: [Int]           // ggml order: ne[0] is the fastest-varying axis
+    let type: GGUFType
+    let base: UnsafeRawPointer // start of this tensor's data in the mapped region
+    let byteCount: Int
+
+    var count: Int { dims.reduce(1, *) }
+}
+
+final class GGUF {
+    private let fd: Int32
+    let map: UnsafeRawPointer
+    let mapSize: Int
+    let meta: [String: GGUFValue]
+    let tensors: [String: GGUFTensor]
+
+    init(path: String) throws {
+        fd = open(path, O_RDONLY)
+        guard fd >= 0 else { throw GGUFErr.io("open \(path)") }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { close(fd); throw GGUFErr.io("fstat") }
+        mapSize = Int(st.st_size)
+        guard let p = mmap(nil, mapSize, PROT_READ, MAP_PRIVATE, fd, 0),
+              p != MAP_FAILED else { close(fd); throw GGUFErr.io("mmap") }
+        map = UnsafeRawPointer(p)
+
+        var c = Cursor(base: map, limit: mapSize)
+        guard c.u32() == 0x4655_4747 else { throw GGUFErr.parse("bad magic") } // "GGUF" LE
+        _ = c.u32()                                   // version (3)
+        let nTensors = Int(c.u64())
+        let nKV = Int(c.u64())
+
+        var meta: [String: GGUFValue] = [:]
+        var alignment = 32
+        for _ in 0..<nKV {
+            let key = c.str()
+            let v = c.value()
+            if key == "general.alignment", case let .int(a) = v { alignment = Int(a) }
+            meta[key] = v
+        }
+        self.meta = meta
+
+        // tensor directory: name, dims, type, offset (relative to data section)
+        struct Raw { let name: String; let dims: [Int]; let type: Int32; let off: Int }
+        var raws: [Raw] = []
+        raws.reserveCapacity(nTensors)
+        for _ in 0..<nTensors {
+            let name = c.str()
+            let nd = Int(c.u32())
+            var dims: [Int] = []
+            for _ in 0..<nd { dims.append(Int(c.u64())) }
+            let type = Int32(bitPattern: c.u32())
+            let off = Int(c.u64())
+            raws.append(Raw(name: name, dims: dims, type: type, off: off))
+        }
+        let dataStart = (c.pos + alignment - 1) / alignment * alignment
+
+        var tensors: [String: GGUFTensor] = [:]
+        tensors.reserveCapacity(nTensors)
+        for r in raws {
+            guard let ty = GGUFType(rawValue: r.type) else {
+                throw GGUFErr.parse("unknown ggml type \(r.type) for \(r.name)")
+            }
+            let n = r.dims.reduce(1, *)
+            let bytes = GGUF.rowByteCount(ty, n)
+            tensors[r.name] = GGUFTensor(
+                name: r.name, dims: r.dims, type: ty,
+                base: map + dataStart + r.off, byteCount: bytes)
+        }
+        self.tensors = tensors
+    }
+
+    deinit {
+        munmap(UnsafeMutableRawPointer(mutating: map), mapSize)
+        close(fd)
+    }
+
+    // total byte count for `n` elements of a given ggml type
+    static func rowByteCount(_ ty: GGUFType, _ n: Int) -> Int {
+        switch ty {
+        case .f32:  return n * 4
+        case .f16, .bf16: return n * 2
+        case .q2_0: return n / 128 * 34
+        case .q1_0: return n / 128 * 18
+        case .q4_0: return n / 32 * 18   // MiniLM (Slugs) weights
+        case .q8_0: return n / 32 * 34
+        default:    return n            // unused types
+        }
+    }
+
+    // typed accessors
+    func int(_ k: String) -> Int? { if case let .int(v)? = meta[k] { return Int(v) }; return nil }
+    func double(_ k: String) -> Double? {
+        switch meta[k] {
+        case let .double(v)?: return v
+        case let .int(v)?: return Double(v)
+        default: return nil
+        }
+    }
+    func ints(_ k: String) -> [Int]? { if case let .ints(v)? = meta[k] { return v.map(Int.init) }; return nil }
+    func doubles(_ k: String) -> [Double]? { if case let .doubles(v)? = meta[k] { return v }; return nil }
+    func string(_ k: String) -> String? { if case let .string(v)? = meta[k] { return v }; return nil }
+    func strings(_ k: String) -> [String]? { if case let .strings(v)? = meta[k] { return v }; return nil }
+
+    func tensor(_ name: String) -> GGUFTensor {
+        guard let t = tensors[name] else { fatalError("missing tensor \(name)") }
+        return t
+    }
+    func maybe(_ name: String) -> GGUFTensor? { tensors[name] }
+}
+
+enum GGUFErr: Error { case io(String), parse(String) }
+
+// Little-endian byte cursor over the mapped region.
+private struct Cursor {
+    let base: UnsafeRawPointer
+    let limit: Int
+    var pos: Int = 0
+
+    mutating func bytes(_ n: Int) -> UnsafeRawPointer {
+        let p = base + pos; pos += n; precondition(pos <= limit, "gguf overrun"); return p
+    }
+    mutating func u32() -> UInt32 { bytes(4).loadUnaligned(as: UInt32.self) }
+    mutating func u64() -> UInt64 { bytes(8).loadUnaligned(as: UInt64.self) }
+    mutating func str() -> String {
+        let n = Int(u64())
+        let p = bytes(n)
+        return String(decoding: UnsafeRawBufferPointer(start: p, count: n), as: UTF8.self)
+    }
+
+    mutating func value() -> GGUFValue {
+        let t = u32()
+        return scalar(t)
+    }
+
+    mutating func scalar(_ t: UInt32) -> GGUFValue {
+        switch t {
+        case 0:  return .int(Int64(bytes(1).loadUnaligned(as: UInt8.self)))
+        case 1:  return .int(Int64(bytes(1).loadUnaligned(as: Int8.self)))
+        case 2:  return .int(Int64(bytes(2).loadUnaligned(as: UInt16.self)))
+        case 3:  return .int(Int64(bytes(2).loadUnaligned(as: Int16.self)))
+        case 4:  return .int(Int64(bytes(4).loadUnaligned(as: UInt32.self)))
+        case 5:  return .int(Int64(bytes(4).loadUnaligned(as: Int32.self)))
+        case 6:  return .double(Double(bytes(4).loadUnaligned(as: Float32.self)))
+        case 7:  return .bool(bytes(1).loadUnaligned(as: UInt8.self) != 0)
+        case 8:  return .string(str())
+        case 9:  return array()
+        case 10: return .int(Int64(bitPattern: u64()))
+        case 11: return .int(bytes(8).loadUnaligned(as: Int64.self))
+        case 12: return .double(bytes(8).loadUnaligned(as: Double.self))
+        default: fatalError("bad kv type \(t)")
+        }
+    }
+
+    mutating func array() -> GGUFValue {
+        let et = u32()
+        let n = Int(u64())
+        if et == 8 {
+            // string arrays: materialized so the embedded tokenizer
+            // (tokenizer.ggml.tokens / .merges, ~248k entries) is available to
+            // Tokenizer(gguf:). A few MB; the GGUF is the single source for the
+            // tokenizer, no separate tokenizer.json.
+            var strs: [String] = []; strs.reserveCapacity(n)
+            for _ in 0..<n { strs.append(str()) }
+            return .strings(strs)
+        }
+        // numeric array: materialize (these are all small — rope sections,
+        // image mean/std, per-layer bool flags, etc.)
+        var out: [Int64] = []; out.reserveCapacity(n)
+        var dbl = false; var dvals: [Double] = []
+        for _ in 0..<n {
+            let v = scalar(et)
+            switch v {
+            case let .int(i): out.append(i)
+            case let .bool(b): out.append(b ? 1 : 0)
+            case let .double(d): dbl = true; dvals.append(d)
+            default: break
+            }
+        }
+        return dbl ? .doubles(dvals) : .ints(out)
+    }
+}

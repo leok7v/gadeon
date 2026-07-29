@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Sandbox: required for the Mac App Store, and it scopes the app's
+	     Application Support to its own container so downloaded model sets never
+	     collide with the shared ~/Library/Application Support. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- Outbound network only, for the on-demand model download from the Hub. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<!-- Read an image the user picks in the composer's [+] file importer. -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,212 @@
+import XCTest
+@testable import LLM
+
+final class SamplerTests: XCTestCase {
+    private func referenceArgmax(_ v: [Float]) -> Int32 {
+        var best = 0
+        var i = 1
+        while i < v.count {
+            if v[i] > v[best] { best = i }
+            i += 1
+        }
+        return Int32(best)
+    }
+
+    // sample() mutates its buffer in place; these tests reuse one raw `logits`
+    // across calls and samplers, so hand each call a private copy.
+    private func pick(_ s: inout Sampler, _ logits: [Float]) -> Int32 {
+        var work = logits
+        return s.sample(&work)
+    }
+
+    func testGreedyEqualsArgmax() {
+        let cfg = SamplerConfig(temperature: 0, setMask: [.temperature])
+        var s = Sampler(vocabSize: 6, config: cfg)
+        let logits: [Float] = [0.1, 2.3, -1.0, 2.31, 0.5, 2.30]
+        XCTAssertEqual(pick(&s, logits), referenceArgmax(logits))
+        XCTAssertEqual(pick(&s, logits), 3)
+    }
+
+    func testTopKTruncatesToArgmax() {
+        let cfg = SamplerConfig(
+            temperature: 1.0, topP: 1.0, topK: 1, minP: 0.0, seed: 7,
+            setMask: [.temperature, .topP, .topK, .minP, .seed])
+        var s = Sampler(vocabSize: 5, config: cfg)
+        let logits: [Float] = [0.2, 3.0, 0.1, 1.5, 0.4]
+        var i = 0
+        while i < 8 {
+            XCTAssertEqual(pick(&s, logits), referenceArgmax(logits))
+            i += 1
+        }
+    }
+
+    func testSeededDeterminism() {
+        let cfg = SamplerConfig(
+            temperature: 1.0, topP: 0.95, topK: 40, minP: 0.0, seed: 99,
+            setMask: [.temperature, .topP, .topK, .minP, .seed])
+        let logits: [Float] = [1.0, 2.0, 0.5, 1.5, 3.0, 0.2, 2.5, 1.1]
+        var a = Sampler(vocabSize: logits.count, config: cfg)
+        var b = Sampler(vocabSize: logits.count, config: cfg)
+        var seqA: [Int32] = []
+        var seqB: [Int32] = []
+        var i = 0
+        while i < 12 {
+            seqA.append(pick(&a, logits))
+            seqB.append(pick(&b, logits))
+            i += 1
+        }
+        XCTAssertEqual(seqA, seqB)
+    }
+
+    func testPresencePenaltyLowersRepeated() {
+        let base = SamplerConfig(temperature: 0, setMask: [.temperature])
+        let penal = SamplerConfig(
+            temperature: 0, presencePenalty: 0.5,
+            setMask: [.temperature, .presencePenalty])
+        var plain = Sampler(vocabSize: 4, config: base)
+        var penalized = Sampler(vocabSize: 4, config: penal)
+        let logits: [Float] = [1.0, 0.9, 0.1, 0.2]
+        plain.accept(0)
+        penalized.accept(0)
+        XCTAssertEqual(pick(&plain, logits), 0)
+        XCTAssertEqual(pick(&penalized, logits), 1)
+    }
+
+    // Wire specials are exempt from the repetition penalties: the markup
+    // a tool round re-emits verbatim must not rot as rounds accumulate
+    // (the 4B degraded its calls round over round under presence 1.5).
+    func testPenaltyExemptSkipsWireTokens() {
+        let penal = SamplerConfig(
+            temperature: 0, presencePenalty: 0.5,
+            setMask: [.temperature, .presencePenalty])
+        var plain = Sampler(vocabSize: 4, config: penal)
+        var exempt = Sampler(vocabSize: 4, config: penal)
+        exempt.penaltyExempt = [0]
+        let logits: [Float] = [1.0, 0.9, 0.1, 0.2]
+        plain.accept(0)
+        exempt.accept(0)
+        XCTAssertEqual(pick(&plain, logits), 1)    // penalized off the top
+        XCTAssertEqual(pick(&exempt, logits), 0)   // exempt keeps its logit
+    }
+
+    func testOverthinkPenaltyLowersMarkers() {
+        let cfg = SamplerConfig(temperature: 0, setMask: [.temperature])
+        var plain = Sampler(vocabSize: 4, config: cfg)
+        var penalized = Sampler(vocabSize: 4, config: cfg)
+        penalized.overthinkTokens = [1]
+        penalized.overthinkLambda = 5.0
+        let logits: [Float] = [1.0, 2.0, 0.5, 0.2]   // token 1 is the max
+        XCTAssertEqual(pick(&plain, logits), 1)       // greedy picks the marker
+        XCTAssertEqual(pick(&penalized, logits), 0)   // penalty pushes it below 0
+    }
+
+    func testOverthinkOffByDefault() {
+        let cfg = SamplerConfig(temperature: 0, setMask: [.temperature])
+        var s = Sampler(vocabSize: 4, config: cfg)
+        s.overthinkTokens = [1]                        // set, but lambda 0
+        let logits: [Float] = [1.0, 2.0, 0.5, 0.2]
+        XCTAssertEqual(pick(&s, logits), 1)            // no bias with lambda 0
+    }
+
+    // DRY suppresses EXTENDING a verbatim repeat: after [1,2,3] has cycled
+    // and the tail sits at ...1,2, the token that would continue the cycle
+    // (3) is penalized exponentially in the match length and greedy picks
+    // elsewhere; without DRY the same logits pick 3.
+    func testDryPenaltyBreaksVerbatimCycle() {
+        let base = SamplerConfig(temperature: 0, setMask: [.temperature])
+        var dry = SamplerConfig(temperature: 0, setMask: [.temperature])
+        dry.dryMultiplier = 0.8
+        var plain = Sampler(vocabSize: 4, config: base)
+        var guarded = Sampler(vocabSize: 4, config: dry)
+        for t in [Int32(1), 2, 3, 1, 2, 3, 1, 2] {
+            plain.accept(t)
+            guarded.accept(t)
+        }
+        let logits: [Float] = [0.0, 0.1, 0.2, 0.5]   // 3 extends the cycle
+        XCTAssertEqual(pick(&plain, logits), 3)
+        XCTAssertNotEqual(pick(&guarded, logits), 3)
+    }
+
+    func testPresetFields() {
+        let p = SamplerConfig.thinkingGeneral
+        XCTAssertEqual(p.temperature, 1.0)
+        XCTAssertEqual(p.topP, 0.95)
+        XCTAssertEqual(p.topK, 20)
+        XCTAssertEqual(p.minP, 0.0)
+        XCTAssertEqual(p.presencePenalty, 1.5)
+        XCTAssertEqual(p.repeatPenalty, 1.0)
+        XCTAssertTrue(p.setMask.contains(.temperature))
+        XCTAssertTrue(p.setMask.contains(.presencePenalty))
+    }
+
+    func testResolvePrecedence() {
+        var user = SamplerConfig.default
+        user.temperature = 0.3
+        user.setMask = [.temperature]
+        var model = SamplerConfig.default
+        model.temperature = 0.9
+        model.topP = 0.5
+        model.setMask = [.temperature, .topP]
+        let out = SamplerConfig.resolve(
+            user: user, model: model, default: .default)
+        XCTAssertEqual(out.temperature, 0.3)
+        XCTAssertEqual(out.topP, 0.5)
+        XCTAssertEqual(out.topK, SamplerConfig.default.topK)
+    }
+
+    func testGenerationConfigParsing() throws {
+        let json = """
+        {"do_sample": true, "temperature": 0.7, "top_p": 0.8,
+         "top_k": 50, "unrelated": "x"}
+        """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gen_cfg_\(UUID().uuidString).json")
+        try json.data(using: .utf8)!.write(to: url)
+        let cfg = try SamplerConfig.from(generationConfig: url)
+        try? FileManager.default.removeItem(at: url)
+        XCTAssertEqual(cfg.temperature, 0.7)
+        XCTAssertEqual(cfg.topP, 0.8)
+        XCTAssertEqual(cfg.topK, 50)
+        XCTAssertTrue(cfg.setMask.contains(.temperature))
+        XCTAssertTrue(cfg.setMask.contains(.topP))
+        XCTAssertTrue(cfg.setMask.contains(.topK))
+        XCTAssertFalse(cfg.setMask.contains(.minP))
+    }
+
+    func testPresetsSelectMatrix() {
+        let p = SamplingPresets.qwen35
+        // Each cell is a distinct card row; select() must not collapse them.
+        XCTAssertEqual(p.select(thinking: true, vision: false).presencePenalty,
+                       1.5)
+        XCTAssertEqual(p.select(thinking: true, vision: true).temperature, 0.6)
+        XCTAssertEqual(p.select(thinking: false, vision: false).topP, 1.0)
+        XCTAssertEqual(p.select(thinking: false, vision: false).presencePenalty,
+                       2.0)
+        XCTAssertEqual(p.select(thinking: false, vision: true).topP, 0.8)
+        // Bonsai (Qwen3.6-27B) diverges: zero presence while thinking.
+        XCTAssertEqual(
+            SamplingPresets.bonsai.select(thinking: true, vision: false)
+                .presencePenalty, 0.0)
+    }
+
+    func testPresetsMatrixParsing() throws {
+        let json = """
+        {"temperature": 1.0, "_sampling_presets": {
+          "thinking_text": {"temperature": 0.9, "presence_penalty": 1.1},
+          "nonthinking_text": {"temperature": 0.3, "top_p": 0.5}}}
+        """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("presets_\(UUID().uuidString).json")
+        try json.data(using: .utf8)!.write(to: url)
+        let p = try SamplingPresets.from(generationConfig: url,
+                                         fallback: .qwen35)
+        try? FileManager.default.removeItem(at: url)
+        // Overridden cells take the file's values; an absent cell keeps the
+        // fallback; an absent field within a cell keeps the fallback's field.
+        XCTAssertEqual(p.thinkingText.temperature, 0.9)
+        XCTAssertEqual(p.thinkingText.presencePenalty, 1.1)
+        XCTAssertEqual(p.thinkingText.topP, 0.95)
+        XCTAssertEqual(p.nonThinkingText.temperature, 0.3)
+        XCTAssertEqual(p.thinkingVision.temperature, 0.6)
+    }
+}
