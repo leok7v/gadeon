@@ -163,9 +163,10 @@ if FileManager.default.fileExists(
     modelsDir = try await HubFetch.fetch(
         repo: src.repo, prefix: "", into: store.appendingPathComponent(arg1),
         revision: src.revision) { s in
-        err("  [\(s.done)/\(s.total)] \(s.file)\n")
+        err(progressLine(s.done, s.total, s.file))
         Task { @MainActor in primer?.observe(s.file, set: setDir) }
     }
+    err("\n")
     primer?.cancel()
 } else {
     modelsDir = direct

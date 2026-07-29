@@ -65,6 +65,10 @@ targets:
         SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        # Ad-hoc ("Sign to Run Locally") on macOS, so a clone builds and runs
+        # on any Mac without membership in the team above. iOS keeps the
+        # managed certificate, which installing on a device requires.
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
         DEFINES_MODULE: YES
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
@@ -94,6 +98,7 @@ targets:
         SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
         # Entitlements set at the TARGET level (not the xcconfig) so Xcode's
         # Signing & Capabilities tab actually shows them. Split by SDK: macOS
         # gets the App Sandbox set (network client + user-selected files); iOS
