@@ -111,6 +111,12 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Mac App Store validation rejects an archive without a category.
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        # Export compliance, declared once here so App Store Connect stops
+        # asking on every upload. The only cryptography in the app is hashing
+        # (CryptoKit SHA256 / SHA1 verifying downloads and stamping the
+        # precook cache) over HTTPS that URLSession provides, all exempt --
+        # nothing encrypts, so the answer is a standing NO.
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         # iPhone stays portrait-only (a chat composer on a narrow landscape
         # strip is useless, and the per-idiom restriction remains supported).
