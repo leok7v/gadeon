@@ -130,22 +130,29 @@ final class AneCache: @unchecked Sendable {
         if let build = osBuild() {
             lock.lock()
             var claims = loadClaims(build)
-            // A cold build (fresh non-empty) REPLACES the claim: every Xcode
-            // install migrates the data container, the path-keyed entries
-            // re-key wholesale, and unioning would keep each install's dead
-            // predecessors claimed forever. A warm build proves nothing new
-            // and keeps the surviving claim. A PARTIAL recompile briefly
-            // orphans the set's still-warm remainder; GC reclaims it and
-            // the next build recompiles those programs once -- self-healing.
+            // A completed build owns every live entry no OTHER set claims.
+            // The diff alone cannot say that: `fresh` is empty on a warm
+            // launch, so anything compiled by a run that DIED before
+            // buildEnded -- a jetsam, a load failure that retried, a kill
+            // during the minutes-long prefill trunk -- stays unclaimed
+            // forever, and GC deletes it one minAge later. Measured on the
+            // 12 mini: 4 claimed of 42 live across three warm launches, with
+            // the other 38 waiting on the hour to expire. Adoption is
+            // self-correcting where the diff is not: the worst case is one
+            // set adopting a neighbour's orphan and that neighbour paying a
+            // single recompile if it is uninstalled, against a GUARANTEED
+            // recompile of the whole trunk otherwise. `old` and `fresh` stay
+            // in: they hold a claim on an entry a sibling set shares.
             let old = Set(claims.sets[key] ?? [])
-            let merged = fresh.isEmpty ? old.intersection(after) : fresh
+            let others = Set(claims.sets.filter { $0.key != key }
+                .values.flatMap { names in names })
+            let merged = old.intersection(after).union(fresh)
+                .union(after.subtracting(others))
             claims.sets[key] = merged.sorted()
             saveClaims(claims, build)
             lock.unlock()
-            log.info("""
-                claim \(key, privacy: .public): +\(fresh.count) \
-                (total \(merged.count))
-                """)
+            report("claim \(key): +\(fresh.count) fresh, \(merged.count) "
+                + "claimed of \(after.count) live")
             if AneCache.cacheMode == .hardlink { shadowLive(build) }
         }
     }
@@ -174,6 +181,15 @@ final class AneCache: @unchecked Sendable {
                 let mb = directoryBytes(dir) >> 20
                 try? FileManager.default.removeItem(at: dir)
                 try? FileManager.default.removeItem(at: shadowDir(build))
+                // The claim names the dead cache's entries, and iOS carries
+                // Application Support across the install while the cache
+                // re-keys -- so it survives as a list of names that can never
+                // exist again. Left behind it does active harm: it is
+                // non-empty, so the gate reads as satisfied and arms GC over
+                // a cache being rebuilt from scratch, and purgeSet targets
+                // its phantom names instead of falling back to a full drop
+                // (observed: "dropped 16 entries" that deleted nothing).
+                try? FileManager.default.removeItem(at: claimsURL(build))
                 report("migration: dropped \(mb) MB dead cache + shadow "
                     + "(re-keyed to a new container path)")
             }
@@ -198,7 +214,9 @@ final class AneCache: @unchecked Sendable {
             collect(dir, build, names)
             if AneCache.cacheMode == .hardlink { pruneStaleShadows(build) }
         } else {
-            log.warning("OS build not parsed; cache keeper idle")
+            // Idle keeper means no claims, no GC and no shadow: every launch
+            // recompiles from scratch, so this must be visible on a device.
+            report("OS build not parsed; cache keeper IDLE")
         }
     }
 
@@ -223,8 +241,14 @@ final class AneCache: @unchecked Sendable {
         let claims = loadClaims(build)
         let seen = loadSeen(build)
         lock.unlock()
+        // The orphan count rides on BOTH paths: entries this set compiled but
+        // no longer claims are what GC deletes, so a claim that stops covering
+        // the cache shows up here as a rising number before the next launch
+        // pays to recompile them.
+        let orphans = names.subtracting(
+            Set(claims.sets.values.flatMap { names in names })).count
         if let hold = gateClosed(claims) {
-            log.info("GC held: \(hold, privacy: .public)")
+            report("GC held: \(hold); \(orphans) unclaimed of \(names.count)")
         } else {
             let claimed = Set(claims.sets.values.flatMap { names in names })
             let fm = FileManager.default
@@ -248,10 +272,8 @@ final class AneCache: @unchecked Sendable {
                     deleted += 1
                 }
             }
-            log.info("""
-                GC: deleted \(deleted) unclaimed entries, \
-                \(bytes >> 20) MB freed
-                """)
+            report("GC: deleted \(deleted) of \(orphans) unclaimed entries, "
+                + "\(bytes >> 20) MB freed")
         }
     }
 
