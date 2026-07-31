@@ -136,6 +136,7 @@ let turnArgs = (rawArgs.count > 2 ? Array(rawArgs[2...]) : [])
 
 probeCompile()
 if rawArgs.contains("--count") { try probeCount() }
+if rawArgs.contains("--place") { try await placeProbe() }
 await probeNet()
 
 if arg1.hasSuffix(".gguf") { try await runGgufMain() }

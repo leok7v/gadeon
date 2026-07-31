@@ -219,7 +219,7 @@ func probeWrap(_ user: String) -> String {
 // MTP self-speculative decode: draft `--spec-n` tokens (default 3) with the MTP
 // head, verify + accept + host-rollback per cycle, decode `-n` tokens, report tg
 // t/s + tokens-per-cycle (acceptance). Requires the set to carry mtp_front/back +
-// the S=8 verify trunk (verify{i}of{n}), deployed alongside the base programs.
+// the verify trunk (verify{i}of{n}), deployed alongside the base programs.
 @MainActor func benchMTP() async throws {
     await eng.loadMTP()
     let text = turnArgs.first(where: { !$0.hasPrefix("-") }) ?? benchPrompt
@@ -314,9 +314,12 @@ func probeWrap(_ user: String) -> String {
         return (matches, n, firstDiff)
     }
 
-    // Verify needs L=n+1 >= convTaps (3), so the smallest valid draft count is 2.
-    let nA = max(2, specN)
-    let nB = nA + 2
+    // Verify needs L=n+1 >= convTaps (3), so the smallest valid draft count is
+    // 2, and L <= S caps it at the loaded trunk's width - 1: an S=4 trunk
+    // (enough for the n<=3 the decoder ever drafts) cannot verify n=4.
+    let cap = await eng.verifyChunk() - 1
+    let nA = min(max(2, specN), cap)
+    let nB = min(nA + 2, cap)
     let base = try await plainRef()
     let specA = try await specRun(nA)
     let specB = try await specRun(nB)
@@ -362,4 +365,86 @@ func probeWrap(_ user: String) -> String {
     print("PROBE ids: \(out)")
     print("PROBE txt: \(tok.decode(out))")
     exit(0)
+}
+
+// Per-op ANE placement audit of a whole model set (MLComputePlan) -- the Swift
+// counterpart of the Python placement gate, run with no Python. For every
+// .mlmodelc the engine loads, count where each op lands and FAIL if a planned
+// function runs under 99% on the Neural Engine: a silent CPU/GPU fallback is
+// invisible at runtime, since the tokens come out correct either way. Reads
+// the compiled programs only -- no engine, no weights.
+//   gadeon-cli <set> --place        (add --cpu to audit the CPU_ONLY plan)
+
+@MainActor func placeProbe() async throws {
+    let store = URL(fileURLWithPath: "models")
+    let direct = URL(fileURLWithPath: arg1)
+    let dir = FileManager.default.fileExists(
+        atPath: direct.appendingPathComponent("tokenizer.json").path)
+        ? direct : (ModelCatalog.localSet(arg1, in: store) ?? direct)
+    let units: MLComputeUnits = cpuOnly ? .cpuOnly : .cpuAndNeuralEngine
+    let entries = (try? FileManager.default
+        .contentsOfDirectory(atPath: dir.path)) ?? []
+    let files = entries.filter { n in n.hasSuffix(".mlmodelc") }.sorted()
+    if files.isEmpty { err("no .mlmodelc in \(dir.path)\n"); exit(2) }
+    err("placement audit of \(files.count) programs in "
+        + "\(dir.lastPathComponent) "
+        + "(\(cpuOnly ? "CPU_ONLY" : "CPU_AND_NE"))\n")
+    var rows: [Placement.Result] = []
+    for name in files {
+        rows += try await placeProgram(dir.appendingPathComponent(name),
+                                       name, units)
+    }
+    let overall = Placement.gate(rows)
+    print("PLACE overall: \(overall ? "PASS" : "FAIL")")
+    exit(overall ? 0 : 1)
+}
+
+// Audit every function one program carries, print a row each, and return those
+// rows so the caller gates over the whole set. MLComputePlan plans only a
+// package's DEFAULT function, so when every per-function audit comes back with
+// the same fingerprint the functionName was ignored -- collapse to a single
+// honest "default" row instead of repeating one plan under several names.
+
+@MainActor func placeProgram(_ url: URL, _ name: String,
+                             _ units: MLComputeUnits) async throws
+    -> [Placement.Result] {
+    var fns = PrimePlan.plan(at: url)
+    if fns.isEmpty { fns = [nil] }
+    var audited: [Placement.Result] = []
+    for fn in fns {
+        audited.append(try await Placement.audit(url, function: fn,
+                                                 computeUnits: units))
+    }
+    let uniform = Set(audited.map { r in r.counts }).count == 1
+    let collapsed = audited.count > 1 && uniform
+    let labels = collapsed
+        ? ["\(name):default (only the default fn is planned)"]
+        : fns.map { fn in "\(name)\(fn.map { f in ":\(f)" } ?? "")" }
+    let rows = collapsed ? [audited[0]] : audited
+    for (label, r) in zip(labels, rows) { placeRow(label, r) }
+    return rows
+}
+
+// One audit row: the counts, the NE percentage, the verdict, and the ops that
+// landed off the engine (worst first) when there are any.
+
+@MainActor func placeRow(_ label: String, _ r: Placement.Result) {
+    if r.planned {
+        let ok = r.pctNE >= Placement.minNEPercent
+        print(String(format: "PLACE %@: NE=%d GPU=%d CPU=%d unknown=%d "
+            + "placed=%d -> %.2f%% NE %@", label, r.ne, r.gpu, r.cpu,
+            r.unknown, r.placed, r.pctNE, ok
+                ? "PASS"
+                : "FAIL (<\(Int(Placement.minNEPercent))% NE)"))
+        if !r.offenders.isEmpty {
+            let top = r.offenders
+                .sorted { a, b in a.value > b.value }
+                .prefix(8)
+                .map { entry in "\(entry.key)x\(entry.value)" }
+                .joined(separator: " ")
+            print("  off the engine: \(top)")
+        }
+    } else {
+        print("PLACE \(label): not planned (skip)")
+    }
 }

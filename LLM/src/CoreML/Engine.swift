@@ -189,12 +189,18 @@ public actor Engine {
     // greedy-only.
     private var sampler: Sampler?
     // MTP self-speculative decode (loadMTP installs these; nil -> plain
-    // decode). The drafter (one attention layer, its own KV) + the S=8 verify
+    // decode). The drafter (one attention layer, its own KV) + the verify
     // trunk that emits GDN rollback ingredients. specHidden carries the base
     // hidden that seeds the next draft.
     private var mtpFront: MLModel?
     private var mtpBack: MLModel?
     private var verifyProgs: [MLModel]?
+    // Verify chunk width, read from the loaded verify trunk's own `hidden`
+    // input; 0 until one loads. The verify pass and the host rollback's chunk
+    // both read it, so a set baked narrower (4 positions is enough for the
+    // n<=3 drafts spec decode ever asks for) runs a matching pass and rollback
+    // with no constant to keep in step.
+    private var verifyS = 0
     private var mtpPool: PagePool?
     private var specHidden: MLMultiArray?
     // Optional batched lm_head [S,dim]->[S,vocab]: one weight-read verifies all
@@ -405,6 +411,28 @@ public actor Engine {
             throw cause ?? EngineError.missingModel(name)
         }
         return model!
+    }
+
+    // Unwrap a geometry value the model was supposed to declare. Same shape as
+    // require above, for the reads that are not models: a set that fails to
+    // declare one is broken, and saying so beats substituting a plausible
+    // number (see the G=4 class of bug the I/O-derived geometry exists to
+    // prevent).
+
+    private static func require<T>(_ value: T?, _ what: String) throws -> T {
+        if value == nil {
+            throw EngineError.missingModel(what)
+        }
+        return value!
+    }
+
+    // The leading dimension of a program's `hidden` input -- the chunk width it
+    // was compiled for. The verify trunk and the batched verify head each carry
+    // their own, and they must agree; nothing here reads a file name.
+
+    private static func hiddenWidth(_ model: MLModel) -> Int? {
+        model.modelDescription.inputDescriptionsByName["hidden"]?
+            .multiArrayConstraint?.shape.first?.intValue
     }
 
     // model.mil size (lines + KB) for the compile log. A multifunction file
@@ -2163,7 +2191,7 @@ public actor Engine {
 
     // ===================== MTP self-speculative decode =====================
     // Draft n tokens with the one-attention-layer MTP head, verify them in ONE
-    // base pass (the S=8 verify trunk), accept the matching prefix + 1 bonus,
+    // base pass (the verify trunk), accept the matching prefix + 1 bonus,
     // then roll the base GDN state back to the accepted length on the host
     // (no 2nd trunk pass).
 
@@ -2183,7 +2211,7 @@ public actor Engine {
     private var pCycles = 0
 
     // Averaged per-cycle ms of each spec phase (draft = MTP + draft heads;
-    // verify = the S=8 trunk pass;
+    // verify = the trunk pass;
     // accept = the per-row verify heads (~m, early-stop);
     // rest = rollback + KV maintenance).
 
@@ -2193,7 +2221,7 @@ public actor Engine {
         return (pDraft / n, pVerify / n, pAccept / n, pRest / n, pCycles)
     }
 
-    // AUTODETECT: load the drafter (mtp_front/back) + the S=8 verify trunk +
+    // AUTODETECT: load the drafter (mtp_front/back) + the verify trunk +
     // the batched verify head IF the set ships them. On current sets the
     // verify trunk is the mf programs' "verify" FUNCTION and the batched head
     // is head.mlmodelc's "lm_head_batched" FUNCTION -- both share their
@@ -2235,6 +2263,8 @@ public actor Engine {
                 mtpFront = front
                 mtpBack = back
                 verifyProgs = vp
+                verifyS = try Engine.require(Engine.hiddenWidth(vp[0]),
+                                             "verify hidden width")
                 mtpPool = PagePool(P: pageP, kvHeads: kvHeads, dh: dhAttn)
                 let hasLmhead = fm.fileExists(atPath:
                     dir.appendingPathComponent("mtp_lmhead.mlmodelc").path)
@@ -2244,9 +2274,23 @@ public actor Engine {
                     : try? Engine.loadNamed(dir, "head.mlmodelc", cfg,
                                             function: "lm_head_batched",
                                             report: report)
+                // The batched head is fed the verify trunk's rows verbatim, so
+                // a head baked to a different width cannot serve them; drop it
+                // for the per-row path rather than fail at the first accept.
+                // Only a head that DECLARES a conflicting width is dropped: one
+                // that declares none is left alone, since dropping it would
+                // cost the batched read on nothing more than a missing shape.
+                if let head = lmHeadBatched, let wide = Engine.hiddenWidth(head),
+                   wide != verifyS {
+                    log.warning("""
+                        batched verify head is \(wide) wide, verify trunk is \
+                        \(self.verifyS); using per-row heads
+                        """)
+                    lmHeadBatched = nil
+                }
                 log.info("""
                     MTP drafter + verify trunk loaded (\(self.nProg) progs, \
-                    standalone \(standalone), \
+                    standalone \(standalone), S \(self.verifyS), \
                     batched-head \(self.lmHeadBatched != nil))
                     """)
             } catch {
@@ -2259,6 +2303,12 @@ public actor Engine {
     }
 
     public func mtpReady() -> Bool { mtpFront != nil && verifyProgs != nil }
+
+    // The loaded verify trunk's chunk width. A cycle verifies n+1 rows, so it
+    // caps the draft count at verifyChunk()-1; a caller that asks for more is
+    // asking the trunk to hold rows it was not compiled for.
+
+    public func verifyChunk() -> Int { verifyS }
 
     // Committed-but-undelivered spec tokens: already in the KV/GDN state,
     // not yet handed out by decode(). The turn loop checks this before
@@ -2498,7 +2548,7 @@ public actor Engine {
         return out
     }
 
-    // Run the S=8 verify trunk over `ids` (real rows, pmask), returning the
+    // Run the verify trunk over `ids` (real rows, pmask), returning the
     // per-row hiddens [S,dim] and, per GDN layer, the rollback ingredients.
     // Appends the L real k/v to the base attention pools; does NOT mutate
     // gdnState (the host rolls it back after acceptance).
@@ -2507,8 +2557,11 @@ public actor Engine {
         -> (MLMultiArray, [Int: (delta: [Float], k: [Float], gcum: [Float],
                                  conv: [Float])],
             [Int: (rec: MLMultiArray, conv: MLMultiArray)]) {
-        let S = 8
+        let S = verifyS
         let L = ids.count
+        // embedRows writes L rows into an S-row block, so a chunk wider than
+        // the trunk was compiled for would run off the end of it.
+        precondition(L <= S, "verify chunk holds \(S) rows, got \(L)")
         var hidden = try embedRows(ids, S)
         let cos = try ropeBatched(false, p0 + ropeShift, S)
         let sin = try ropeBatched(true, p0 + ropeShift, S)
@@ -2561,7 +2614,7 @@ public actor Engine {
     // Verify-chunk attention on the host: append each of the L real rows' k/v
     // to the pool and flash that row's query over the pool so far (causal),
     // so row s attends history + verify rows 0..s. Tile-free (the batched
-    // ANE tiles are sized for the S=128 carry, not S=8).
+    // ANE tiles are sized for the S=128 carry, not the verify chunk).
     // Returns attn_out [KVH,S,G,DH] + gate.
 
     private func verifyAttn(_ out: MLFeatureProvider, _ front: Int,
@@ -2627,7 +2680,10 @@ public actor Engine {
                              _ stateOut: [Int: (rec: MLMultiArray,
                                                 conv: MLMultiArray)],
                              m: Int, L: Int) throws {
-        let C = 8
+        // The verify trunk is single-chunk, so its chunk width IS its S: the
+        // rollback ingredients arrive C-per-head and reading them at any other
+        // stride walks off the end of the array.
+        let C = verifyS
         for (i, ing) in ingr {
             if m == L, let so = stateOut[i] {
                 // Full accept: the verify already advanced the state to exactly

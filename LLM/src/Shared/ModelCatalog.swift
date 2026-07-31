@@ -45,13 +45,19 @@ public enum ModelCatalog {
             repo: "leok7v/QwenPaw-Flash-2B-coreml",
             revision: "9cf1086cdf9bc9ca653df488061c75986679a974",
             bytes: 1_640_000_000),
+        // The 4B and 9B come from the -MTP repos: their trunks carry a third
+        // "verify" function in the same weight blob, so self-speculative
+        // decode costs only the drafter (4B +86 MB, 9B +174 MB) rather than a
+        // second copy of the weights. Both drafters are baked from the origin
+        // Qwen3.5 safetensors, and the 4B's shared-blob verify makes its
+        // speculative output identical to its own greedy decode.
         "QwenPaw-Flash-4B": Source(
-            repo: "leok7v/QwenPaw-Flash-4B-coreml",
-            revision: "f7ef055a7e4a42f8eca02893a954293906ac3302",
-            bytes: 3_860_000_000),
+            repo: "leok7v/QwenPaw-Flash-4B-MTP-coreml",
+            revision: "d20d2c120980b4802dfcd1686865fc1a969276af",
+            bytes: 3_951_000_000),
         "QwenPaw-Flash-9B": Source(
-            repo: "leok7v/QwenPaw-Flash-9B-coreml",
-            revision: "72d582d394b8848a6bc397d7d687253bd073cdff",
+            repo: "leok7v/QwenPaw-Flash-9B-MTP-coreml",
+            revision: "84e90005d20dcdf0d5fcbb53564176373651a1b5",
             bytes: 7_854_000_000),
         // The ternary 27B GGUF served by the unified engine: the Q2_0 weight
         // file, the Q8_0 vision tower (measured transparent vs BF16, cos
