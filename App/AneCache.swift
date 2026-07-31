@@ -211,12 +211,49 @@ final class AneCache: @unchecked Sendable {
                 report("shadow \(build): \(sn) entries "
                     + "\(directoryBytes(sdir) >> 20) MB at \(sdir.path)")
             }
+            pruneDeadClaims(build)
             collect(dir, build, names)
             if AneCache.cacheMode == .hardlink { pruneStaleShadows(build) }
         } else {
             // Idle keeper means no claims, no GC and no shadow: every launch
             // recompiles from scratch, so this must be visible on a device.
             report("OS build not parsed; cache keeper IDLE")
+        }
+    }
+
+    // Drop claims whose set is no longer on disk. HubFetch.prune() removes the
+    // superseded {oldsha} tree when a catalog revision moves, but its claim
+    // outlives it, and GC unions EVERY claim -- installed or not -- so those
+    // entries become permanently unreclaimable. Measured on the Mac after the
+    // 4B was repointed at the MTP repo: a 20-entry claim for the dead revision
+    // pinning 913 MB that nothing could ever free. This is the counterpart to
+    // adopting live entries in buildEnded: adoption stops GC deleting what a
+    // set still uses, and this stops claims outliving the set that made them.
+    // Guarded on a NON-EMPTY store, so a store that is momentarily unreadable
+    // prunes nothing rather than unclaiming the whole cache and feeding it to
+    // GC.
+    private func pruneDeadClaims(_ build: String) {
+        let fm = FileManager.default
+        let store = Bundle.modelStore()
+        let installed = (try? fm.contentsOfDirectory(atPath: store.path)) ?? []
+        if !installed.isEmpty {
+            lock.lock()
+            var claims = loadClaims(build)
+            let gone = claims.sets.keys.filter { key in
+                !fm.fileExists(
+                    atPath: store.appendingPathComponent(key).path)
+            }
+            for key in gone {
+                claims.sets.removeValue(forKey: key)
+            }
+            if !gone.isEmpty {
+                saveClaims(claims, build)
+            }
+            lock.unlock()
+            if !gone.isEmpty {
+                report("claims: dropped \(gone.count) for uninstalled set(s) "
+                    + gone.sorted().joined(separator: ", "))
+            }
         }
     }
 

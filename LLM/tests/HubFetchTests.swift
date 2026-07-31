@@ -21,7 +21,9 @@ struct HubFetchTests {
                 let dst = FileManager.default.temporaryDirectory
                     .appendingPathComponent("hubtest-\(sha).json")
                 try? FileManager.default.removeItem(at: dst)
-                try await HubFetch.pull(repo, sha, cfg, dst) { _ in }
+                let pump = Pump()
+                try await HubFetch.pull(repo, sha, cfg, dst, pump) { _ in }
+                pump.done()
                 #expect(FileManager.default.fileExists(atPath: dst.path))
                 try? FileManager.default.removeItem(at: dst)
             }
