@@ -173,19 +173,37 @@ Two separate things end up on disk:
 
 ## License
 
-Gadeon is free software: you can redistribute it and/or modify it under the
-terms of the GNU General Public License as published by the Free Software
+Gadeon is **GPLv3 or later**. That is arithmetic, not preference -- it is the
+strongest obligation among the parts it is built from:
+
+| part | source | licence |
+|---|---|---|
+| speech model + voices | [KittenTTS](https://github.com/KittenML/KittenTTS) by KittenML | Apache-2.0 |
+| English pronunciation data (`en_rules`, `en_list`) | [eSpeak NG](https://github.com/espeak-ng/espeak-ng) | **GPLv3 or later** |
+| everything else here | this repo | Copyright (C) 2026 Leo Kuznetsov |
+
+The pronunciation data is copyleft, and eSpeak NG grants **no exception for a
+program's output** -- so shipping those files, or a lexicon derived by running
+them, carries the same terms rather than escaping them. Apache-2.0 is
+one-way compatible with GPLv3 (it may be combined into a GPLv3 work, though
+not GPLv2), which is why the result is GPL **v3** specifically and cannot be
+anything more permissive.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
 Foundation, either version 3 of the License, or (at your option) any later
 version. See [LICENSE](LICENSE).
 
-Copyright (C) 2026 Leo Kuznetsov
-
 It is distributed in the hope that it will be useful, but WITHOUT ANY
-WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
-FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
-details.
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
-The English pronunciation data the speech path uses (`en_rules`, `en_list`)
-comes from eSpeak NG, Copyright (C) 2005-2014 Jonathan Duddington and
-Copyright (C) 2016-2017 Reece H. Dunn, under the same licence. Model weights
-are covered by their own upstream licences, not by this repo's.
+### Credits
+
+- **[KittenML / KittenTTS](https://github.com/KittenML/KittenTTS)** -- the
+  speech model and its eight voices, Apache-2.0.
+- **[eSpeak NG](https://github.com/espeak-ng/espeak-ng)** -- the English
+  letter-to-sound rules and exception dictionary, Copyright (C) 2005-2014
+  Jonathan Duddington and Copyright (C) 2016-2017 Reece H. Dunn, GPLv3+.
+
+Model weights are covered by their own upstream licences, not by this repo's.
