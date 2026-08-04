@@ -1,0 +1,580 @@
+import Foundation
+import Metal
+import Testing
+@testable import LLM
+
+// Op-by-op gate for the gemma-4 Metal kernels against the SIMD engine, which
+// is itself gated against the Python reference dump. Every case runs on REAL
+// tensors out of the repacked GGUF rather than synthetic data: the layouts
+// these kernels get wrong are layouts (the Q4_0 nibble split, BF16's top-16
+// bits, the rope pairing), and synthetic weights of the right shape would pass
+// a kernel that reads the right bytes in the wrong order.
+//
+// Network-free but weight-gated: set GADEON_GEMMA_GGUF to the repacked file.
+
+private struct MetalHarness {
+    let model: Gemma4Model
+    let ctx: MetalContext
+
+    init(_ path: String) throws {
+        model = try Gemma4Model(path: path)
+        ctx = try MetalContext(model.gguf)
+    }
+
+    func off(_ t: GGUFTensor) -> WeightRef {
+        ctx.window(UInt64(t.base - model.gguf.map))
+    }
+
+    // Encode one kernel, run it, and hand back the output buffer's floats.
+    func run(_ n: Int, _ body: (MetalEnc) -> Void) -> [Float] {
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        body(MetalEnc(ctx: ctx, e: e))
+        e.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        #expect(cb.error == nil)
+        return []
+    }
+}
+
+// Cosine of two equal-length vectors; 1.0 is identical direction.
+private func cosine(_ a: [Float], _ b: [Float]) -> Double {
+    var dot = 0.0, na = 0.0, nb = 0.0
+    for i in 0..<min(a.count, b.count) {
+        dot += Double(a[i]) * Double(b[i])
+        na += Double(a[i]) * Double(a[i])
+        nb += Double(b[i]) * Double(b[i])
+    }
+    return dot / ((na.squareRoot() * nb.squareRoot()) + 1e-30)
+}
+
+private func maxAbsDiff(_ a: [Float], _ b: [Float]) -> Float {
+    var m: Float = 0
+    for i in 0..<min(a.count, b.count) { m = max(m, abs(a[i] - b[i])) }
+    return m
+}
+
+// A deterministic activation vector: the kernels are linear in x, so a fixed
+// pseudo-random spread exercises every sign and magnitude a real hidden does.
+private func activations(_ n: Int) -> [Float] {
+    var out = [Float](repeating: 0, count: n)
+    var s: UInt64 = 0x9E3779B97F4A7C15
+    for i in 0..<n {
+        s = s &* 6364136223846793005 &+ 1442695040888963407
+        out[i] = Float(Int32(truncatingIfNeeded: s >> 33)) / Float(1 << 30)
+    }
+    return out
+}
+
+struct GemmaMetalKernelTests {
+    // Q4_0 carries the attention projections, layers 0-14's MLP and the
+    // per-layer embedding table -- the majority of the text tower's compute,
+    // and a block type this Metal backend had no kernel for at all.
+    @Test(needsGemmaWeights) func q4GemvMatchesSIMD() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        let w = h.model.layers[0].wq
+        #expect(w.type == .q4_0)
+        let K = w.dims[0], M = w.dims[1]
+        let x = activations(K)
+        var want = [Float](repeating: 0, count: M)
+        GQ.matvec(w, x: x, out: &want)
+
+        let xb = h.ctx.makeF32(x)
+        let ob = h.ctx.makeF32(M)
+        _ = h.run(M) { f in
+            f.gemv(w, x: xb, out: ob, off: h.off(w))
+        }
+        let got = Array(ob.f32(M))
+        let cos = cosine(want, got)
+        #expect(cos >= 0.99999,
+                "q4_0_gemv cosine \(cos), maxAbs \(maxAbsDiff(want, got))")
+    }
+
+    // The Q2_0 path must keep working through the newly type-dispatched gemv:
+    // gemma's layers 15-34 MLP and its lm_head are Q2_0, and so is every
+    // ternary Bonsai weight.
+    @Test(needsGemmaWeights) func q2GemvStillMatchesSIMD() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        let w = h.model.layers[h.model.cfg.nLayer - 1].ffnDown
+        #expect(w.type == .q2_0)
+        let K = w.dims[0], M = w.dims[1]
+        let x = activations(K)
+        var want = [Float](repeating: 0, count: M)
+        GQ.matvec(w, x: x, out: &want)
+
+        let xb = h.ctx.makeF32(x)
+        let ob = h.ctx.makeF32(M)
+        _ = h.run(M) { f in
+            f.gemv(w, x: xb, out: ob, off: h.off(w))
+        }
+        let got = Array(ob.f32(M))
+        let cos = cosine(want, got)
+        #expect(cos >= 0.99999, "q2_0_gemv cosine \(cos)")
+    }
+
+    // The embedding gathers. The two tables do NOT share a type -- the QAT
+    // spent 4 bits on the per-layer table and 2 on token_embd -- so each is
+    // dequanted through its own kernel, and the assertions pin that split so a
+    // re-emit that moves either one fails here rather than in a hidden state.
+    @Test(needsGemmaWeights) func dequantRowMatchesSIMDForBothTables() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        let c = h.model.cfg
+        #expect(h.model.tokEmbd.type == .q2_0)
+        #expect(h.model.perLayerEmbd.type == .q4_0)
+        let cases = [(h.model.tokEmbd, c.nEmbd, "token_embd"),
+                     (h.model.perLayerEmbd, c.nLayer * c.perLayerDim,
+                      "per_layer_token_embd")]
+        for (t, n, label) in cases {
+            let row = 1234
+            var want = [Float](repeating: 0, count: n)
+            GQ.dequantSpan(t, row: row, from: 0, count: n, into: &want)
+
+            let ob = h.ctx.makeF32(n)
+            let rowOff = h.off(t) + UInt64(row * GQ.rowBytes(t))
+            _ = h.run(n) { f in
+                f.dequantRow(weightOff: rowOff, out: ob, n: n,
+                             type: t.type)
+            }
+            let got = Array(ob.f32(n))
+            let diff = maxAbsDiff(want, got)
+            #expect(diff == 0,
+                    "\(label) dequant is a pure unpack: maxAbs \(diff)")
+        }
+    }
+
+    // Every gemma norm is BF16; reading one as f32 fuses two weights into one
+    // garbage float, so this is the case that fails loudly rather than subtly.
+    @Test(needsGemmaWeights) func bf16RmsnormMatchesSIMD() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        let t = h.model.gguf.tensor("blk.0.attn_norm.weight")
+        #expect(t.type == .bf16)
+        let n = h.model.cfg.nEmbd
+        let x = activations(n)
+        let w = Dense.floats(t)
+        let want = GK.rmsnorm(x, w, h.model.cfg.eps)
+
+        let xb = h.ctx.makeF32(x)
+        let ob = h.ctx.makeF32(n)
+        _ = h.run(n) { f in
+            f.rmsnormBF16(x: xb, weightOff: h.off(t), out: ob, n: n,
+                          eps: h.model.cfg.eps)
+        }
+        let got = Array(ob.f32(n))
+        let cos = cosine(want, got)
+        let diff = maxAbsDiff(want, got)
+        #expect(cos >= 0.99999,
+                "rmsnorm_bf16 cosine \(cos) maxAbs \(diff)")
+    }
+
+    // v_norm leaves no tensor in the checkpoint, so nothing but the source
+    // says it exists -- and it divides by the RMS, not the L2 norm.
+    @Test(needsGemmaWeights) func noWeightRmsnormMatchesSIMD() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        let hd = h.model.cfg.headDimSliding
+        let rows = 4
+        var want = activations(hd * rows)
+        let x = want
+        GK.rmsnormRowsNoWeight(&want, d: hd, rows: rows,
+                               eps: h.model.cfg.eps)
+
+        let xb = h.ctx.makeF32(x)
+        _ = h.run(hd * rows) { f in
+            f.rmsnormRowsNoWeight(x: xb, xoff: 0, d: hd, rows: rows,
+                                  eps: h.model.cfg.eps)
+        }
+        let got = Array(xb.f32(hd * rows))
+        let cos = cosine(want, got)
+        #expect(cos >= 0.99999, "rmsnorm_rows_noweight cosine \(cos)")
+    }
+
+    // gemma's 7 full-attention layers are head_dim 512, which the paged
+    // attention kernel could not express: its V accumulator was two 128-dim
+    // float4 slices. Both widths run here, so a regression at 256 (every
+    // ternary geometry) fails alongside the new one. K/V are written as half
+    // and the reference reads those SAME halves back, so what is measured is
+    // the kernel and not fp16 rounding.
+    @Test(needsGemmaWeights) func pagedAttentionMatchesReferenceAt256And512() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        for hd in [256, 512] {
+            let nH = 2, nKV = 1, T = 40, P = 32
+            let pool = MetalKVPool(device: h.ctx.device, P: P,
+                                   kvDim: hd * nKV)
+            pool.appendBatch(T)
+            // Fill the pages directly: this gate is about the read path.
+            let src = activations(T * hd * nKV * 2)
+            var kHalf = [Float](repeating: 0, count: T * hd)
+            var vHalf = [Float](repeating: 0, count: T * hd)
+            for t in 0..<T {
+                let page = pool.kPages[t / P], vpage = pool.vPages[t / P]
+                let kp = page.contents()
+                    .assumingMemoryBound(to: Float16.self)
+                let vp = vpage.contents()
+                    .assumingMemoryBound(to: Float16.self)
+                for i in 0..<hd {
+                    let kv = src[t * hd + i]
+                    let vv = src[T * hd + t * hd + i]
+                    kp[(t % P) * hd + i] = Float16(kv)
+                    vp[(t % P) * hd + i] = Float16(vv)
+                    kHalf[t * hd + i] = Float(Float16(kv))
+                    vHalf[t * hd + i] = Float(Float16(vv))
+                }
+            }
+            pool.refreshTable()
+
+            let q = activations(hd * nH)
+            var want = [Float](repeating: 0, count: hd * nH)
+            for head in 0..<nH {
+                var sc = [Float](repeating: 0, count: T)
+                for t in 0..<T {
+                    var s: Float = 0
+                    for i in 0..<hd {
+                        s += q[head * hd + i] * kHalf[t * hd + i]
+                    }
+                    sc[t] = s
+                }
+                GK.softmaxInPlace(&sc, T)
+                for t in 0..<T {
+                    for i in 0..<hd {
+                        want[head * hd + i] += sc[t] * vHalf[t * hd + i]
+                    }
+                }
+            }
+
+            let qb = h.ctx.makeF32(q)
+            let ob = h.ctx.makeF32(hd * nH)
+            let gate = h.ctx.makeF32(hd * nH)
+            _ = h.run(hd * nH) { f in
+                f.attnPaged(q: qb, kAddr: pool.kAddr, vAddr: pool.vAddr,
+                            pages: pool.residentPages, gate: gate,
+                            out: ob, hd: hd, nH: nH, nKV: nKV, T: T,
+                            kvDim: hd * nKV, P: P, scale: 1, gated: 0)
+            }
+            let got = Array(ob.f32(hd * nH))
+            let cos = cosine(want, got)
+            let diff = maxAbsDiff(want, got)
+            #expect(cos >= 0.9999,
+                    "attn_head hd=\(hd) cosine \(cos) maxAbs \(diff)")
+        }
+    }
+
+    // Rollback is index-based, so this proves the indexes are the whole story:
+    // decoding, rewinding, and decoding again must replay the SAME tokens. If
+    // a pool's length were not enough to describe the state -- a stale page, a
+    // position left advanced -- the replay would drift.
+    @Test(needsGemmaWeights) func bookmarkRewindReplaysIdentically() throws {
+        let path = try #require(gemmaGgufPath)
+        let model = try Gemma4Model(path: path)
+        let eng = try Gemma4MetalEngine(model)
+        eng.reset()
+        var next = eng.extend([2, 106, 1645, 236764, 1653])
+        let mark = eng.bookmark()
+        var first: [Int32] = []
+        for _ in 0..<6 {
+            first.append(next)
+            next = eng.decode(next)
+        }
+        eng.restore(mark)
+        var again: [Int32] = []
+        var n2 = first.first ?? next
+        for _ in 0..<6 {
+            again.append(n2)
+            n2 = eng.decode(n2)
+        }
+        #expect(first == again,
+                "rewind replay diverged: \(first) vs \(again)")
+    }
+
+    // The batched GEMM per weight type, against the SIMD matvec row by row.
+    // A GEMM is where a block-walk bug hides: the gemv can be right and the
+    // matrix twin still unpack the wrong nibble, and assembling a tower on
+    // top of that produces garbage with no obvious origin.
+    @Test(needsGemmaWeights) func batchedGemmMatchesSIMDPerType() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        let cases = [
+            ("q4_0 lconv_start", h.model.gguf.tensor(
+                "a.blk.0.lconv_start.weight")),
+            ("q2_0 ffw1_up", h.model.gguf.tensor(
+                "a.blk.0.ffw1_up.weight")),
+            ("q8_0 vision q", h.model.gguf.tensor(
+                "v.blk.0.attn_q.weight")),
+        ]
+        for (label, w) in cases {
+            let K = w.dims[0], M = w.dims[1]
+            let rows = 8
+            let x = activations(rows * K)
+            var want = [Float](repeating: 0, count: rows * M)
+            var one = [Float](repeating: 0, count: M)
+            for r in 0..<rows {
+                let slice = Array(x[(r * K)..<((r + 1) * K)])
+                GQ.matvec(w, x: slice, out: &one)
+                for m in 0..<M { want[r * M + m] = one[m] }
+            }
+            let xb = h.ctx.makeF32(x)
+            let ob = h.ctx.makeF32(rows * M)
+            _ = h.run(rows * M) { f in
+                f.gemm(w, X: xb, out: ob, off: h.off(w), N: rows)
+            }
+            let got = Array(ob.f32(rows * M))
+            let cos = cosine(want, got)
+            #expect(cos >= 0.9999, "\(label) gemm cosine \(cos)")
+        }
+    }
+
+    // The soft-token entry point on both engines. What it pins is that the
+    // GPU path agrees with the CPU one and that the FEATURE actually reaches
+    // the hidden -- the two ways this can regress silently. It deliberately
+    // does not pin the contract itself (pad-row gather, unscaled entry): that
+    // is held by the end-to-end transcript matching HF, because every wrong
+    // variant of it still produces fluent text.
+    @Test(needsGemmaWeights) func softTokenForwardMatchesAcrossEngines() throws {
+        let path = try #require(gemmaGgufPath)
+        let model = try Gemma4Model(path: path)
+        let cpu = Gemma4Engine(model)
+        let gpu = try Gemma4MetalEngine(model)
+        let e = model.cfg.nEmbd
+        // Tower features are order-1, not order-1e-3; a feature small
+        // enough to vanish under the residual would prove nothing.
+        let one = activations(e).map { v in v * 4 }
+        let two = activations(2 * e).suffix(e).map { v in v * 4 }
+        // ONE cpu forward: `swift test` builds Debug, where a 35-layer
+        // SIMD pass costs ~40s, so the second feature goes through the
+        // GPU instead of doubling the suite's runtime.
+        cpu.reset()
+        gpu.reset()
+        let hCpu = cpu.forward(embedding: one, pos: 0)
+        gpu.forward(embedding: one, pos: 0)
+        let hGpu = gpu.hidden()
+        let across = cosine(hCpu, hGpu)
+        #expect(across >= 0.95,
+                "soft token cpu vs gpu hidden cosine \(across)")
+
+        // A second feature must move the hidden. If the splice dropped
+        // the feature on the floor, both would land on the same answer
+        // and every earlier check would still pass.
+        gpu.reset()
+        gpu.forward(embedding: Array(two), pos: 0)
+        let moved = cosine(hGpu, gpu.hidden())
+        let why = "a different feature left the hidden at \(moved); "
+            + "the soft token is being ignored"
+        #expect(moved < 0.999, "\(why)")
+    }
+
+    // The trained activation clamp. It must be BIT-IDENTICAL to the SIMD one,
+    // not merely close: round() is a step function, so a lane that rounds
+    // half away from zero where the other rounds half to even lands a whole
+    // scale unit off, and the audio tower amplifies that ~175x by its last
+    // layers. Real scales from the file, because a round number would never
+    // produce the exact .5 that separates the two rules.
+    @Test(needsGemmaWeights) func srqMatchesSIMDBitExactly() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        let g = h.model.gguf
+        let scales = [g.double("gemma4.srq.a.blk.0.attn_q.in") ?? 0,
+                      g.double("gemma4.srq.a.blk.0.lconv_end.out") ?? 0,
+                      g.double("gemma4.srq.blk.0.attn_q.in") ?? 0]
+        #expect(scales.allSatisfy { v in v != 0 })
+        let n = 4096
+        for scale in scales {
+            let s = Float(scale)
+            // Spread the input across the clamp's range so both the
+            // rounding and the saturation at +/-128 are exercised.
+            let x = activations(n).map { v in v * s * 200 }
+            var want = x
+            SRQ.apply(&want, s)
+
+            let bIn = h.ctx.makeF32(x)
+            let bSrc = h.ctx.makeF32(x)
+            let bDst = h.ctx.makeF32(n)
+            _ = h.run(n) { f in
+                f.srqInPlace(x: bIn, n: n, s: s)
+                f.srqTo(src: bSrc, dst: bDst, n: n, s: s)
+            }
+            let gotIn = Array(bIn.f32(n))
+            let gotTo = Array(bDst.f32(n))
+            #expect(maxAbsDiff(want, gotIn) == 0,
+                    "srq_inplace s=\(s) maxAbs \(maxAbsDiff(want, gotIn))")
+            #expect(maxAbsDiff(want, gotTo) == 0,
+                    "srq_to s=\(s) maxAbs \(maxAbsDiff(want, gotTo))")
+            let saturated = want.filter { v in abs(v) >= 127 * s }.count
+            #expect(saturated > 0, "the clamp range was never reached")
+        }
+    }
+
+    // The macaron residual is a HALF-weight add, so a kernel that adds at
+    // full weight still produces a finite tower that drifts everywhere.
+    @Test(needsGemmaWeights) func audioSiluAndFmaMatchSIMD() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        let n = 2048
+        let x = activations(n)
+        let y = activations(n).map { v in v * 0.5 }
+        var wantSilu = [Float](repeating: 0, count: n)
+        var wantFma = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            wantSilu[i] = x[i] / (1 + expf(-x[i]))
+            wantFma[i] = x[i] + y[i] * 0.5
+        }
+        let bSilu = h.ctx.makeF32(x)
+        let bFma = h.ctx.makeF32(x)
+        let bY = h.ctx.makeF32(y)
+        _ = h.run(n) { f in
+            f.siluInPlace(x: bSilu, n: n)
+            f.fmaInPlace(x: bFma, y: bY, n: n, s: 0.5)
+        }
+        let cs = cosine(wantSilu, Array(bSilu.f32(n)))
+        let cf = cosine(wantFma, Array(bFma.f32(n)))
+        #expect(cs >= 0.99999, "silu_inplace cosine \(cs)")
+        #expect(cf >= 0.99999, "fma_inplace cosine \(cf)")
+    }
+
+    // The GLU halves a 2e-wide row and the depthwise conv is CAUSAL, so it
+    // pads on the LEFT only: reading the row's two halves the other way
+    // round, or centering the kernel, both still fill the buffer.
+    @Test(needsGemmaWeights) func audioGluAndDepthwiseMatchSIMD() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        let a = try Gemma4Audio(h.model)
+        let e = a.cfg.embd, k = a.cfg.convKernel
+        let n = 50
+        let wide = activations(n * 2 * e)
+        let dw = Dense.floats(
+            h.model.gguf.tensor("a.blk.0.lconv_dw.weight"))
+        var wantGlu = [Float](repeating: 0, count: n * e)
+        for t in 0..<n {
+            for c in 0..<e {
+                let lo = wide[t * 2 * e + c]
+                let hi = wide[t * 2 * e + e + c]
+                wantGlu[t * e + c] = lo / (1 + expf(-hi))
+            }
+        }
+        var wantConv = [Float](repeating: 0, count: n * e)
+        for t in 0..<n {
+            for c in 0..<e {
+                var acc: Float = 0
+                for j in 0..<k {
+                    let src = t - (k - 1) + j
+                    if src >= 0 {
+                        acc += wantGlu[src * e + c] * dw[c * k + j]
+                    }
+                }
+                wantConv[t * e + c] = acc
+            }
+        }
+        let bWide = h.ctx.makeF32(wide)
+        let bGlu = h.ctx.makeF32(n * e)
+        let bDw = h.ctx.makeF32(dw)
+        let bConv = h.ctx.makeF32(n * e)
+        _ = h.run(n * e) { f in
+            f.gluRows(src: bWide, dst: bGlu, rows: n, width: e)
+            f.depthwiseCausal(x: bGlu, w: bDw, out: bConv, rows: n,
+                              width: e, k: k)
+        }
+        let cg = cosine(wantGlu, Array(bGlu.f32(n * e)))
+        let cc = cosine(wantConv, Array(bConv.f32(n * e)))
+        #expect(cg >= 0.99999, "glu_rows cosine \(cg)")
+        #expect(cc >= 0.9999, "depthwise_causal cosine \(cc)")
+    }
+
+    // per_dim_scale is per HEAD DIMENSION, not per channel of the row: the
+    // same 128 factors repeat across all 8 heads.
+    @Test(needsGemmaWeights) func audioQueryScaleMatchesSIMD() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        let a = try Gemma4Audio(h.model)
+        let e = a.cfg.embd, d = a.cfg.headDim, nH = a.cfg.heads
+        let n = 8
+        let scales = a.queryScales(0)
+        let x = activations(n * e)
+        var want = x
+        for t in 0..<n {
+            for head in 0..<nH {
+                for c in 0..<d {
+                    want[t * e + head * d + c] *= scales[c]
+                }
+            }
+        }
+        let bX = h.ctx.makeF32(x)
+        let bS = h.ctx.makeF32(scales)
+        _ = h.run(n * e) { f in
+            f.scaleHeadDims(x: bX, scales: bS, rows: n, width: e, hd: d)
+        }
+        let c = cosine(want, Array(bX.f32(n * e)))
+        #expect(c >= 0.99999, "scale_head_dims cosine \(c)")
+    }
+
+    // The one audio kernel with a contract worth fearing. The window holds
+    // `chunk` positions INCLUDING self, so the encoding row `o - qi` runs
+    // 1..past; allowing 0 hands every query one extra key. That is invisible
+    // in the FIRST block, where the extra key falls before position zero and
+    // is masked anyway, so n must span several blocks to catch it.
+    @Test(needsGemmaWeights) func audioWindowedAttentionMatchesSIMD() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        let a = try Gemma4Audio(h.model)
+        let e = a.cfg.embd
+        let n = 50
+        #expect(n > 3 * a.cfg.chunk)
+        let q = activations(n * e)
+        let k = activations(n * e).map { v in v * 0.75 }
+        let v = activations(n * e).map { w in w * 1.25 }
+        let want = a.windowed(0, q, k, v, n)
+        let bQ = h.ctx.makeF32(q)
+        let bK = h.ctx.makeF32(k)
+        let bV = h.ctx.makeF32(v)
+        let bRel = h.ctx.makeF32(a.relativeSlice(0))
+        let bOut = h.ctx.makeF32(n * e)
+        _ = h.run(n * e) { f in
+            f.gemmaAudioAttn(q: bQ, k: bK, v: bV, relk: bRel, out: bOut,
+                             rows: n, width: e, heads: a.cfg.heads,
+                             hd: a.cfg.headDim, chunk: a.cfg.chunk,
+                             context: a.cfg.context,
+                             past: a.cfg.pastHorizon,
+                             cap: a.cfg.logitCap)
+        }
+        let got = Array(bOut.f32(n * e))
+        let c = cosine(want, got)
+        let diff = maxAbsDiff(want, got)
+        #expect(c >= 0.9999,
+                "gemma_audio_attn cosine \(c) maxAbs \(diff)")
+    }
+
+    // Both rope regimes: the sliding layers rotate every pair of a 256-wide
+    // head, the full layers only the first 64 of a 512-wide one. A kernel that
+    // pairs (i, i + rotated) instead of (j, j + headDim/2) passes the first
+    // and fails the second, which is why both are pinned.
+    @Test(needsGemmaWeights) func gemmaRopeMatchesSIMDBothRegimes() throws {
+        let path = try #require(gemmaGgufPath)
+        let h = try MetalHarness(path)
+        let c = h.model.cfg
+        let cases = [(c.headDimSliding, c.rotatedPairsSliding,
+                      c.ropeBaseSliding, "sliding"),
+                     (c.headDimFull, c.rotatedPairsFull,
+                      c.ropeBaseFull, "full")]
+        for (hd, rot, base, label) in cases {
+            let nH = 2
+            var want = activations(hd * nH)
+            let x = want
+            GK.rope(&want, headDim: hd, nHead: nH, rotated: rot,
+                    base: base, pos: 37)
+
+            let xb = h.ctx.makeF32(x)
+            _ = h.run(hd * nH) { f in
+                f.ropeGemma(x: xb, headDim: hd, nHead: nH, rotated: rot,
+                            base: base, pos: 37)
+            }
+            let got = Array(xb.f32(hd * nH))
+            let cos = cosine(want, got)
+            let diff = maxAbsDiff(want, got)
+            #expect(cos >= 0.99999,
+                    "rope_gemma \(label) cosine \(cos) maxAbs \(diff)")
+        }
+    }
+}

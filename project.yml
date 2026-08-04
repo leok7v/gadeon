@@ -51,6 +51,15 @@ targets:
     sources:
       - LLM/src
       - LLM/metal
+      # The pronunciation data carries no file extension, which leaves
+      # xcodegen unable to infer a build phase for it: both files land in the
+      # navigator and in NO copy phase, so the framework ships without them
+      # and the speech engine fails to initialize at runtime. Naming the
+      # phase is what puts them in the bundle.
+      - path: LLM/src/TTS/en_rules
+        buildPhase: resources
+      - path: LLM/src/TTS/en_list
+        buildPhase: resources
     # Compiler settings set directly, NOT via platform.xcconfig -- that xcconfig
     # carries app-only settings (the *-iOS/-macOS source split) a framework
     # must not inherit. Versions come from version.xcconfig (YY.MM.DD /
@@ -73,6 +82,12 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        # Binds cblas_sgemm$NEWLAPACK. Without it Swift binds the LEGACY
+        # cblas_sgemm -- a DIFFERENT entry point, with nothing guaranteeing
+        # the two agree in the last bits at every shape. The reference C the
+        # speech engine is compared against is built with it, so the app and
+        # Package.swift have to carry it too or the two builds diverge.
+        OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
   # The single app target: Hub-download-only, ANE-only. The bundled-model and
   # device-CPU bring-up targets are gone -- gadeon-cli and a HF round-trip cover
   # local emit work -- so the app ships no weights.
@@ -117,6 +132,10 @@ targets:
         # precook cache) over HTTPS that URLSession provides, all exempt --
         # nothing encrypts, so the answer is a standing NO.
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        # Dictation. macOS kills a process that touches the microphone with
+        # no usage string rather than prompting for it, so this is what makes
+        # the mic button work at all rather than a nicety.
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: Gadeon listens only while you hold the microphone button, and what you say is transcribed on this device.
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         # iPhone stays portrait-only (a chat composer on a narrow landscape
         # strip is useless, and the per-idiom restriction remains supported).

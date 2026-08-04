@@ -26,6 +26,7 @@ struct SettingsView: View {
     enum Category: String, CaseIterable, Identifiable {
         case systemPrompt = "System Prompt"
         case models = "Models"
+        case voice = "Voice"
         case vision = "Vision"
         case view = "View"
         case misc = "Misc"
@@ -34,6 +35,7 @@ struct SettingsView: View {
             switch self {
             case .systemPrompt: return "text.bubble"
             case .models: return "internaldrive"
+            case .voice: return "waveform"
             case .vision: return "eye"
             case .view: return "paintbrush"
             case .misc: return "slider.horizontal.3"
@@ -126,6 +128,7 @@ struct SettingsView: View {
         Category.allCases.filter { c in
             (c != .vision || model.allowsTiling)
                 && (c != .models || Models.all.count > 1)
+                && (c != .voice || model.speech.available)
         }
     }
 
@@ -173,10 +176,58 @@ struct SettingsView: View {
         switch item {
         case .systemPrompt: systemPromptPane
         case .models: modelsPane
+        case .voice: voicePane
         case .vision: visionPane
         case .view: viewPane
         case .misc: miscPane
         }
+    }
+
+    private var voicePane: some View {
+        @Bindable var speech = model.speech
+        return VStack(alignment: .leading, spacing: 10) {
+            title("Voice")
+            explain("Replies are read aloud on this device; nothing is sent "
+                + "anywhere. Tap a voice to hear it. Opening the microphone "
+                + "while a reply is being read stops the reading, so you can "
+                + "interrupt without waiting.")
+            Picker("Speak", selection: $speech.mode) {
+                ForEach(VoiceSession.Mode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            explain(speech.mode.detail)
+            ForEach(Speech.voices) { v in voiceRow(v) }
+            Divider().padding(.vertical, 4)
+            HStack {
+                Text("Speed")
+                Slider(value: $speech.speed, in: 0.7...1.5, step: 0.05)
+                Text(String(format: "%.2fx", speech.speed))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func voiceRow(_ v: SpeechVoice) -> some View {
+        let picked = v.name == model.speech.voiceName
+        return Button {
+            model.speech.voiceName = v.name
+            model.speech.preview(v)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: picked ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(picked ? Color.accentColor : .secondary)
+                Text(v.name)
+                Spacer()
+                Image(systemName: "play.circle")
+                    .foregroundStyle(.secondary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var systemPromptPane: some View {
@@ -205,8 +256,7 @@ struct SettingsView: View {
             explain("Tap a downloaded model's ring to make it active. Each "
                 + "model downloads once and is stored on this device; deleting "
                 + "frees its disk space and it can be downloaded again. The "
-                + "active model cannot be deleted, and the built-in "
-                + "\(Models.fallback) is always kept.")
+                + "active model cannot be deleted.")
             ForEach(Models.all, id: \.self) { name in modelRow(name) }
                 .id(model.diskRevision)
         }
@@ -295,14 +345,10 @@ struct SettingsView: View {
     private var viewPane: some View {
         VStack(alignment: .leading, spacing: 10) {
             title("View")
-            explain("Status bar detail under the composer.")
-            Picker("Status bar", selection: $model.statusBarMode) {
-                ForEach(ChatModel.StatusBarMode.allCases) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            Toggle("Status line", isOn: $model.statusLine)
+                .toggleStyle(.switch)
+            explain("A line under the composer with the turn's context size, "
+                + "token counts, memory and speed.")
             Toggle("Markdown", isOn: $model.renderMarkdown)
                 .toggleStyle(.switch)
             explain("Render replies and reasoning as formatted Markdown "
@@ -345,10 +391,13 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                // The token cap behind this is derived per model and device,
+                // which is the reason the setting is stated in SECONDS at
+                // all. Naming the count and the checkpoint answers a question
+                // no one reading this pane is asking.
                 explain("How long the model may think before it is nudged to "
-                    + "answer: about \(Int(model.thinkBudget.seconds)) seconds "
-                    + "(~\(model.thinkTokenCap) tokens for \(model.modelName) "
-                    + "on this device).")
+                    + "answer: about \(Int(model.thinkBudget.seconds)) "
+                    + "seconds.")
             }
             Toggle("Wikipedia", isOn: Binding(
                 get: { model.wikipedia },
@@ -401,8 +450,15 @@ struct SettingsView: View {
         }
     }
 
+    // The compact path pushes each pane with a navigation title already
+    // naming it, so the pane's own heading is the same word a second time
+    // directly beneath the first. Only the rail layout, which has no
+    // navigation bar to carry it, needs one.
+    @ViewBuilder
     private func title(_ text: String) -> some View {
-        Text(text).font(.title3).bold()
+        if !isOS {
+            Text(text).font(.title3).bold()
+        }
     }
 
     private func explain(_ text: String) -> some View {

@@ -8,16 +8,43 @@ import SwiftUI
 // into view; clicking a row expands its payload. The footer shows where the
 // same trace is mirrored on disk (transcript.log.txt).
 
+// Timestamps are elapsed since the app started, not time of day: a session
+// trace is read as "how long in" and "how far apart", and a wall clock makes
+// the reader do that subtraction. Hours appear only once there are any.
+
+private func elapsed(_ t: Date, since zero: Date) -> String {
+    let ms = Int((max(t.timeIntervalSince(zero), 0) * 1000).rounded())
+    let out: String
+    if ms >= 3_600_000 {
+        out = String(format: "%02d:%02d:%02d.%03d", ms / 3_600_000,
+                     ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+    } else {
+        out = String(format: "%02d:%02d.%03d",
+                     ms / 60_000, ms / 1000 % 60, ms % 1000)
+    }
+    return out
+}
+
 struct DebugView: View {
 
     let model: ChatModel
     let onClose: () -> Void
     @State private var selected: UUID?
 
+    // Zero for every timestamp here: the app's launch, unless the trace
+    // predates it -- a REOPENED conversation carries the events of the run
+    // that recorded it, and against this launch every one of them would
+    // clamp to 00:00.000. Then its own first event is the zero.
+    private var zero: Date {
+        min(Instrument.launched, model.traceEvents.first?.t1
+            ?? Instrument.launched)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
-            TraceGraph(events: model.traceEvents, selected: $selected)
+            TraceGraph(events: model.traceEvents, zero: zero,
+                       selected: $selected)
                 .frame(height: 190)
                 .padding(.horizontal, 16)
                 .padding(.bottom, 8)
@@ -50,7 +77,7 @@ struct DebugView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
                     ForEach(model.traceEvents) { e in
-                        TraceRow(e: e, selected: e.id == selected)
+                        TraceRow(e: e, zero: zero, selected: e.id == selected)
                             .id(e.id)
                             .onTapGesture {
                                 selected = selected == e.id ? nil : e.id
@@ -88,6 +115,7 @@ struct DebugView: View {
 
 private struct TraceGraph: View {
     let events: [TraceEvent]
+    let zero: Date
     @Binding var selected: UUID?
     @State private var hovered: TraceEvent?
     @State private var hoverAt: CGPoint = .zero
@@ -115,7 +143,7 @@ private struct TraceGraph: View {
             }
             .overlay(alignment: .topLeading) {
                 if let hovered {
-                    HoverBubble(e: hovered)
+                    HoverBubble(e: hovered, zero: zero)
                         .offset(
                             x: min(max(hoverAt.x + 12, 0),
                                    max(geo.size.width - 240, 0)),
@@ -127,8 +155,13 @@ private struct TraceGraph: View {
         }
     }
 
+    // The axis starts at the first event's MARK, not at its start. Everything
+    // is plotted at t1, so anchoring to t0 spends the opening event's whole
+    // duration on blank canvas -- and the opening event is the precooked
+    // system prefill, ~15 s of it, which left a session's real activity
+    // squeezed against the right edge.
     private var span: (start: Date, seconds: Double) {
-        let start = events.first?.t0 ?? Date()
+        let start = events.first?.t1 ?? Date()
         let end = events.last?.t1 ?? start
         return (start, max(end.timeIntervalSince(start), 1))
     }
@@ -246,13 +279,7 @@ private struct TraceGraph: View {
 
 private struct HoverBubble: View {
     let e: TraceEvent
-
-    private static let fmt: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "HH:mm:ss.SSS"
-        return f
-    }()
+    let zero: Date
 
     private var stats: String {
         var parts: [String] = []
@@ -269,7 +296,7 @@ private struct HoverBubble: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("\(HoverBubble.fmt.string(from: e.t1))  \(e.kind.rawValue)")
+            Text("\(elapsed(e.t1, since: zero))  \(e.kind.rawValue)")
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
             Text(e.summary)
@@ -295,15 +322,9 @@ private struct HoverBubble: View {
 
 private struct TraceRow: View {
     let e: TraceEvent
+    let zero: Date
     let selected: Bool
     @State private var payloadHeight: CGFloat = 20
-
-    private static let fmt: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "HH:mm:ss.SSS"
-        return f
-    }()
 
     private var color: Color {
         switch e.kind {
@@ -333,7 +354,7 @@ private struct TraceRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Text(TraceRow.fmt.string(from: e.t1))
+                Text(elapsed(e.t1, since: zero))
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                 Text(e.kind.rawValue)

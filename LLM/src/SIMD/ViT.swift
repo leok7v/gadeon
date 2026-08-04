@@ -9,8 +9,8 @@ import Foundation
 // MLP into the LM embedding space. Every geometry number comes from the
 // GGUF metadata or a tensor shape; nothing is hardcoded per model.
 // Transcribed from llama.cpp clip_graph_qwen3vl + ggml's GGML_ROPE_TYPE_
-// VISION path, and gated byte-for-byte against a numpy reference by
-// `gadeon-cli --vit`.
+// VISION path, and gated byte-for-byte against the numpy reference
+// (scripts/convert/qwen35/bonsai27b_vit_ref.py) by `gadeon-cli --vit`.
 // This mmproj carries NO deepstack layers (is_deepstack_layers all false,
 // no deepstack tensors), so the merged output is the whole story.
 

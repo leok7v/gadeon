@@ -15,3 +15,6 @@ buildServer.json
 
 # SwiftPM / Xcode per-user data
 **/.swiftpm/xcode/xcuserdata/
+
+# written by the version stamp; the fallback in version.xcconfig is committed
+config/version-generated.xcconfig

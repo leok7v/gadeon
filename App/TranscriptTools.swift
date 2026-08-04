@@ -19,9 +19,10 @@ private struct ExportFile: FileDocument {
 }
 
 // The transcript actions as a row of title-bar glyph buttons, revealed by the
-// trailing chevron: Plain Text toggle, Find, Copy, Share, and (macOS) Download.
-// Share and Download are the only dropdowns (PDF|HTML), so no per-format
-// chevrons. A row of glyphs reads better in the bar than a single nested menu.
+// trailing chevron: Plain Text toggle, Find, Copy, Share, (macOS) Download,
+// and For Nerds. Share and Download are the only dropdowns (PDF|HTML), so no
+// per-format chevrons. A row of glyphs reads better in the bar than a single
+// nested menu.
 
 struct TranscriptActions: View {
 
@@ -29,6 +30,7 @@ struct TranscriptActions: View {
     let title: String
     @Binding var renderMarkdown: Bool
     let onFind: () -> Void
+    let onDebug: () -> Void
     @State private var pdfURL: URL?
     @State private var htmlURL: URL?
     // The Save panel (macOS): the picked format's bytes + type + suggested
@@ -76,6 +78,14 @@ struct TranscriptActions: View {
                 .menuIndicator(.hidden)
                 .help("Save as PDF or HTML")
             }
+            // Last, and deliberately behind the chevron: the trace is a
+            // developer surface, and it belongs with the other things done TO
+            // a transcript rather than beside Settings, which is where a user
+            // goes to change how the app behaves.
+            Button(action: onDebug) {
+                Image(systemName: "ladybug")
+            }
+            .help("For Nerds")
         }
         .task(id: document) { await prepareExports() }
         .fileExporter(isPresented: $showExporter, document: exportFile,

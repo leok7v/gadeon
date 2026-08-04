@@ -390,19 +390,23 @@ public enum Tools {
 
     // ---- tool-call parsing (Qwen / Hermes wire) ---------------------
 
-    // Locate one <tool_call>BODY</tool_call> at or after `from` (a Character
+    // Locate one OPEN..BODY..CLOSE block at or after `from` (a Character
     // offset), returning the BODY range for `parse`. Nil when no complete
-    // block has closed yet.
-    public static func findToolCall(in stream: String,
-                                    from: Int) -> Range<String.Index>? {
+    // block has closed yet. The markers default to the Qwen wire and are
+    // supplied by ChatWire when a template speaks a different one.
+    public static func findToolCall(
+        in stream: String, from: Int,
+        open openTag: String = "<tool_call>",
+        close closeTag: String = "</tool_call>"
+    ) -> Range<String.Index>? {
         var result: Range<String.Index>? = nil
         let start = stream.index(stream.startIndex, offsetBy: from,
                                  limitedBy: stream.endIndex)
         if let start {
             let tail = start..<stream.endIndex
-            if let open = stream.range(of: "<tool_call>", range: tail),
+            if let open = stream.range(of: openTag, range: tail),
                let close = stream.range(
-                    of: "</tool_call>",
+                    of: closeTag,
                     range: open.upperBound..<stream.endIndex) {
                 result = open.upperBound..<close.lowerBound
             }
@@ -423,12 +427,92 @@ public enum Tools {
         var result: ToolCall? = nil
         if firstNonSpace(cs) == "{" {
             result = parseJSON(block)
+        } else if let gemma = parseGemma(block) {
+            result = gemma
         } else if let fn = functionName(cs) {
             result = ToolCall(functionName: fn.name,
                               params: foldArgPairs(params(cs, fn.next)),
                               rawBlock: String(block))
         }
         return result
+    }
+
+    // ---- the gemma-4 dialect ----------------------------------------
+
+    // Gemma renders a call body as `call:NAME{key:value,...}` and wraps
+    // string values in the <|"|> SPECIAL rather than a quote character, so
+    // neither the JSON sniff ('{' first) nor the XML scan (<function=NAME>)
+    // matches it -- it is a third dialect, not a tolerance of an existing
+    // one. Values may nest ({...} / [...]) and a quoted value may contain
+    // the ',' and ':' that otherwise delimit fields, so the scan tracks
+    // both depth and quote state.
+    static let gemmaQuote = Array("<|\"|>")
+    private static let gemmaOpener = "call:"
+
+    static func parseGemma(_ block: Substring) -> ToolCall? {
+        let s = block.trimmingCharacters(in: .whitespacesAndNewlines)
+        var result: ToolCall? = nil
+        if s.hasPrefix(gemmaOpener) {
+            let rest = s.dropFirst(gemmaOpener.count)
+            var name = String(rest)
+            var args: [ToolArg] = []
+            if let brace = rest.firstIndex(of: "{") {
+                name = String(rest[..<brace])
+                var body = rest[rest.index(after: brace)...]
+                if body.hasSuffix("}") { body = body.dropLast() }
+                args = gemmaArgs(Array(body))
+            }
+            name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                result = ToolCall(functionName: name, params: args,
+                                  rawBlock: String(block))
+            }
+        }
+        return result
+    }
+
+    // Split `key:value,key:value` at depth 0, unwrapping <|"|> as it goes.
+    static func gemmaArgs(_ c: [Character]) -> [ToolArg] {
+        var out: [ToolArg] = []
+        var depth = 0
+        var quoted = false
+        var key: String? = nil
+        var buf = ""
+        var i = 0
+        func flush() {
+            let n = (key ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if key != nil && !n.isEmpty && out.count < maxParams {
+                out.append(ToolArg(name: n, value: buf))
+            }
+            key = nil
+            buf = ""
+        }
+        while i < c.count {
+            var step = 1
+            if startsAt(c, i, gemmaQuote) {
+                quoted = !quoted
+                step = gemmaQuote.count
+            } else if quoted {
+                buf.append(c[i])
+            } else if c[i] == "{" || c[i] == "[" {
+                depth += 1
+                buf.append(c[i])
+            } else if c[i] == "}" || c[i] == "]" {
+                depth -= 1
+                buf.append(c[i])
+            } else if c[i] == ":" && depth == 0 && key == nil {
+                key = buf
+                buf = ""
+            } else if c[i] == "," && depth == 0 {
+                flush()
+            } else {
+                buf.append(c[i])
+            }
+            i += step
+        }
+        flush()
+        return out
     }
 
     private static func firstNonSpace(_ cs: [Character]) -> Character? {
@@ -1342,6 +1426,8 @@ public enum Tools {
     // 12-hour periods (native Fahrenheit). nil outside the US or on any error,
     // so the caller can fall back to wttr.in. No API key; a contact User-Agent
     // is required (per the NWS docs).
+    // The PUBLIC repo: the contact has to resolve for whoever reads a log at
+    // the other end, and the working repo is private.
     static let nwsAgent =
         "(github.com/leok7v/gadeon, leo.kuznetsov@gmail.com)"
 
@@ -1970,6 +2056,18 @@ public enum Tools {
                                _ prefix: [Character]) -> Bool {
         var j = 0
         while j < prefix.count && j < cs.count && cs[j] == prefix[j] {
+            j += 1
+        }
+        return j == prefix.count
+    }
+
+    // `starts` anchored at an offset, so a scan over a long body does not
+    // re-slice the array per character.
+    private static func startsAt(_ cs: [Character], _ at: Int,
+                                 _ prefix: [Character]) -> Bool {
+        var j = 0
+        while j < prefix.count && at + j < cs.count
+            && cs[at + j] == prefix[j] {
             j += 1
         }
         return j == prefix.count

@@ -1,7 +1,8 @@
 import Foundation
 
 // Playful per-stage status phrases, one bundled App/Whimsical/*.txt list per
-// Stage (reasoning / prefill / documents / vision / consulting / optimizing),
+// Stage (reasoning / prefill / documents / vision / listening / mulling /
+// consulting / optimizing),
 // each line "emoji Word emoji". Shown in the status bar, as the transcript's
 // live "working" line, and on the one-time Optimizing screen. trio() returns
 // three distinct phrases, one per live surface.
@@ -11,6 +12,15 @@ enum Whimsical {
     enum Stage: String {
         case reasoning, prefill, documents, vision, consulting, optimizing,
              downloading
+        // A spoken turn has its own two: the tower encoding what was said,
+        // and the reasoning that follows it. Speech is a CONVERSATION, and
+        // "Analyzing pixels" over a sentence someone just spoke reads as the
+        // wrong machine answering.
+        case listening, mulling
+        // The one flash that ANSWERS rather than narrates: shown the moment
+        // the gate accepts what was said, while the towers are still working
+        // and the transcript has nothing in it yet.
+        case heard
     }
 
     static let reasoning = load("reasoning").shuffled()
@@ -20,6 +30,9 @@ enum Whimsical {
     static let consulting = load("consulting").shuffled()
     static let optimizing = load("optimizing").shuffled()
     static let downloading = load("downloading").shuffled()
+    static let listening = load("listening").shuffled()
+    static let mulling = load("mulling").shuffled()
+    static let heard = load("heard").shuffled()
 
     static func list(_ stage: Stage) -> [String] {
         let result: [String]
@@ -31,6 +44,9 @@ enum Whimsical {
         case .consulting: result = consulting
         case .optimizing: result = optimizing
         case .downloading: result = downloading
+        case .listening: result = listening
+        case .mulling: result = mulling
+        case .heard: result = heard
         }
         return result
     }

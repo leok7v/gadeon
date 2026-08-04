@@ -29,8 +29,7 @@ public enum MetalSelfTest {
     // Load the model, then run each isolated kernel check and return a report.
     public static func run(ggufPath: String) throws -> String {
         let model = try BonsaiModel(path: ggufPath)
-        let ctx = try MetalContext(mapBase: model.gguf.map,
-                                   mapSize: model.gguf.mapSize)
+        let ctx = try MetalContext(model.gguf)
         func step(_ s: String) { print(s); fflush(stdout) }
         // VERIFY the threadgroup budget headroom: the flash attention now asks
         // for a CONSTANT 5*hd+8 floats, so it must sit well under the device
@@ -40,6 +39,9 @@ public enum MetalSelfTest {
         step("device.maxThreadgroupMemoryLength="
             + "\(ctx.device.maxThreadgroupMemoryLength)  "
             + "attn tgmem=\((5 * hd + 8) * 4)B (hd=\(hd), constant in T)")
+        step("weights in \(ctx.windowMB.count) windows \(ctx.windowMB) MB, "
+            + "GPU caps one at "
+            + "\(ctx.device.maxBufferLength / 1_048_576) MB")
         step(try checkGemv(model, ctx))
         step(try checkGemm(model, ctx))
         step(try checkDequant(model, ctx))
@@ -248,7 +250,8 @@ public enum MetalSelfTest {
         let cb = ctx.queue.makeCommandBuffer()!
         let e = cb.makeComputeCommandEncoder()!
         MetalEnc(ctx: ctx, e: e).gemm(
-            w, X: xb, out: outb, off: UInt64(w.base - model.gguf.map), N: n)
+            w, X: xb, out: outb,
+            off: ctx.window(UInt64(w.base - model.gguf.map)), N: n)
         e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
         let gpu = Array(outb.f32(n * m))
         var d: Float = 0
@@ -298,16 +301,17 @@ public enum MetalSelfTest {
         let k = t.dims[0]
         let id = 100
         let rowBytes = k / 128 * 34
-        let woff = (t.base - model.gguf.map) + id * rowBytes
+        let row = ctx.window(
+            UInt64((t.base - model.gguf.map) + id * rowBytes))
 
         var ref = [Float](repeating: 0, count: k)
         Q2_0.dequant(t.base + id * rowBytes, count: k, into: &ref)
 
         let out = ctx.makeF32(k)
         let enc = try dispatch(ctx, "q2_0_dequant_row", threads: k) { e in
-            e.setBuffer(ctx.weights, offset: 0, index: 0)
+            e.setBuffer(row.buf, offset: 0, index: 0)
             e.setBuffer(out, offset: 0, index: 1)
-            var a = GemvArgs(woff: UInt64(woff), K: UInt32(k), M: UInt32(k))
+            var a = GemvArgs(woff: row.local, K: UInt32(k), M: UInt32(k))
             e.setBytes(&a, length: MemoryLayout<GemvArgs>.stride, index: 2)
         }
         enc.waitUntilCompleted()
@@ -322,15 +326,15 @@ public enum MetalSelfTest {
                      mapBase: UnsafeRawPointer, x: [Float]) throws -> [Float] {
         let k = w.dims[0]
         let m = w.dims[1]
-        let woff = w.base - mapBase
+        let ref = ctx.window(UInt64(w.base - mapBase))
         let xb = ctx.makeF32(x)
         let out = ctx.makeF32(m)
         let cb = try dispatch(ctx, "q2_0_gemv", groups: m, threadsPerGroup: 32) {
             e in
-            e.setBuffer(ctx.weights, offset: 0, index: 0)
+            e.setBuffer(ref.buf, offset: 0, index: 0)
             e.setBuffer(xb, offset: 0, index: 1)
             e.setBuffer(out, offset: 0, index: 2)
-            var a = GemvArgs(woff: UInt64(woff), K: UInt32(k), M: UInt32(m))
+            var a = GemvArgs(woff: ref.local, K: UInt32(k), M: UInt32(m))
             e.setBytes(&a, length: MemoryLayout<GemvArgs>.stride, index: 3)
         }
         cb.waitUntilCompleted()

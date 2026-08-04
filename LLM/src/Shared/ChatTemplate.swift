@@ -90,9 +90,55 @@ private func buildArr(_ items: [JinjaValue],
     return arena.arr(items, "[" + parts.joined(separator: ", ") + "]")
 }
 
+// A tool's parameter schema, usable BOTH ways. Qwen's template serializes it
+// whole (`parameters | tojson`), so the node keeps the original JSON text
+// verbatim -- re-serializing would reorder keys and shift the bytes of every
+// rendered system prompt, which the precooked-prefix stamp hashes. Gemma's
+// template instead WALKS the schema (`params['properties'] | dictsort`,
+// `value['type']`, ...), so the node also needs real entries: a node that
+// answers only tojson advertises every tool with no parameters at all.
+private func buildParams(_ json: String,
+                         _ arena: inout NodeArena) -> JinjaValue {
+    var result = arena.raw(json)
+    if let obj = try? JSONSerialization.jsonObject(with: Data(json.utf8)),
+       let dict = obj as? [String: Any] {
+        var pairs: [(String, JinjaValue)] = []
+        for (k, v) in dict {
+            pairs.append((k, buildJSON(v, &arena)))
+        }
+        result = arena.obj(pairs, json)
+    }
+    return result
+}
+
+// One decoded JSON value as a Jinja value. Containers keep a re-serialized
+// json text (they are only ever reached structurally, never tojson'd whole).
+private func buildJSON(_ v: Any, _ arena: inout NodeArena) -> JinjaValue {
+    var result = JinjaValue.none
+    if let s = v as? String {
+        result = .str(s)
+    } else if let n = v as? NSNumber {
+        result = CFGetTypeID(n) == CFBooleanGetTypeID()
+            ? .bool(n.boolValue) : .int(n.intValue)
+    } else if let d = v as? [String: Any] {
+        var pairs: [(String, JinjaValue)] = []
+        for (k, item) in d {
+            pairs.append((k, buildJSON(item, &arena)))
+        }
+        result = buildObj(pairs, &arena)
+    } else if let a = v as? [Any] {
+        var items: [JinjaValue] = []
+        for item in a {
+            items.append(buildJSON(item, &arena))
+        }
+        result = buildArr(items, &arena)
+    }
+    return result
+}
+
 private func buildTool(_ t: ToolSpec,
                        _ arena: inout NodeArena) -> JinjaValue {
-    let params = arena.raw(t.parametersJSON)
+    let params = buildParams(t.parametersJSON, &arena)
     let fn = buildObj([
         ("name", .str(t.name)),
         ("description", .str(t.description)),
@@ -104,6 +150,11 @@ private func buildTool(_ t: ToolSpec,
     ], &arena)
 }
 
+// A tool call in BOTH shapes at once. Qwen's template reads the flat
+// `tool_call.name` / `.arguments`; gemma's reads the OpenAI nesting
+// `tool_call['function']['name']` and RAISES when it is absent ("arguments
+// must be a JSON object"). The two key sets do not collide, so one node
+// serves both and neither template sees a shape it does not expect.
 private func buildToolCall(_ c: AgentToolCall,
                            _ arena: inout NodeArena) -> JinjaValue {
     var args: [(String, JinjaValue)] = []
@@ -111,8 +162,12 @@ private func buildToolCall(_ c: AgentToolCall,
         args.append((a.name, .str(a.value)))
     }
     let argObj = buildObj(args, &arena)
+    let fn = buildObj([("name", .str(c.name)),
+                       ("arguments", argObj)], &arena)
     return buildObj([("name", .str(c.name)),
-                     ("arguments", argObj)], &arena)
+                     ("arguments", argObj),
+                     ("type", .str("function")),
+                     ("function", fn)], &arena)
 }
 
 private func buildContentParts(_ parts: [ContentPart],
@@ -123,6 +178,10 @@ private func buildContentParts(_ parts: [ContentPart],
         switch part {
         case .image:
             item = buildObj([("type", .str("image"))], &arena)
+        case .audio:
+            item = buildObj([("type", .str("audio"))], &arena)
+        case .video:
+            item = buildObj([("type", .str("video"))], &arena)
         case .text(let text):
             item = buildObj([("type", .str("text")),
                              ("text", .str(text))], &arena)
@@ -144,6 +203,10 @@ private func buildMessage(_ m: AgentMessage,
     ]
     if let reasoning = m.reasoning {
         pairs.append(("reasoning_content", .str(reasoning)))
+        pairs.append(("reasoning", .str(reasoning)))
+    }
+    if let name = m.name {
+        pairs.append(("name", .str(name)))
     }
     if !m.toolCalls.isEmpty {
         var calls: [JinjaValue] = []
@@ -249,10 +312,17 @@ final class AgentJinjaHost: JinjaHost {
 
 // Render the full conversation through `template`. Offline-testable: no
 // engine, no tokenizer -- the pure core the turn loop and its tests both call.
+// `bosToken` is the SPELLING of the tokenizer's begin-of-sequence piece, for
+// a template that opens the conversation by naming it (`{{- bos_token -}}`,
+// which gemma-4 does unconditionally). Left empty it renders as nothing, and
+// the prompt silently loses a token the model expects at position 0 -- so a
+// caller that has a tokenizer should always pass it. Qwen's template never
+// mentions it and is unaffected either way.
 public func renderPrompt(template: String, messages: [AgentMessage],
                          tools: [ToolSpec], addGenerationPrompt: Bool,
                          enableThinking: Bool,
-                         addVisionId: Bool = false) throws -> String {
+                         addVisionId: Bool = false,
+                         bosToken: String = "") throws -> String {
     let host = AgentJinjaHost(messages: messages, tools: tools)
     return try jinjaRender(template, host: host, vars: [
         ("messages", host.messagesValue),
@@ -260,28 +330,23 @@ public func renderPrompt(template: String, messages: [AgentMessage],
         ("add_generation_prompt", .bool(addGenerationPrompt)),
         ("enable_thinking", .bool(enableThinking)),
         ("add_vision_id", .bool(addVisionId)),
+        ("bos_token", .str(bosToken)),
     ])
 }
 
 // Whether a model reasons at all, asked of its OWN template rather than of its
-// name: render the generation prompt with thinking ON and see whether it
-// leaves `<think>` open. Qwen3.5 opens it and lets the model close it; the
-// dense Qwen3 line bakes a CLOSED empty `<think></think>` there and never
-// mentions enable_thinking, so on those the flag, the lightbulb and the
-// thinking budget are all inert and must not be offered.
+// name. Two shipped shapes answer through two different signals, so ChatWire
+// checks both: a template that RENDERS a reasoning channel proves it by
+// rendering one (gemma-4, whose generation prompt stays silent and lets the
+// model open `<|channel>thought` itself), and one that leaves its reasoning
+// marker OPEN in the generation prompt proves it that way (Qwen3.5). The dense
+// Qwen3 line bakes a CLOSED empty `<think></think>` and never mentions
+// enable_thinking, so it fails both and the flag, the lightbulb and the
+// thinking budget must not be offered.
+//
+// Asking only the generation prompt -- what this did before -- reported gemma
+// as non-reasoning and silently disabled all three.
 
 public func templateSupportsThinking(_ template: String) -> Bool {
-    let probe = [AgentMessage(role: "user", content: "x")]
-    let closed = (try? renderPrompt(
-        template: template, messages: probe, tools: [],
-        addGenerationPrompt: false, enableThinking: true)) ?? ""
-    let full = (try? renderPrompt(
-        template: template, messages: probe, tools: [],
-        addGenerationPrompt: true, enableThinking: true)) ?? ""
-    var result = false
-    if !closed.isEmpty, full.hasPrefix(closed) {
-        let gen = full.dropFirst(closed.count)
-        result = gen.contains("<think>") && !gen.contains("</think>")
-    }
-    return result
+    ChatWire.derive(template).reasons(template: template)
 }

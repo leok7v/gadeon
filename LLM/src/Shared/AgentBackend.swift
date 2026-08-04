@@ -12,6 +12,19 @@ import Foundation
 public enum ContentPart: Sendable {
     case text(String)
     case image
+    case audio
+    case video
+
+    // For logs and for the default question; not markup, which is the
+    // template's business.
+    public var noun: String {
+        switch self {
+        case .text: "text"
+        case .image: "image"
+        case .audio: "audio"
+        case .video: "video"
+        }
+    }
 }
 
 // One message in the conversation the template renders. `toolCalls` is set
@@ -24,15 +37,22 @@ public struct AgentMessage: Sendable {
     public var contentParts: [ContentPart]?
     public var toolCalls: [AgentToolCall]
     public var reasoning: String?
+    // Which tool a `tool` message answers. Qwen's template wraps the result
+    // in a role-agnostic <tool_response> block and never asks; gemma's names
+    // the tool in the block itself (`response:NAME{...}`) and falls back to
+    // the literal "unknown" without this.
+    public var name: String?
 
     public init(role: String, content: String,
                 contentParts: [ContentPart]? = nil,
-                toolCalls: [AgentToolCall] = [], reasoning: String? = nil) {
+                toolCalls: [AgentToolCall] = [], reasoning: String? = nil,
+                name: String? = nil) {
         self.role = role
         self.content = content
         self.contentParts = contentParts
         self.toolCalls = toolCalls
         self.reasoning = reasoning
+        self.name = name
     }
 }
 
@@ -83,6 +103,11 @@ public protocol AgentBackend: Sendable {
     func tokenBytes(_ id: Int32) -> [UInt8]
     func text(_ ids: [Int32]) -> String
     var eos: Int32 { get }
+    // The FULL stop set. Gemma-4 ends a turn on three distinct ids
+    // (<eos>, <end_of_turn>, and a channel terminator), so a loop comparing
+    // against the scalar alone runs straight past the turn boundary into the
+    // next one. Defaults to just `eos` for the single-stop lineages.
+    var eosIds: Set<Int32> { get }
     func reset() async
     func useSampler(_ s: Sampler?) async
     func extend(_ ids: [Int32]) async throws -> Int32
@@ -119,6 +144,28 @@ public protocol AgentBackend: Sendable {
     func extendVision(_ ids: [Int32], tiles: VisionTiles,
                       imageStarts: [Int], gridH: Int,
                       gridW: Int) async throws -> Int32
+    // Prefill onto the CURRENT state with attachments spliced in: `ids` is the
+    // turn with every span's placeholder ALREADY expanded to its block, and
+    // `spans` carries the tower rows to lay over those placeholder positions.
+    //
+    // SEPARATE from extendVision rather than a generalization of it, because
+    // the two cannot express each other. extendVision speaks MLMultiArray
+    // tiles on a square patch grid at ONE token rate; a native-resolution
+    // tower emits a different count per image (following the aspect ratio,
+    // known only after it runs), a video frame gets a smaller budget than a
+    // still, and a turn may carry a second modality whose placeholder is a
+    // different id entirely. The default throws; Gemma4Backend routes to
+    // Gemma4Engine.extend(_:softAt:).
+    func extendSoft(_ ids: [Int32], spans: [SoftSpan]) async throws -> Int32
+    // Whether this backend can splice tower features at all. The app gates
+    // the audio / video attach UI on it, so a backend without the path never
+    // dead-ends a send.
+    func supportsSoftTokens() async -> Bool
+    // The begin-of-sequence SPELLING this model's template asks for by name.
+    // Empty (the default) for a lineage whose template never mentions it;
+    // gemma-4 opens every conversation with `{{- bos_token -}}` and drops a
+    // token from position 0 without it.
+    var bosToken: String { get }
     // Whether this backend can see images at all, and (at send time) the
     // tower's grid for tile sizing. Defaults: no. The app gates the whole
     // attach UI on supportsVision, so a text-only backend (today's Metal
@@ -157,10 +204,16 @@ public protocol BackendState: Sendable {}
 public struct NullBackendState: BackendState {}
 
 public extension AgentBackend {
+    var eosIds: Set<Int32> { [eos] }
     func requestStop() {}
     func shouldStop() -> Bool { false }
     func queuedCount() async -> Int { 0 }
     func supportsVision() async -> Bool { false }
+    func supportsSoftTokens() async -> Bool { false }
+    var bosToken: String { "" }
+    func extendSoft(_ ids: [Int32], spans: [SoftSpan]) async throws -> Int32 {
+        throw EngineError.missingModel("soft tokens")
+    }
     func visionGrid() async -> VisionGrid? { nil }
     func visionEncodeSeconds() async -> Double { 0 }
     func serializeState(_ state: any BackendState) async -> Data { Data() }

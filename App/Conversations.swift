@@ -59,9 +59,20 @@ extension ChatModel {
     }
 
     // Delete a saved conversation; if it is the one on screen, start fresh.
+    //
+    // Forget WHICH conversation this was, and its transcript, before starting
+    // that fresh one. New Chat commits the outgoing conversation on its way
+    // out, and with the id still set that writes the one just deleted
+    // straight back -- it survives its own deletion and returns to the
+    // sidebar. Emptying the transcript first is what makes the commit decline
+    // to save anything.
     func deleteConversation(_ id: UUID) {
         ConversationStore.shared.delete(id)
         if id == currentConversationId {
+            currentConversationId = nil
+            generatedTitle = nil
+            messages = []
+            traceEvents = []
             newChat()
         }
     }
@@ -89,20 +100,34 @@ extension ChatModel {
     // A short title for an export filename: the conversation's own title.
     var transcriptTitle: String { conversationTitle() }
 
-    // The model-generated title once made; else the first user turn trimmed to
-    // a short line; else a timestamp.
+    // The model-generated title once made; else the first turn that carries
+    // WORDS, trimmed to a short line; else a timestamp.
+    //
+    // A dictated turn shows "Spoken, 1.9s" -- a stand-in for speech that
+    // cannot be shown -- and an attachment-only turn shows nothing at all.
+    // Naming a conversation after either says what the user DID rather than
+    // what it was about, and every voice conversation ends up with the same
+    // name. The reply is the better fallback there: it is about the subject
+    // even when the question was spoken.
     func conversationTitle() -> String {
         var title = generatedTitle ?? ""
         if title.isEmpty {
-            let firstUser =
-                messages.first(where: { m in m.fromUser })?.text ?? ""
-            let line = firstUser.trimmingCharacters(
-                in: .whitespacesAndNewlines)
+            let spoke = messages.first { m in
+                m.fromUser && !m.placeholder && !trimmed(m.text).isEmpty
+            }
+            let answered = messages.first { m in
+                !m.fromUser && !trimmed(m.text).isEmpty
+            }
+            let line = trimmed((spoke ?? answered)?.text ?? "")
             title = line.count > 40
                 ? String(line.prefix(40)) + "\u{2026}" : line
         }
         if title.isEmpty { title = ChatModel.timestampTitle() }
         return title
+    }
+
+    private func trimmed(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func timestampTitle() -> String {

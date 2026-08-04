@@ -17,7 +17,11 @@ final class MetalStopSignal: @unchecked Sendable {
     private var raised = false
     func raise() { lock.lock(); raised = true; lock.unlock() }
     func clear() { lock.lock(); raised = false; lock.unlock() }
-    var raisedNow: Bool { lock.lock(); defer { lock.unlock() }; return raised }
+    var raisedNow: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return raised
+    }
 }
 
 // iOS aborts GPU work submitted while the app is backgrounded (there is no
@@ -94,8 +98,7 @@ public final class MetalEngine {
         cfg = model.cfg
         map = model.gguf.map
         self.pageP = pageP
-        ctx = try MetalContext(mapBase: model.gguf.map,
-                               mapSize: model.gguf.mapSize)
+        ctx = try MetalContext(model.gguf)
         try ctx.prewarm()
         let c = cfg
         bx = ctx.makeF32(c.nEmbd)
@@ -139,7 +142,9 @@ public final class MetalEngine {
         for (_, p) in kvPool { p.truncate(to: 0) }
     }
 
-    private func off(_ t: GGUFTensor) -> UInt64 { UInt64(t.base - map) }
+    private func off(_ t: GGUFTensor) -> WeightRef {
+        ctx.window(UInt64(t.base - map))
+    }
 
     // Prefill `ids` onto the CURRENT state, returning the next-token prediction.
     // Only the LAST token needs logits; the rest just advance state (hidden only,
@@ -583,12 +588,12 @@ public final class MetalEngine {
 
     private static func putInt(_ out: inout Data, _ v: Int) {
         var x = Int64(v).littleEndian
-        withUnsafeBytes(of: &x) { out.append(contentsOf: $0) }
+        withUnsafeBytes(of: &x) { raw in out.append(contentsOf: raw) }
     }
 
     private static func putFloats(_ out: inout Data, _ v: [Float]) {
         putInt(&out, v.count)
-        v.withUnsafeBytes { out.append(contentsOf: $0) }
+        v.withUnsafeBytes { raw in out.append(contentsOf: raw) }
     }
 
     private static func getInt(_ b: [UInt8], _ p: inout Int) -> Int {
@@ -611,7 +616,9 @@ public final class MetalEngine {
     }
 
     private func copyIn(_ a: [Float], _ b: MTLBuffer) {
-        a.withUnsafeBytes { _ = memcpy(b.contents(), $0.baseAddress!, $0.count) }
+        a.withUnsafeBytes { raw in
+            _ = memcpy(b.contents(), raw.baseAddress!, raw.count)
+        }
     }
 
     func pick(_ logits: [Float]) -> Int32 {

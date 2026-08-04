@@ -11,9 +11,6 @@ faster and ~4.4x lower energy per token than llama.cpp Metal on a 0.8B / M3,
 GPU left free. Decode is state-carry on the Neural Engine, with an optional
 greedy-lossless MTP self-speculative mode via the shipped MTP head.
 
-Ternary (Q2_0) models run instead on a pure-Swift Metal GPU backend, behind the
-same session and tokenizer seams.
-
 Pure Swift only: no C, no Python, no FFI. CoreML is the one framework dependency.
 
 ## Build
@@ -28,11 +25,8 @@ app project also needs two Homebrew tools:
 The engine and command-line tools build straight from `LLM/Package.swift`, with
 no Xcode project needed. Run from the repo root, as with every command below:
 
-    swift build -c release --package-path LLM
-    LLM/.build/release/gadeon-cli Qwen3.5-0.8B "what is an interest rate swap?"
-
-Debug builds (`swift build` default, `-Onone`) are ~100x slower; quote only
-Release numbers.
+    swift build --package-path LLM
+    LLM/.build/debug/gadeon-cli models "what is an interest rate swap?"
 
 ### Tests
 
@@ -67,9 +61,14 @@ Then build from the command line, or open `Gadeon.xcodeproj` in Xcode (Run, or
 Product > Archive):
 
     xcodebuild -scheme Gadeon -destination 'platform=macOS' build
+    xcodebuild -scheme Gadeon -destination 'generic/platform=iOS Simulator' build
 
 The app is Apple-Silicon-only (arm64): the Neural Engine and `Float16` do not
-exist on Intel, so `project.yml` excludes `x86_64`.
+exist on Intel, so `project.yml` excludes `x86_64` (the Mac App Store accepts an
+Apple-Silicon-only app). Xcode Run/Build (Debug) and Product > Archive (Release)
+are arm64; only a forced-universal command-line build needs an extra
+`EXCLUDED_ARCHS=x86_64`, because a SwiftPM package does not inherit the exclusion
+in a plain build action.
 
 ### Editor tooling (SourceKit-LSP)
 
@@ -93,38 +92,65 @@ tokens (`tg128`), reported tokens/sec.
 | QwenPaw-9B       | Neural Engine |    456 tok/s  |    9.9 tok/s |
 | Bonsai-27B Q2_0  | GPU (Metal)   |     48 tok/s  |    8.2 tok/s |
 
-All five use the same `gadeon-cli <model> --bench`. The ternary Bonsai models
-run on the GPU by design: the Neural Engine expands a 2-bit weight to fp16
-before the DMA, so a ternary model pays fp16 bandwidth there and the 2-bit
-format buys nothing. That is a property of the format, not of the model size.
+All five use the same `gadeon-cli <model> --bench` (raw 512-token prefill, 128
+greedy decodes, one warmup pass): the four Qwen3.5 / QwenPaw models on the Neural
+Engine, and the ternary Bonsai-27B through the pure-Swift Metal (GPU) backend
+(`--metal`, batched prefill). The ternary Bonsai models run on the GPU by design:
+the Neural Engine expands a 2-bit weight to fp16 before the DMA, so a ternary
+model pays fp16 bandwidth there and the 2-bit format buys nothing. That is a
+property of the format, not of the model size, so it holds for the whole ternary
+lineage (measured on the 1.7B, `scripts/probes/bonsai17b_stream_test.py`;
+see ROADMAP.md). They are kept as a comparison point: the same harness runs both
+backends, so a ternary model's answer quality and speed can be read directly
+against the Neural Engine models.
+Debug builds (`swift build` default, `-Onone`) are ~100x slower; every number
+here is `swift build -c release`.
 
-Decode cost grows with cached positions, so `--ctx N` benches at a realistic
-context rather than at the ~640 the plain bench reaches:
+Energy: on the 0.8B, Neural Engine prefill was measured at ~2-2.4x faster and
+~4.4x less energy per token than llama.cpp Metal, with the GPU left free. That
+is the one energy figure on record (prefill, 0.8B); per-model and decode energy
+are not benchmarked here.
 
-    gadeon-cli <model.gguf> --metal --bench --ctx 4096
+<sub>MacBook Air (M3): 16-core Neural Engine rated 18 TOPS; 10-core GPU; 8-core
+CPU (4 performance + 4 efficiency); 100 GB/s unified-memory bandwidth; 24 GB
+RAM.</sub>
 
 Prefill speed is the number that matters most in agentic use: when the model
-searches the web or reads an article, every fetched byte is prompt to ingest,
-not text to generate.
+searches the web, reads a Wikipedia article, or pulls in a news story, every
+fetched byte is prompt to ingest, not text to generate. A tool round routinely
+prefills 4-16 KB of page text to decode a two-sentence conclusion, so the
+reading rate, not the talking rate, bounds how many sources a turn can afford.
 
 ## Append-only context, rollback, recurrent state
 
-Three quarters of the layers are Gated DeltaNet: their memory is a fixed-size
-recurrent state, a lossy fold of everything ingested so far. Unlike a KV cache
-that state is not addressable by prefix, so the engine owns its session state
-rather than reconstructing it per request:
+The hybrid trunk forces a session design that stateless servers never need,
+and it is worth being explicit about why.
 
-- **Append-only continuation.** Each turn renders only the delta (the previous
-  stripped answer plus the new user turn) through the model's own chat template
-  and appends it. Total work over a conversation is O(conversation), and
-  per-turn latency does not grow with history.
-- **Marks and rollback.** Before each turn's generation prompt the engine drops
-  a mark: a deep snapshot of the recurrent state plus the paged KV. The next
-  turn rewinds to it, which is how transient bytes leave the context: raw
-  `<think>` reasoning is dropped, and a tool exchange is re-laid in the
-  template's canonical form instead of the model's raw emission.
-- **Park / resume / persist.** The same snapshot primitive serializes, so whole
-  conversations park and resume over one loaded model.
+Three quarters of the layers are Gated DeltaNet: their memory is a fixed-size
+recurrent state, a lossy fold of everything ingested so far. Unlike a KV
+cache, that state is not addressable by prefix (there is no "reuse the first
+N tokens" shortcut), and the only way to recompute it is to replay the entire
+conversation through the model. So the engine owns its session state rather
+than reconstructing it per request:
+
+- **Append-only continuation.** Each turn renders only the delta (the
+  previous stripped answer plus the new user turn) through the model's own chat
+  template and appends it to the live state. Nothing is re-prefilled; total
+  work over a conversation is O(conversation), and per-turn latency does not
+  grow with history. The whole-history re-render plus common-prefix diff (the
+  stateless-server pattern) is deliberately absent.
+- **Marks and rollback.** Before the generation prompt of every turn the
+  engine drops a mark: a deep snapshot of the recurrent state plus the paged
+  KV (cheap, since completed KV pages are shared copy-on-write). The next turn
+  rewinds to it, which is how transient bytes leave the context: raw
+  `<think>` reasoning is dropped and the turn re-appends the stripped answer;
+  a tool exchange is re-laid in the template's canonical form instead of the
+  model's raw emission. Stop during prefill restores the pre-turn snapshot
+  entirely, so the turn never happened.
+- **Park / resume / persist.** The same snapshot primitive serializes: whole
+  conversations park and resume over one loaded model, and the rendered
+  system plus tools prefix is precooked to disk once and restored at launch,
+  skipping most of the time-to-first-token.
 
 ## Layout
 
@@ -134,7 +160,7 @@ rather than reconstructing it per request:
 - `App/` - SwiftUI app (macOS + iOS), no `#if os` (SDK file split).
 - `MD/` - Markdown transcript rendering package.
 - `models/` - downloaded model sets, kept local (not committed).
-- `config/` - entitlements and the SDK-scoped source split for the app target.
+- `config/platform.xcconfig` - the SDK-scoped source split for the app target.
 
 ## Models
 
@@ -148,28 +174,23 @@ takes a path to any local set directory.
 
 Two separate things end up on disk:
 
-- `models/*.mlmodelc`: the model sets in MIL format (`model.mil` +
-  `weights/weight.bin`), the ahead-of-time `coremlc` bake.
+- `models/*.mlmodelc`: the models shipped with the app, in MIL format
+  (`model.mil` + `weights/weight.bin`), the ahead-of-time `coremlc` bake.
 - **Compiled Neural Engine programs**: the OS compiles each model for this
-  specific chip the first time it loads (the one-time ~30 s "first launch"
-  wait), then reuses the result instantly on later launches. Cached per app
+  specific chip the first time it loads (the one-time ~30 s "first launch" wait),
+  then reuses the result instantly on later launches. They are cached per app
   bundle-id at:
 
       ~/Library/Caches/<bundle-id>/com.apple.e5rt.e5bundlecache/
 
+  i.e. `io.github.leok7v.gadeon` (app) and `io.github.leok7v.gadeon.cli` (CLI).
   This can reach a few hundred MB. Deleting that directory forces a one-time
-  cold recompile on the next launch and reclaims the disk.
+  cold recompile on the next launch and reclaims the disk:
 
-## Credits
+      rm -rf ~/Library/Caches/io.github.leok7v.gadeon/com.apple.e5rt.e5bundlecache
 
-- **Qwen team** for the Qwen3.5 / Qwen3.6 models and the Gated DeltaNet hybrid
-  design this engine implements.
-  [Qwen on Hugging Face](https://huggingface.co/Qwen)
-- **PrismML** for the ternary Bonsai builds and the Q2_0 weight format.
-  [prismml.com](https://prismml.com/)
-- **llama.cpp** (ggml-org), MIT: the Metal `q2_0_gemm_mm` kernel is a port of
-  its `kernel_mul_mm`, the vision tower is transcribed from
-  `clip_graph_qwen3vl`, and the SIMD engine is validated against it end to end.
+  This is the Neural Engine (`.e5`) cache, distinct from the classic CPU/GPU
+  `model.espresso.*` caches other CoreML apps produce.
 
 ## License
 

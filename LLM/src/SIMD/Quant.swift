@@ -1,3 +1,4 @@
+import Accelerate
 // Q2_0 (ggml type 42, PrismML "Q2_0_g128") dequant + ternary mat-vec.
 //
 // Block (34 bytes, 128 weights): { f16 d; u8 qs[32] }  -- scale FIRST.
@@ -80,6 +81,55 @@ enum Q2_0 {
 // whole (weights become cblas GEMM operands). bf16 -> f32 is a 16-bit left
 // shift into the top of the IEEE 754 single bit pattern.
 enum Dense {
+    // ggml stores [out][in] row-major; a plain vDSP_mmul wants [in][out].
+    // Block-quantized rows go through GQ.dequantSpan, which knows every
+    // type the gemma repack emits; the unquantized ones are a straight read.
+    static func transposedFloats(_ t: GGUFTensor, _ inDim: Int,
+                                 _ outDim: Int) -> [Float] {
+        var flat: [Float]
+        switch t.type {
+        case .q2_0, .q4_0:
+            flat = [Float](repeating: 0, count: inDim * outDim)
+            var row = [Float](repeating: 0, count: inDim)
+            for m in 0..<outDim {
+                GQ.dequantSpan(t, row: m, from: 0, count: inDim, into: &row)
+                for i in 0..<inDim { flat[m * inDim + i] = row[i] }
+            }
+        default:
+            flat = floats(t)
+        }
+        var out = [Float](repeating: 0, count: flat.count)
+        vDSP_mtrans(flat, 1, &out, 1, vDSP_Length(inDim), vDSP_Length(outDim))
+        return out
+    }
+
+    // The seam between a mapped GGUF tensor and the strided f32 ops. F32 is
+    // WRAPPED IN PLACE over the mapping, so the GGUF has to outlive every
+    // tensor made this way; F16 widens into the arena. A block-quantized type
+    // returns nil rather than a guess -- it has no f32 image to wrap, and the
+    // caller knows whether dequantizing one is affordable.
+    static func tensor(_ t: GGUFTensor, into arena: Arena) -> Tensor? {
+        var out: Tensor? = nil
+        var ne: [Int64] = [1, 1, 1, 1]
+        for d in 0..<t.dims.count { ne[d] = Int64(t.dims[d]) }
+        let nDims = Int32(t.dims.count)
+        if t.type == .f32 {
+            let data = UnsafeMutableRawPointer(mutating: t.base)
+                .assumingMemoryBound(to: Float.self)
+            out = tensorWrapNd(arena, nDims, data, ne)
+        } else if t.type == .f16 {
+            let o = tensorNewNd(arena, nDims, ne)
+            let total = Int(tensorNelements(o))
+            for i in 0..<total {
+                let h = (t.base + i * 2).loadUnaligned(as: UInt16.self)
+                o.data[i] = Float(Float16(bitPattern: h))
+            }
+            out = o
+        }
+        if let o = out { tensorSetName(o, t.name) }
+        return out
+    }
+
     static func floats(_ t: GGUFTensor) -> [Float] {
         let n = t.count
         return [Float](unsafeUninitializedCapacity: n) { buf, cnt in

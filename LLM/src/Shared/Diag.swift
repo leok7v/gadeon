@@ -30,6 +30,13 @@ public final class Diag: @unchecked Sendable {
         handle = try? FileHandle(forWritingTo: url)
     }
 
+    // A memory-footprint reporter, filled in by the App layer (which owns the
+    // platform split for os_proc_available_memory). LLM code cannot reach
+    // App, so it asks through here -- the same shape MarkdownDiag already
+    // uses. nil in the CLI and in tests, where there is nothing to report to.
+    nonisolated(unsafe)
+    public static var memory: (@Sendable (String) -> Void)?
+
     // The caller's file:line comes free via the default arguments, captured at
     // the call site (a thin forwarder passes them through).
     public func report(_ s: String, file: String = #fileID, line: Int = #line) {

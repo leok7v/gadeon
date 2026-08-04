@@ -78,6 +78,18 @@ public enum ModelCatalog {
             bytes: 463_292_000,
             files: ["Ternary-Bonsai-1.7B-Q2_0.gguf",
                     "generation_config.json"]),
+        // gemma-4-E2B (QAT), the one model here that hears and watches as well
+        // as reads. Self-contained: the sampling matrix, the chat template and
+        // BOTH towers (vision + audio) live in the single file, so unlike the
+        // Bonsai sets it needs no sibling mmproj or generation_config.
+        //
+        // NOTE the licence differs from every other entry: gemma ships under
+        // Google's Gemma Terms of Use, not Apache-2.0.
+        "gemma-4-E2B": Source(
+            repo: "leok7v/gemma-4-e2b-it-qat",
+            revision: "47c144d18e31fb4d6cdde6f593b0c3db986610e6",
+            bytes: 2_665_414_656,
+            files: ["gemma-4-e2b-it-qat.gguf"]),
     ]
 
     public static func source(_ name: String) -> Source? { sources[name] }
@@ -87,6 +99,7 @@ public enum ModelCatalog {
     public static let ggufFiles: [String: String] = [
         "Ternary-Bonsai-27B": "Ternary-Bonsai-27B-Q2_0.gguf",
         "Ternary-Bonsai-1.7B": "Ternary-Bonsai-1.7B-Q2_0.gguf",
+        "gemma-4-E2B": "gemma-4-e2b-it-qat.gguf",
     ]
 
     public static func isGguf(_ name: String) -> Bool {

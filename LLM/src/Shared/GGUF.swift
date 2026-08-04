@@ -117,23 +117,90 @@ final class GGUF {
     }
 
     // typed accessors
-    func int(_ k: String) -> Int? { if case let .int(v)? = meta[k] { return Int(v) }; return nil }
-    func double(_ k: String) -> Double? {
+
+    func int(_ k: String) -> Int? {
         switch meta[k] {
-        case let .double(v)?: return v
-        case let .int(v)?: return Double(v)
-        default: return nil
+        case let .int(v): Int(v)
+        default: nil
         }
     }
-    func ints(_ k: String) -> [Int]? { if case let .ints(v)? = meta[k] { return v.map(Int.init) }; return nil }
-    func doubles(_ k: String) -> [Double]? { if case let .doubles(v)? = meta[k] { return v }; return nil }
-    func string(_ k: String) -> String? { if case let .string(v)? = meta[k] { return v }; return nil }
-    func strings(_ k: String) -> [String]? { if case let .strings(v)? = meta[k] { return v }; return nil }
+
+    func double(_ k: String) -> Double? {
+        switch meta[k] {
+        case let .double(v): v
+        case let .int(v): Double(v)
+        default: nil
+        }
+    }
+
+    // A writer may store a flag as GGUF's bool type OR as an int, and `int`
+    // matches only the latter -- so a bool key read through it comes back nil
+    // and looks like an absent key.
+
+    func bool(_ k: String) -> Bool? {
+        switch meta[k] {
+        case let .bool(v): v
+        case let .int(v): v != 0
+        default: nil
+        }
+    }
+
+    func ints(_ k: String) -> [Int]? {
+        switch meta[k] {
+        case let .ints(v): v.map(Int.init)
+        default: nil
+        }
+    }
+
+    func doubles(_ k: String) -> [Double]? {
+        switch meta[k] {
+        case let .doubles(v): v
+        default: nil
+        }
+    }
+
+    func string(_ k: String) -> String? {
+        switch meta[k] {
+        case let .string(v): v
+        default: nil
+        }
+    }
+
+    func strings(_ k: String) -> [String]? {
+        switch meta[k] {
+        case let .strings(v): v
+        default: nil
+        }
+    }
+
+    // A tensor read one ROW at a time rather than streamed -- an embedding
+    // gather. The caller names the ACCESS PATTERN because only an engine
+    // knows it; the syscall is the mapping's business, which is here.
+    //
+    // The default fault policy reads ahead in clusters, which is right for a
+    // weight something walks end to end and wrong for a table where a token
+    // touches one row: gemma's per-layer embedding is 1260 MB and a session
+    // reads a few MB of it. A row is under a third of a 16 KB page, so the
+    // floor is one page per distinct row either way -- what this removes is
+    // the four to eight pages of cluster around it. Advisory: the kernel may
+    // ignore it, and it cannot change what any read returns.
+    //
+    // Rounded OUTWARD to whole pages, so the edge pages of the neighbouring
+    // tensors take the hint too -- two pages out of the table's 77k.
+    func gathered(_ t: GGUFTensor) {
+        let page = Int(getpagesize())
+        let from = (t.base - map) / page * page
+        let upto = (t.base - map + t.byteCount + page - 1) / page * page
+        _ = madvise(UnsafeMutableRawPointer(mutating: map + from),
+                    upto - from, MADV_RANDOM)
+    }
 
     func tensor(_ name: String) -> GGUFTensor {
-        guard let t = tensors[name] else { fatalError("missing tensor \(name)") }
-        return t
+        let t = tensors[name]
+        precondition(t != nil, "missing tensor \(name)")
+        return t!
     }
+
     func maybe(_ name: String) -> GGUFTensor? { tensors[name] }
 }
 
@@ -146,14 +213,21 @@ private struct Cursor {
     var pos: Int = 0
 
     mutating func bytes(_ n: Int) -> UnsafeRawPointer {
-        let p = base + pos; pos += n; precondition(pos <= limit, "gguf overrun"); return p
+        let p = base + pos
+        pos += n
+        precondition(pos <= limit, "gguf overrun")
+        return p
     }
+
     mutating func u32() -> UInt32 { bytes(4).loadUnaligned(as: UInt32.self) }
+
     mutating func u64() -> UInt64 { bytes(8).loadUnaligned(as: UInt64.self) }
+
     mutating func str() -> String {
         let n = Int(u64())
         let p = bytes(n)
-        return String(decoding: UnsafeRawBufferPointer(start: p, count: n), as: UTF8.self)
+        return String(decoding: UnsafeRawBufferPointer(start: p, count: n),
+                      as: UTF8.self)
     }
 
     mutating func value() -> GGUFValue {
@@ -192,7 +266,7 @@ private struct Cursor {
             for _ in 0..<n { strs.append(str()) }
             return .strings(strs)
         }
-        // numeric array: materialize (these are all small — rope sections,
+        // numeric array: materialize (these are all small -- rope sections,
         // image mean/std, per-layer bool flags, etc.)
         var out: [Int64] = []; out.reserveCapacity(n)
         var dbl = false; var dvals: [Double] = []

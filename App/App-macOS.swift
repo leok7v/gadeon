@@ -13,18 +13,14 @@ import SwiftUI
     }
 }
 
-// View > Status Bar (None / Short / Extended), mirroring the Settings control.
+// View > Status Line, a checked item mirroring the Settings switch.
 // macOS-only: iOS has no menu bar.
 
 struct StatusBarCommands: Commands {
     @Bindable var model: ChatModel
     var body: some Commands {
         CommandMenu("View") {
-            Picker("Status Bar", selection: $model.statusBarMode) {
-                ForEach(ChatModel.StatusBarMode.allCases) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
+            Toggle("Status Line", isOn: $model.statusLine)
         }
     }
 }

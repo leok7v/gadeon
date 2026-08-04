@@ -661,6 +661,13 @@ final class ChatSessionTests: XCTestCase {
                        "stray think leaked into content: \(content)")
         XCTAssertTrue(reasoning.text.contains("why"),
                       "stray reasoning not captured: \(reasoning.text)")
+        // The opener is MARKUP: it must not open the disclosure either. Qwen
+        // never exercises this (its opener sits in the generation prompt and
+        // never reaches the decode stream), but gemma-4 emits its own
+        // <|channel>thought, and that marker showed as the first words of
+        // every reasoning turn until the opener's bytes were stepped over.
+        XCTAssertFalse(reasoning.text.contains("<think>"),
+                       "opener leaked into reasoning: \(reasoning.text)")
     }
 
     // Thread-safe accumulator for the onReasoning callback (it fires on the

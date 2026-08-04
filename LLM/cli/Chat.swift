@@ -172,7 +172,7 @@ func runLongDoc(_ user: String) async throws {
     err(carry0 == seq0
         ? "[longdoc] first-token MATCH vs token-serial reference "
           + "(continuation \(match)/\(n); any drift is fp16 greedy divergence)\n"
-        : "[longdoc] MISMATCH — first token differs, inspect block boundaries\n")
+        : "[longdoc] MISMATCH -- first token differs, inspect block boundaries\n")
 }
 
 // Bonsai / ternary GGUF path: arg1 is a .gguf file -> run the pure-Swift SIMD
@@ -180,6 +180,17 @@ func runLongDoc(_ user: String) async throws {
 // uses. Everything above the AgentBackend seam (tokenizer, jinja template,
 // sampler, multi-turn continuation) is shared; only the compute backend differs.
 @MainActor func runGgufMain() async throws {
+    // BEFORE the architecture routing on purpose: the kernels are shared, so
+    // a golden capture has to run over BOTH lineages from one entry point.
+    if let dir = metalGoldenDir {
+        print(try MetalGolden.run(ggufPath: arg1, dir: dir))
+        exit(0)
+    }
+    // gemma-4 is a different architecture behind the same .gguf extension, so
+    // route on the FILE's own general.architecture, never on its name.
+    if Gemma4Model.isGemma4(path: arg1) {
+        try await runGemmaMain(arg1, rawArgs, turnArgs, capVal)
+    }
     // Metal backend bring-up: diff each GPU kernel against the SIMD reference
     // on the loaded model, then exit. No chat -- correctness only.
     if rawArgs.contains("--metal-selftest") {
@@ -330,31 +341,8 @@ func runLongDoc(_ user: String) async throws {
     // AgentBackend seam: prefill benchPrompt once (Metal batches it, SIMD is
     // serial) for pp t/s, then 128 greedy decodes for tg t/s. One warmup first.
     if rawArgs.contains("--bench") {
-        var ids = backend.encode(benchPrompt)
-        // --ctx N repeats the prompt to N tokens. Repetition is fine here: the
-        // cost of a decode step depends on how MANY positions are cached, not
-        // on what they say, and greedy output is discarded either way.
-        if let benchCtxVal {
-            var padded = ids
-            while padded.count < benchCtxVal { padded += ids }
-            ids = Array(padded.prefix(benchCtxVal))
-        }
-        let gen = capVal ?? 128
-        await backend.useSampler(nil)
-        await backend.reset()
-        var warm = try await backend.extend(ids)
-        for _ in 0 ..< 8 { warm = try await backend.decode(warm) }
-        await backend.reset()
-        let p0 = Date()
-        var next = try await backend.extend(ids)
-        let ppSec = Date().timeIntervalSince(p0)
-        let g0 = Date()
-        for _ in 0 ..< gen { next = try await backend.decode(next) }
-        let tgSec = Date().timeIntervalSince(g0)
-        print(String(format: "%@  pp%d %.1f t/s  |  tg%d %.1f t/s",
-                     useMetal ? "Metal/GPU" : "SIMD/CPU ", ids.count,
-                     Double(ids.count) / ppSec, gen, Double(gen) / tgSec))
-        exit(0)
+        try await runBackendBench(backend,
+                                  useMetal ? "Metal/GPU" : "SIMD/CPU ")
     }
     let bsession = ChatSession(
         backend: backend, template: template,
@@ -448,5 +436,38 @@ func runLongDoc(_ user: String) async throws {
             if !line.isEmpty { await runBonsai(line) }
         }
     }
+    exit(0)
+}
+
+// The raw pp/tg protocol, apples-to-apples with `llama-bench -p N -n 128`:
+// prefill benchPrompt once for pp, then `gen` greedy decodes for tg, after a
+// warmup. Shared so every GGUF lineage is measured the same way rather than
+// each mode growing its own timer.
+@MainActor func runBackendBench(_ backend: any AgentBackend,
+                                _ label: String) async throws {
+    var ids = backend.encode(benchPrompt)
+    // --ctx N repeats the prompt to N tokens. Repetition is fine here: the
+    // cost of a decode step depends on how MANY positions are cached, not on
+    // what they say, and greedy output is discarded either way.
+    if let benchCtxVal {
+        var padded = ids
+        while padded.count < benchCtxVal { padded += ids }
+        ids = Array(padded.prefix(benchCtxVal))
+    }
+    let gen = capVal ?? 128
+    await backend.useSampler(nil)
+    await backend.reset()
+    var warm = try await backend.extend(ids)
+    for _ in 0 ..< 8 { warm = try await backend.decode(warm) }
+    await backend.reset()
+    let p0 = Date()
+    var next = try await backend.extend(ids)
+    let ppSec = Date().timeIntervalSince(p0)
+    let g0 = Date()
+    for _ in 0 ..< gen { next = try await backend.decode(next) }
+    let tgSec = Date().timeIntervalSince(g0)
+    print(String(format: "%@  pp%d %.1f t/s  |  tg%d %.1f t/s", label,
+                 ids.count, Double(ids.count) / ppSec, gen,
+                 Double(gen) / tgSec))
     exit(0)
 }

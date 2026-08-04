@@ -50,6 +50,16 @@ struct ContentView: View {
     // Live transcript height, so a reasoning disclosure can cap itself at a
     // third of it and scroll the rest.
     @State private var chatHeight: CGFloat = 0
+    // The tool-row detail is drawn INSIDE the transcript, not in a system
+    // popover: an NSPopover is its own window, free to hang past the app's
+    // frame, and a screenshot or a screen recording of the window cuts off
+    // whatever hung out. Everything shown about a turn has to be inside the
+    // picture of that turn.
+    @State private var peek = ToolPeek()
+    @State private var calloutSize: CGSize = .zero
+    // The callout's monospaced dump scales with Dynamic Type; grow the frame
+    // along, capped, so Large Text cannot push it past the transcript.
+    @ScaledMetric(relativeTo: .body) private var popScale: CGFloat = 1
     // Autoscroll follows the newest tokens until the user scrolls up; then it
     // stops and a jump-to-bottom button appears until they opt back in.
     @State private var follow = true
@@ -61,12 +71,10 @@ struct ContentView: View {
     @State private var tailInset: CGFloat = 0
     @State private var tailCollapse: Task<Void, Never>?
     @ScaledMetric(relativeTo: .body) private var tailInsetSize: CGFloat = 64
-    // Option held (macOS): expands the status bar to the full stats. Always
-    // false on iOS (no modifier key).
+    // Option held (macOS): swaps the calculator sample for the Euler one.
+    // Always false on iOS (no modifier key).
     @State private var optionDown = false
-    // Tapping the status bar toggles full/compact on either platform, on top
-    // of the macOS Option-hold.
-    @State private var statusExpanded = false
+    @State private var showModelInvite = false
     // Highlights the whole chat area while a file is dragged over it.
     @State private var dropActive = false
     // The optimizing / downloading screens' cycling whimsical phrases,
@@ -79,7 +87,6 @@ struct ContentView: View {
     // iOS injects no back chevron and no grouped toolbar pill, and macOS keeps
     // its native title-bar toolbar.
     @State private var sidebarOpen = false
-    @State private var showModelInvite = false
     @State private var showSearch = false
     // Find in Chat: an inline bar over the transcript driving Find across the
     // per-message bubbles (each registers with this controller), so matches
@@ -163,10 +170,21 @@ struct ContentView: View {
         }
     }
 
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
+    // nil on a regular layout, so the title bar keeps INHERITING the
+    // toolbar's own size. Naming a number there is what shrank the iPad: the
+    // system default is larger than any figure that looked right written
+    // down, and an override applies everywhere it is not needed.
+    private var barGlyph: Font? {
+        sizeClass == .compact ? .system(size: 20) : nil
+    }
+
     private var foldersButton: some View {
         Button(action: toggleSidebar) {
             Image(systemName: "sidebar.leading")
         }
+        .font(barGlyph)
         .help("Menu")
     }
 
@@ -196,7 +214,7 @@ struct ContentView: View {
                     TranscriptActions(document: model.transcriptDocument,
                                       title: model.transcriptTitle,
                                       renderMarkdown: $model.renderMarkdown,
-                                      onFind: openFind)
+                                      onFind: openFind, onDebug: openDebug)
                 } else {
                     Button { actionsExpanded = true } label: {
                         Image(systemName: "chevron.left.2")
@@ -206,6 +224,10 @@ struct ContentView: View {
             }
             newChatButton
         }
+        // The title-bar glyphs are the smallest targets in the app and the
+        // ones furthest from the holding hand; a narrow screen needs them
+        // bigger for the same reason the composer's controls do.
+        .font(barGlyph)
         .onHover { inside in actionsHovering = inside }
         .animation(.easeInOut(duration: 0.2), value: actionsExpanded)
         .task(id: actionsIdle) { await collapseActionsAfterIdle() }
@@ -236,7 +258,7 @@ struct ContentView: View {
                     onClose: closeSidebar, onOpen: openConversation,
                     onNewChat: openNewChat,
                     onSearch: { showSearch = true },
-                    onSettings: openSettings, onDebug: openDebug)
+                    onSettings: openSettings)
                 .frame(width: 300)
                 .frame(maxHeight: .infinity)
                 .background(.bar)
@@ -257,7 +279,15 @@ struct ContentView: View {
                 // Explicit download consent BEFORE the disclaimer (App Store
                 // requires approval; the fetch starts on Download, then overlaps
                 // the disclaimer).
-                downloadConsent(name)
+                //
+                // A model under a third-party licence asks for that first: the
+                // size question is ours to put, the licence is not.
+                if GemmaTerms.applies(to: name), !model.gemmaTermsAccepted {
+                    GemmaTermsView(onAgree: model.acceptGemmaTerms,
+                                   onCancel: model.cancelDownload)
+                } else {
+                    downloadConsent(name)
+                }
             } else if !model.accepted {
                 DisclaimerView(onAgree: model.accept)
             } else if model.downloading {
@@ -280,10 +310,10 @@ struct ContentView: View {
     @ViewBuilder
     private var hudOverlay: some View {
         if let hud = model.hud {
-            Text(hud)
-                .font(.headline)
-                .padding(.horizontal, 22)
-                .padding(.vertical, 14)
+            Text(hud.text)
+                .font(hud.prominent ? .title2 : .headline)
+                .padding(.horizontal, hud.prominent ? 30 : 22)
+                .padding(.vertical, hud.prominent ? 20 : 14)
                 .background(.regularMaterial,
                             in: RoundedRectangle(cornerRadius: 14))
                 .overlay {
@@ -299,12 +329,34 @@ struct ContentView: View {
     // tap to open the model menu; a single-model phone taps to the "more on
     // Mac" note instead of a dead menu. Cosmetic label; the internal id is
     // unchanged.
-    // The centered title-bar item: the model picker, hidden while the tools
-    // are expanded so the action row takes over the bar without shoving it.
+    // The centered title-bar item, hidden while the tools are expanded so the
+    // action row takes over the bar without shoving it.
+    //
+    // The app's own name while a turn is being worked, the model picker
+    // between turns. A recording is made of the working stretch, which is
+    // where the name earns its place; the moment the user has something to
+    // decide, the control they might want is the one that belongs there --
+    // and the picker carries the only route to the more-models invite.
     @ViewBuilder
     private var centerBar: some View {
-        if !actionsExpanded { modelPicker }
+        if !actionsExpanded {
+            if model.inTurn {
+                Text(ContentView.appName)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .transition(.opacity)
+            } else {
+                modelPicker
+            }
+        }
     }
+
+    // From the bundle, so it cannot drift from what the installer shows.
+    private static let appName: String =
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName")
+            as? String)
+        ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName")
+            as? String) ?? "Gadeon"
 
     private var modelPicker: some View {
         Group {
@@ -337,10 +389,10 @@ struct ContentView: View {
 
     private var modelPickerLabel: some View {
         HStack(spacing: 4) {
-            // Drop the "Gadeon:" prefix on the phone (compact) to save width;
-            // keep it on iPad/Mac. Smaller than the title so a long name fits.
-            Text(isOS ? Models.display(model.modelName)
-                      : "Gadeon: \(Models.display(model.modelName))")
+            // The model's name alone: the app's is already in the macOS menu
+            // bar, and on the phone there is no width to spend on it either.
+            // Smaller than the title so a long name fits.
+            Text(Models.display(model.modelName))
                 .font(.subheadline)
                 .fontWeight(.semibold)
                 .lineLimit(1)
@@ -435,8 +487,10 @@ struct ContentView: View {
             }
             Text("This model is about \(model.downloadSizeText).")
             if let est = model.estimatedMinutes(name) {
-                Text("Estimated ~\(est.download) min download\n"
-                   + "~\(est.optimize) min optimize")
+                Text(est.optimize > 0
+                     ? "Estimated ~\(est.download) min download\n"
+                       + "~\(est.optimize) min optimize"
+                     : "Estimated ~\(est.download) min download")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -623,9 +677,9 @@ struct ContentView: View {
                 if !model.readOnly {
                     VStack(spacing: 0) {
                         Composer(model: model, focused: $promptFocused)
-                        if model.statusBarMode != .off {
+                        if model.statusLine {
                             Divider()
-                            statusBar
+                            statusLine
                         }
                     }
                     // Opaque: the transcript scrolls UNDER this inset, and the
@@ -766,7 +820,7 @@ struct ContentView: View {
                         .help("Try to hold the Option key \u{1F609}")
                 }
             }
-            if model.modelSupportsVision, model.showSample("picture"),
+            if model.canAttachImages, model.showSample("picture"),
                ChatModel.samplePictureThumb != nil {
                 sampleCard(symbol: "photo",
                            title: "Picture Understanding",
@@ -816,15 +870,13 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    // Bottom status bar (under the prompt): the compact reasoning + memory
-    // line, or the full pp/tg/ctx stats while Option is held (macOS), or load
-    // status.
+    // The status line under the prompt: the turn's numbers, or the working
+    // phrase while a prefill runs, or load status.
 
-    private var statusBar: some View {
+    private var statusLine: some View {
         HStack {
-            // caption2 on iOS + a scale floor: the extended stats line (pp/
-            // tg/ctx/split/mem) must FIT, not truncate -- the mem term is
-            // the one that gets cut and it is the one being checked.
+            // caption2 on iOS + a scale floor: the line must FIT rather than
+            // truncate -- the t/s term trails, and it is the one being read.
             Text(statusText)
                 .font(isOS ? .caption2 : .caption)
                 .foregroundStyle(.secondary)
@@ -837,19 +889,20 @@ struct ContentView: View {
         .padding(.leading, 16)
         .padding(.trailing, 12)
         .padding(.vertical, 4)
-        .contentShape(Rectangle())
-        .onTapGesture { statusExpanded.toggle() }
     }
+
+    // The numbers WIN over the working phrase whenever there are any: a
+    // second prompt is processed against a context that already has a size,
+    // and watching pp climb through the ingest says more than a quip. The
+    // phrase is for turn zero alone, where every number would read 0.
+    // Shimmer (driven by `prefilling`) is what says "working" from then on.
 
     private var statusText: String {
         var result = model.status
-        if model.prefilling {
+        if !model.statsLabel.isEmpty {
+            result = model.statsLabel
+        } else if model.prefilling {
             result = model.barStatus + "…"
-        } else {
-            let full = optionDown || statusExpanded
-                || model.statusBarMode == .extended
-            let label = full ? model.statsLabel : model.statsCompact
-            if !label.isEmpty { result = label }
         }
         return result
     }
@@ -943,6 +996,8 @@ struct ContentView: View {
                 chatHeight = h
                 if follow { scrollToBottom(proxy) }
             })
+            .coordinateSpace(.named(transcriptSpace))
+            .overlay { toolCallout }
             // Quick Answer (while reasoning) and scroll-to-bottom (while
             // scrolled up) share this bottom spot; stacked so both stay usable
             // if they happen to show at once.
@@ -954,6 +1009,81 @@ struct ContentView: View {
                 .padding(.bottom, 10)
             }
         }
+    }
+
+    // The peeked row's CURRENT state, looked up rather than copied: a round
+    // opened while it is still running has to fill in its result under the
+    // pointer.
+    private var peekedRound: ChatModel.ToolRound? {
+        var out: ChatModel.ToolRound? = nil
+        if let id = peek.messageId,
+           let m = model.messages.first(where: { msg in msg.id == id }) {
+            out = m.toolRounds.first { r in r.id == peek.roundId }
+        }
+        return out
+    }
+
+    private var peekScale: CGFloat { min(popScale, 1.5) }
+
+    // A raw-data debug view wants DENSITY: one step below caption, scaling at
+    // quarter speed of the Dynamic Type curve so Large Text nudges it instead
+    // of ballooning the monospaced dump.
+    private var peekTextSize: CGFloat { 11 * (1 + (popScale - 1) / 4) }
+
+    // Centered across the transcript, so the panel is whole inside it at any
+    // window size, with the tail naming the row it came from. It sits below a
+    // row in the upper half and above one in the lower half, which keeps the
+    // row itself out from under it.
+
+    @ViewBuilder
+    private var toolCallout: some View {
+        if let round = peekedRound {
+            GeometryReader { geo in
+                let below = peek.anchor.midY < geo.size.height / 2
+                let width = min(440 * peekScale + 24, geo.size.width - 24)
+                let shape = Callout(
+                    tailAt: peek.anchor.minX + 24 - (geo.size.width - width) / 2,
+                    tailOnBottom: !below)
+                ZStack {
+                    // No pointer to move away, so a touch anywhere else is
+                    // the only way out; a mouse leaving the callout already
+                    // dismisses it and a scrim would only block the rows.
+                    if isOS {
+                        Color.black.opacity(0.001)
+                            .contentShape(Rectangle())
+                            .onTapGesture { peek.close() }
+                    }
+                    ToolRoundDetail(round: round, size: peekTextSize,
+                                    k: peekScale)
+                        .padding(below ? .top : .bottom, Callout.tailHeight)
+                        .frame(width: width)
+                        .background(.regularMaterial, in: shape)
+                        .overlay { shape.stroke(.separator, lineWidth: 0.5) }
+                        .onGeometryChange(for: CGSize.self, of: { g in
+                            g.size
+                        }, action: { s in calloutSize = s })
+                        .onHover { inside in
+                            if inside { peek.keep() } else { peek.fade() }
+                        }
+                        // Placed off its own measured height, so it draws
+                        // only once there is one -- otherwise the first open
+                        // lands at a guessed spot and jumps.
+                        .opacity(calloutSize.height > 0 ? 1 : 0)
+                        .position(x: geo.size.width / 2,
+                                  y: calloutY(below, geo.size.height))
+                }
+            }
+        }
+    }
+
+    // Clamped into the transcript, which is the whole point of hosting it
+    // here: a callout that would run off the top or bottom slides back in
+    // rather than being cut.
+    private func calloutY(_ below: Bool, _ height: CGFloat) -> CGFloat {
+        let h = calloutSize.height
+        let want = below ? peek.anchor.maxY + 6 + h / 2
+                         : peek.anchor.minY - 6 - h / 2
+        return min(max(want, h / 2 + 6), max(height - h / 2 - 6, h / 2 + 6))
     }
 
     // The live assistant turn is reasoning: thoughts have streamed, no answer
@@ -1023,7 +1153,8 @@ struct ContentView: View {
                                   maxHeight: chatHeight / 3)
                 }
                 if !m.fromUser, !m.toolRounds.isEmpty {
-                    ToolCallStrip(rounds: m.toolRounds)
+                    ToolCallStrip(messageId: m.id, rounds: m.toolRounds,
+                                  peek: peek)
                 }
                 if !m.fromUser, isPrefilling(m) {
                     prefillWhimsical
@@ -1288,15 +1419,100 @@ private struct ReasoningView: View {
 // tool result. Hover dismissal has a short grace so the pointer can travel
 // INTO the popover to scroll a long result without it vanishing.
 
+// The transcript's own coordinate space: a tool row reports where it sits in
+// it and the callout is placed in the same one, so the two agree while the
+// transcript scrolls under them.
+private let transcriptSpace = "transcript"
+
+// Which tool row is showing its detail, and where that row currently sits in
+// the transcript. ONE owner, because the row and the callout both open and
+// close it: a pointer travelling from one to the other leaves both, and two
+// independent timers would race to dismiss what the user is reaching for.
+@MainActor @Observable final class ToolPeek {
+    private(set) var messageId: UUID?
+    private(set) var roundId = 0
+    private(set) var anchor: CGRect = .zero
+    @ObservationIgnored private var dismiss: Task<Void, Never>?
+
+    func showing(_ message: UUID, _ round: Int) -> Bool {
+        messageId == message && roundId == round
+    }
+
+    func show(_ message: UUID, _ round: Int, at frame: CGRect) {
+        dismiss?.cancel()
+        messageId = message
+        roundId = round
+        anchor = frame
+    }
+
+    func toggle(_ message: UUID, _ round: Int, at frame: CGRect) {
+        if showing(message, round) {
+            close()
+        } else {
+            show(message, round, at: frame)
+        }
+    }
+
+    // The row moved under a scroll or a growing answer; the callout follows it
+    // rather than hanging where the row used to be.
+    func track(_ message: UUID, _ round: Int, at frame: CGRect) {
+        if showing(message, round) { anchor = frame }
+    }
+
+    func keep() { dismiss?.cancel() }
+
+    func close() {
+        dismiss?.cancel()
+        messageId = nil
+    }
+
+    // The gap between the row and its callout is not a decision to dismiss,
+    // so leaving either one only starts a grace period.
+    func fade() {
+        dismiss?.cancel()
+        dismiss = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            if !Task.isCancelled { messageId = nil }
+        }
+    }
+}
+
+// A rounded body with a tail on one long edge. The tail marks WHICH row the
+// detail belongs to, which a centered panel otherwise cannot say.
+private struct Callout: Shape {
+    let tailAt: CGFloat
+    let tailOnBottom: Bool
+    private static let radius: CGFloat = 12
+    private static let tail: CGFloat = 9
+
+    static var tailHeight: CGFloat { tail }
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let body = CGRect(x: rect.minX,
+                          y: rect.minY + (tailOnBottom ? 0 : Callout.tail),
+                          width: rect.width,
+                          height: rect.height - Callout.tail)
+        p.addRoundedRect(in: body, cornerSize: CGSize(width: Callout.radius,
+                                                      height: Callout.radius))
+        let span = Callout.radius + Callout.tail
+        let x = min(max(tailAt, body.minX + span), body.maxX - span)
+        let edge = tailOnBottom ? body.maxY : body.minY
+        let tip = tailOnBottom ? rect.maxY : rect.minY
+        p.move(to: CGPoint(x: x - Callout.tail, y: edge))
+        p.addLine(to: CGPoint(x: x, y: tip))
+        p.addLine(to: CGPoint(x: x + Callout.tail, y: edge))
+        p.closeSubpath()
+        return p
+    }
+}
+
 private struct ToolCallStrip: View {
+    let messageId: UUID
     let rounds: [ChatModel.ToolRound]
-    @State private var shown: Int?
-    @State private var overPopover = false
-    @State private var dismissTask: Task<Void, Never>?
-    // The detail popover's monospaced text scales with Dynamic Type; grow
-    // its frame along (capped -- a popover wider than the screen just gets
-    // clipped by the system).
-    @ScaledMetric(relativeTo: .body) private var popScale: CGFloat = 1
+    let peek: ToolPeek
+    // Where each row sits, so opening one knows what the callout points at.
+    @State private var frames: [Int: CGRect] = [:]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -1331,60 +1547,28 @@ private struct ToolCallStrip: View {
         .foregroundStyle(.secondary)
         .modifier(Shimmer(active: round.result == nil))
         .contentShape(Rectangle())
+        .onGeometryChange(for: CGRect.self, of: { geo in
+            geo.frame(in: .named(transcriptSpace))
+        }, action: { frame in
+            frames[round.id] = frame
+            peek.track(messageId, round.id, at: frame)
+        })
         .onHover { inside in
             if inside {
-                dismissTask?.cancel()
-                shown = round.id
+                peek.show(messageId, round.id,
+                          at: frames[round.id] ?? .zero)
             } else {
-                scheduleDismiss(round.id)
+                peek.fade()
             }
         }
         .onTapGesture {
-            shown = shown == round.id ? nil : round.id
-        }
-        .popover(isPresented: popoverShown(round)) {
-            ToolRoundDetail(round: round, size: detailSize, k: k)
-                .onHover { inside in
-                    overPopover = inside
-                    if inside {
-                        dismissTask?.cancel()
-                    } else {
-                        scheduleDismiss(round.id)
-                    }
-                }
+            peek.toggle(messageId, round.id, at: frames[round.id] ?? .zero)
         }
     }
 
     private func errored(_ round: ChatModel.ToolRound) -> Bool {
         round.result?.hasPrefix("error") == true
     }
-
-    private func popoverShown(_ round: ChatModel.ToolRound) -> Binding<Bool> {
-        Binding(get: { shown == round.id },
-                set: { presented in
-                    if !presented && shown == round.id {
-                        shown = nil
-                        overPopover = false
-                    }
-                })
-    }
-
-    private func scheduleDismiss(_ id: Int) {
-        dismissTask?.cancel()
-        dismissTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(300))
-            if !Task.isCancelled && shown == id && !overPopover {
-                shown = nil
-            }
-        }
-    }
-
-    private var k: CGFloat { min(popScale, 1.5) }
-
-    // A raw-data debug view wants DENSITY: one step below caption, scaling
-    // at quarter speed of the Dynamic Type curve so Large Text nudges it
-    // instead of ballooning the monospaced dump.
-    private var detailSize: CGFloat { 11 * (1 + (popScale - 1) / 4) }
 }
 
 // Raw debug view: the emitted name (and the resolved tool when the fuzzy

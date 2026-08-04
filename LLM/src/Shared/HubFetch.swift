@@ -216,9 +216,20 @@ public struct HubFetch: Sendable {
         var last: Error? = nil
         while attempt < retries && verified == nil {
             do {
+                // Bracket the three steps a 2.7 GB fetch could blow up in.
+                // MEASURED on a 4 GB iPhone (tier 4, 2337 MB headroom): the
+                // footprint tracked the downloaded byte count almost exactly
+                // -- 1.8 GB fetched, 1716 MB footprint, and 1714 of that
+                // DIRTY and mostly compressed. That is anonymous memory, not
+                // page cache, and this download path streams to a temp file
+                // and hashes in chunks, so where it comes from was not
+                // apparent from reading. These say which step owns it.
+                Diag.memory?("fetch start \(e.path)")
                 let tmp = try await pump.body(url, resume, onBytes)
+                Diag.memory?("fetch body \(e.path)")
                 do {
                     try verify(tmp, e)
+                    Diag.memory?("fetch verified \(e.path)")
                     verified = tmp
                 } catch {
                     // One corrupted CDN read must not fail the whole fetch:
@@ -239,6 +250,7 @@ public struct HubFetch: Sendable {
         let file = try need(verified, e.path, last)
         try? fm.removeItem(at: dst)
         try fm.moveItem(at: file, to: dst)
+        Diag.memory?("fetch moved \(e.path)")
     }
 
     static func verify(_ file: URL, _ e: Entry) throws {
@@ -251,10 +263,23 @@ public struct HubFetch: Sendable {
     static func sha256(_ file: URL) throws -> String {
         let h = try FileHandle(forReadingFrom: file)
         var d = SHA256()
-        var part = try h.read(upToCount: chunk)
-        while let c = part, !c.isEmpty {
-            d.update(data: c)
-            part = try h.read(upToCount: chunk)
+        // THE AUTORELEASEPOOL IS LOAD-BEARING. FileHandle.read hands back
+        // AUTORELEASED NSData, and a tight Swift loop has no pool of its own,
+        // so every chunk of a multi-GB file stays alive until this function
+        // returns -- "chunked" is true and beside the point. MEASURED on a
+        // 4 GB iPhone: the download that fed this peaked at 17 MB, and
+        // hashing then climbed to 1533 MB and was jetsammed. Draining per
+        // chunk holds it at one chunk.
+        var more = true
+        while more {
+            try autoreleasepool {
+                let c = try h.read(upToCount: chunk)
+                if let c, !c.isEmpty {
+                    d.update(data: c)
+                } else {
+                    more = false
+                }
+            }
         }
         try h.close()
         return hex(d.finalize())
@@ -267,10 +292,17 @@ public struct HubFetch: Sendable {
         let h = try FileHandle(forReadingFrom: file)
         var d = Insecure.SHA1()
         d.update(data: Data("blob \(size)\0".utf8))
-        var part = try h.read(upToCount: chunk)
-        while let c = part, !c.isEmpty {
-            d.update(data: c)
-            part = try h.read(upToCount: chunk)
+        // Same pool, same reason -- see sha256 above.
+        var more = true
+        while more {
+            try autoreleasepool {
+                let c = try h.read(upToCount: chunk)
+                if let c, !c.isEmpty {
+                    d.update(data: c)
+                } else {
+                    more = false
+                }
+            }
         }
         try h.close()
         return hex(d.finalize())

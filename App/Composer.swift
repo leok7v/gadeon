@@ -13,10 +13,23 @@ struct Composer: View {
     // control glyphs and the model label are fixed point sizes, so scale
     // them by the same curve or they read as a different UI under Larger
     // Text.
-    @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat = 15
-    @ScaledMetric(relativeTo: .body) private var labelSize: CGFloat = 13
-    @ScaledMetric(relativeTo: .body) private var slotSize: CGFloat = 22
-    @ScaledMetric(relativeTo: .body) private var sendSize: CGFloat = 24
+    @ScaledMetric(relativeTo: .body) private var baseControl: CGFloat = 15
+    @ScaledMetric(relativeTo: .body) private var baseLabel: CGFloat = 13
+    @ScaledMetric(relativeTo: .body) private var baseSlot: CGFloat = 22
+    @ScaledMetric(relativeTo: .body) private var baseSend: CGFloat = 24
+
+    // A narrow screen gets BIGGER controls, which is the opposite of the
+    // usual instinct. A tablet is held in two hands with the row under a
+    // steady thumb; a phone is held in one, and a 22pt slot is well under
+    // what a thumb reliably finds. Size class rather than device model, so an
+    // iPad in a narrow split view -- just as cramped -- gets it too.
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    private var touch: CGFloat { sizeClass == .compact ? 1.35 : 1.0 }
+
+    private var controlSize: CGFloat { baseControl * touch }
+    private var labelSize: CGFloat { baseLabel * touch }
+    private var slotSize: CGFloat { baseSlot * touch }
+    private var sendSize: CGFloat { baseSend * touch }
 
     // Ten lines ~ a third of a default window. A hard line cap, not a
     // GeometryReader fraction (which re-measures on every resize and makes the
@@ -46,6 +59,7 @@ struct Composer: View {
     private var card: some View {
         VStack(spacing: 8) {
             ForEach(model.attachedImages) { img in imageChip(img) }
+            ForEach(model.attachedClips) { clip in clipChip(clip) }
             ForEach(model.attachedDocs) { doc in docChip(doc) }
             if let warning = model.attachmentWarning { warningBanner(warning) }
             // macOS lets you compose the NEXT message while a reply streams
@@ -90,7 +104,106 @@ struct Composer: View {
         if model.canSend { model.send() }
     }
 
+    // A live voice exchange swaps the whole control row for a transport, so
+    // the two or three things that matter mid-conversation are big enough to
+    // hit at arm's length. It REPLACES rather than overlays: an overlay would
+    // cover the text field, and typing mid-conversation is common.
+    //
+    // The trigger is the exchange, not the preference -- someone who leaves
+    // "speak replies" on permanently must still get the ordinary composer
+    // back between turns.
+    private var inVoiceExchange: Bool {
+        model.listening || model.speech.engaged || model.voiceReady
+    }
+
+    @ViewBuilder
     private var controls: some View {
+        if inVoiceExchange {
+            transport
+        } else {
+            standardControls
+        }
+    }
+
+    private var transport: some View {
+        HStack(spacing: transportGap) {
+            Spacer()
+            transportButton(model.listening ? "microphone.fill" : "microphone",
+                            model.listening ? "Stop and send" : "Speak",
+                            // Orange is the system's OWN microphone-in-use
+                            // colour on both platforms (the menu-bar pill,
+                            // the privacy dot), so an open mic needs no
+                            // convention of ours learned. Red would also
+                            // collide with Stop beside it.
+                            // Green at a turn boundary: the reply is done and
+                            // it is the speaker's move, which a resting
+                            // accent circle does not say.
+                            micTint,
+                            listening: model.listening,
+                            action: model.voice)
+            if model.speech.paused {
+                transportButton("play.fill", "Resume", .accentColor) {
+                    model.speech.resume()
+                }
+                // Red, not grey: a muted fill on a large control reads as
+                // disabled rather than as secondary, and this is the one
+                // button that ends the turn.
+                transportButton("stop.fill", "Stop", .red) {
+                    model.stop()
+                }
+            } else if model.speech.engaged {
+                // Keyed to the turn, not to `speaking`: sound stops between
+                // sentences, and a Pause that vanished in those gaps would be
+                // unhittable exactly when it is wanted.
+                transportButton("pause.fill", "Pause", .accentColor) {
+                    model.speech.pause()
+                }
+            }
+            Spacer()
+        }
+        .padding(.top, 2)
+    }
+
+    // A 60pt circle in a Mac window reads as a phone app pretending, so the
+    // desktop keeps a restrained size and only the vocabulary changes.
+    private var micTint: Color {
+        let tint: Color
+        if model.listening {
+            tint = .orange
+        } else if model.voiceReady {
+            tint = .green
+        } else {
+            tint = .accentColor
+        }
+        return tint
+    }
+
+    private var transportSize: CGFloat { isOS ? slotSize * 2.6 : slotSize * 1.5 }
+    private var transportGap: CGFloat { isOS ? 28 : 14 }
+
+    private func transportButton(_ symbol: String, _ label: String,
+                                 _ tint: Color, listening: Bool = false,
+                                 action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: transportSize * 0.4, weight: .medium))
+                .foregroundStyle(.white)
+                .frame(width: transportSize, height: transportSize)
+                .background(tint, in: Circle())
+                .background {
+                    if listening {
+                        HeardRing(size: transportSize,
+                                  level: model.speechLevel,
+                                  hearing: model.hearingSpeech)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
+    }
+
+    private var standardControls: some View {
         HStack(spacing: 8) {
             AttachButton(model: model)
             accessButton
@@ -98,12 +211,65 @@ struct Composer: View {
             Spacer()
             // The mic keeps its slot so Send never shifts as text arrives;
             // it just fades out once there is text (future buttons can sit
-            // beside it in the reserved gap).
-            reserved("microphone", model.voice)
-                .opacity(model.typing ? 0 : 1)
+            // beside it in the reserved gap). While it is open it stays put
+            // and colours -- a recording control that hides itself is how a
+            // microphone gets left on.
+            speakerButton
+                .opacity(model.typing && !model.speech.speaking ? 0 : 1)
+            micButton
+                .opacity(model.typing && !model.listening ? 0 : 1)
             sendButton
         }
         .font(.system(size: controlSize))
+    }
+
+    // Speak replies: a persistent MODE, not a per-message action, so a voice
+    // conversation is entered once. It also shows that sound is still
+    // trailing a finished transcript -- the wave fills while the voice reads,
+    // and tapping it then is the quiet way out.
+
+    // One meaning: it turns speech on and off. Silencing just THIS reply is
+    // the transport's Stop and the microphone, both of which are on screen
+    // whenever there is something to silence -- and a button that meant
+    // "be quiet" while sound played and "switch off" the rest of the time
+    // read as a setting that would not stay off.
+
+    private var speakerButton: some View {
+        let on = model.speech.enabled
+        let live = model.speech.speaking
+        let tip: String
+        if !model.speech.available {
+            tip = "Speech is unavailable in this build"
+        } else {
+            tip = on ? "Replies are spoken" : "Speak replies"
+        }
+        return Button { model.speech.enabled.toggle() } label: {
+            Image(systemName: live ? "speaker.wave.2.fill"
+                                   : (on ? "speaker.wave.2" : "speaker.slash"))
+                .foregroundStyle(on ? Color.accentColor : .secondary)
+                .frame(width: slotSize, height: slotSize)
+                .symbolEffect(.variableColor, isActive: live)
+        }
+        .buttonStyle(.plain)
+        .disabled(!model.speech.available)
+        .help(tip)
+    }
+
+    // Dictation. A tap opens the mic, a second tap closes it and sends what
+    // was SAID -- the gate drops the pauses, so a long think in the middle of
+    // a sentence costs nothing. Disabled on a model with no ears.
+
+    private var micButton: some View {
+        Button(action: model.voice) {
+            Image(systemName: model.listening
+                  ? "microphone.fill" : "microphone")
+                .foregroundStyle(model.listening ? Color.orange : .secondary)
+                .frame(width: slotSize, height: slotSize)
+                .symbolEffect(.pulse, isActive: model.listening)
+        }
+        .buttonStyle(.plain)
+        .disabled(!model.canAttachAudio || (model.busy && !model.listening))
+        .help(model.listening ? "Stop and send" : "Speak")
     }
 
     // Per-turn Web access (airplane -> Wikipedia -> Internet) and Thinking sit
@@ -209,6 +375,23 @@ struct Composer: View {
         .foregroundStyle(.orange)
     }
 
+    // Sound and video have no thumbnail worth the decode, so the glyph
+    // carries the kind; the row otherwise matches the image and doc chips.
+    private func clipChip(_ clip: ChatModel.ClipAttachment) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: clip.isVideo ? "film" : "waveform")
+                .frame(width: 24, height: 24)
+            Text(clip.name).lineLimit(1).truncationMode(.middle)
+            Spacer()
+            Button { model.clearClip(clip.id) } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.plain)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
     private func docChip(_ doc: ChatModel.Doc) -> some View {
         HStack(spacing: 6) {
             // A text file has no meaningful preview; the glyph is sized into the
@@ -228,34 +411,85 @@ struct Composer: View {
     // Send becomes Stop while a reply streams (generation is unbounded, so the
     // user needs an out). No .keyboardShortcut(.defaultAction) -- it would
     // register a second Return handler racing PromptEditor's.
+    //
+    // While a reply is being READ, Stop is the wrong first offer: the common
+    // wish is to hold the voice for a moment, not to throw the answer away.
+    // So it becomes Pause, and pausing reveals Resume beside Stop. The pair
+    // exists only while paused, so the resting row never grows.
 
+    @ViewBuilder
     private var sendButton: some View {
-        let icon = model.busy ? "stop.fill" : "arrow.up"
-        let tint: Color = sendLive ? .white : .secondary
-        return Button(action: fire) {
-            Image(systemName: icon)
+        if model.speech.paused {
+            HStack(spacing: 8) {
+                glyphButton("play.fill", "Resume") { model.speech.resume() }
+                glyphButton("stop.fill", "Stop") { model.stop() }
+            }
+        } else {
+            Button(action: fire) {
+                Image(systemName: primaryIcon)
+                    .font(.system(size: labelSize, weight: .semibold))
+                    .frame(width: sendSize, height: sendSize)
+                    .foregroundStyle(sendLive ? .white : .secondary)
+                    .background(sendBackground,
+                                in: RoundedRectangle(cornerRadius: 7))
+            }
+            .buttonStyle(.plain)
+            .disabled(!sendLive)
+            .help(primaryHelp)
+        }
+    }
+
+    private func glyphButton(_ symbol: String, _ label: String,
+                             _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
                 .font(.system(size: labelSize, weight: .semibold))
                 .frame(width: sendSize, height: sendSize)
-                .foregroundStyle(tint)
-                .background(sendBackground,
+                .foregroundStyle(.white)
+                .background(Color.accentColor,
                             in: RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
-        .disabled(!sendLive)
+        .help(label)
     }
 
-    // Stop while a reply streams, else send. A plain method, not a
-    // method-reference ternary in the Button, which overloads inference.
+    private var primaryIcon: String {
+        var icon = "arrow.up"
+        if model.speech.speaking {
+            icon = "pause.fill"
+        } else if model.busy {
+            icon = "stop.fill"
+        }
+        return icon
+    }
+
+    private var primaryHelp: String {
+        var help = "Send"
+        if model.speech.speaking {
+            help = "Pause"
+        } else if model.busy {
+            help = "Stop"
+        }
+        return help
+    }
+
+    // Pause the voice while it reads, else Stop while a reply streams, else
+    // send. A plain method, not a method-reference ternary in the Button,
+    // which overloads inference.
 
     private func fire() {
-        if model.busy {
+        if model.speech.speaking {
+            model.speech.pause()
+        } else if model.busy {
             model.stop()
         } else {
             model.send()
         }
     }
 
-    private var sendLive: Bool { model.busy || model.canSend }
+    private var sendLive: Bool {
+        model.busy || model.canSend || model.speech.speaking
+    }
 
     private var sendBackground: Color {
         sendLive ? .accentColor : Color.secondary.opacity(0.18)
@@ -263,14 +497,55 @@ struct Composer: View {
 
     // The AI caveat is always shown; the Shift+Return hint only on macOS (iOS
     // has no such key) and only before the first keystroke.
+    //
+    // While the microphone is open this line carries the working phrase
+    // instead, and that is the ONLY feedback in the gap it covers: a speaker
+    // who stops talking waits out the gate's hangover and the end-of-turn
+    // silence -- about two seconds -- before a turn exists to show anything
+    // in. Without this the app looks asleep at exactly the moment the user is
+    // wondering whether it heard them.
 
     private var footnote: some View {
-        Text(model.typing || isOS
-             ? Composer.caveat
-             : "Shift+Return for a new line.  " + Composer.caveat)
+        let quiet = model.listening || model.speech.speaking
+        return Text(noteText)
             .font(.caption2)
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(quiet ? .secondary : .tertiary)
             .frame(maxWidth: .infinity)
+            .animation(.easeInOut(duration: 0.2), value: quiet)
+    }
+
+    // The voice runs several times slower than the answer arrives, so the
+    // transcript settles long before the sound does. Without saying so the
+    // screen looks finished while it is still talking.
+
+    private var noteText: String {
+        let text: String
+        if model.listening {
+            text = listeningNote
+        } else if model.speech.paused {
+            text = "Paused"
+        } else if model.speech.speaking {
+            text = "Speaking…"
+        } else {
+            text = plainFootnote
+        }
+        return text
+    }
+
+    // The phrase says the app is awake; the seconds say the SPEECH arrived,
+    // which is the part a speaker cannot otherwise tell. Nothing heard yet
+    // reads as an invitation rather than a count of zero.
+    private var listeningNote: String {
+        model.heardSeconds > 0.05
+            ? String(format: "%@…  heard %.1fs", model.thinkStatus,
+                     model.heardSeconds)
+            : model.thinkStatus + "…"
+    }
+
+    private var plainFootnote: String {
+        model.typing || isOS
+            ? Composer.caveat
+            : "Shift+Return for a new line.  " + Composer.caveat
     }
 
 }

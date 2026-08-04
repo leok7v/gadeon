@@ -21,28 +21,19 @@ struct AttachButton: View {
 
     var body: some View {
         Button { showImporter = true } label: {
-            Image(systemName: model.attachedImages.isEmpty ? "plus"
-                                                           : "photo.fill")
+            Image(systemName: model.attachGlyph)
                 .frame(width: 22, height: 22)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(model.attachedImages.isEmpty ? Color.secondary
-                                                      : Color.accentColor)
-        .disabled(model.busy || !model.modelSupportsVision)
-        .help(model.modelSupportsVision ? "Attach an image"
-                                        : "This model cannot see images")
+        .foregroundStyle(model.hasAttachments ? Color.accentColor
+                                              : Color.secondary)
+        .disabled(model.busy || !model.canAttachImages)
+        .help(model.attachHelp)
         .fileImporter(isPresented: $showImporter,
-                      allowedContentTypes: [.image],
+                      allowedContentTypes: model.attachableTypes,
                       allowsMultipleSelection: true) { result in
             if case let .success(urls) = result {
-                for url in urls {
-                    let scoped = url.startAccessingSecurityScopedResource()
-                    if let data = try? Data(contentsOf: url) {
-                        model.attachImage(data, name: url.lastPathComponent,
-                                          at: model.caret)
-                    }
-                    if scoped { url.stopAccessingSecurityScopedResource() }
-                }
+                model.handleDrop(urls, at: model.caret)
             }
         }
     }

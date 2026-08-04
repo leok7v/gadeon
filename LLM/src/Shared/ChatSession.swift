@@ -139,6 +139,11 @@ public actor ChatSession {
     // it arms only for XML. The template is the authority (an arch could ship
     // either), detected by the literal it renders calls with.
     private let toolDialectXML: Bool
+    // The markup this model's template speaks, derived from it (ChatWire).
+    private let wire: ChatWire
+    // Whether the template numbers attachments itself (see
+    // numbersAttachments); when it does, ChatSession must not do it too.
+    private let templateNumbers: Bool
     // The turn's base sampler (no grammar mask). The masked variant is swapped
     // in only while a <tool_call> is open -- a logitMask forces the engine to
     // materialize the full logit vector on CPU every token, so it must not ride
@@ -195,13 +200,14 @@ public actor ChatSession {
     // While a title turn runs, installTurnSampler picks a greedy sampler so the
     // title is deterministic (stable across regenerations) rather than sampled.
     private var titleMode = false
-    // The last generation prompt already CLOSED its <think> (a baked empty
-    // <think></think>), so decoding begins in CONTENT even with thinking on.
-    // Set per turn from the rendered gen prompt -- the template is the
-    // authority on where reasoning ends: older Qwen3 (the dense 1.7B) closes
-    // the think in the gen prompt regardless of enable_thinking, so the flag
-    // alone would misroute the model's whole answer to the reasoning channel.
-    private var genClosedThink = false
+    // Whether the last generation prompt leaves decoding INSIDE the reasoning
+    // region. Set per turn from the rendered gen prompt, because the template
+    // is the authority and the three shipped answers differ: Qwen3.5 opens the
+    // marker and leaves it open; the dense Qwen3 bakes a CLOSED empty block
+    // regardless of enable_thinking (the flag alone would misroute its whole
+    // answer to the reasoning channel); gemma-4 says nothing and opens its own
+    // channel as its first decoded output. See ChatWire.startsInReasoning.
+    private var genStartsThink = false
     // NO markup is assumed anywhere in this file beyond the model's OWN
     // reasoning / tool-call wire (<think>, <tool_call>): everything laid
     // into the KV -- openers, think prefixes, tool responses -- comes out
@@ -240,7 +246,14 @@ public actor ChatSession {
                 overthink: Float = 0, runner: (any ToolRunner)? = nil) {
         self.backend = backend
         self.template = template
+        let wire = ChatWire.derive(template)
+        self.wire = wire
+        self.openTag = Array(wire.toolCallOpen.utf8)
+        self.closeTag = Array(wire.toolCallClose.utf8)
+        self.thinkOpen = Array(wire.reasoningOpen.utf8)
+        self.thinkClose = Array(wire.reasoningClose.utf8)
         self.toolDialectXML = template.contains("<function=")
+        self.templateNumbers = ChatSession.numbersAttachments(template)
         self.systemStable = system
         self.systemTail = systemTail
         self.runner = runner
@@ -264,11 +277,10 @@ public actor ChatSession {
             }
         }
         self.overthinkTokens = markers
-        var wire: Set<Int32> = []
-        for marker in ["<tool_call>", "</tool_call>", "<think>", "</think>",
-                       "<|im_start|>", "<|im_end|>"] {
+        var specials: Set<Int32> = []
+        for marker in wire.penaltyExemptCandidates {
             let ids = backend.encode(marker)
-            if ids.count == 1 { wire.insert(ids[0]) }
+            if ids.count == 1 { specials.insert(ids[0]) }
         }
         // Digits ride along: the Qwen pretokenizer splits every numeral
         // into single-digit tokens, so copying a tool result into prose
@@ -280,10 +292,16 @@ public actor ChatSession {
         // per group, so penalties never flip it the way they flip digits.
         for ch in "0123456789." {
             let ids = backend.encode(String(ch))
-            if ids.count == 1 { wire.insert(ids[0]) }
+            if ids.count == 1 { specials.insert(ids[0]) }
         }
-        self.wireTokens = wire
-        self.imagePadId = backend.encode("<|image_pad|>").first ?? -1
+        self.wireTokens = specials
+        // Only a marker the tokenizer carries as ONE token can be the pad.
+        // A model without it (gemma-4 spells its image marker <|image|>)
+        // encodes the spelling as a RUN of ordinary pieces, and taking the
+        // first id would make expandPads rewrite every occurrence of that
+        // ordinary token -- with count 0, deleting it from the prompt.
+        let padIds = backend.encode("<|image_pad|>")
+        self.imagePadId = padIds.count == 1 ? padIds[0] : -1
         self.history = [AgentMessage(role: "system",
                                      content: system + systemTail)]
         self.committed = []
@@ -318,6 +336,14 @@ public actor ChatSession {
 
     public func visionGrid() async -> VisionGrid? {
         await backend.visionGrid()
+    }
+
+    // Whether this model takes tower features directly (image / clip / video
+    // as soft tokens), which is a different capability from supportsVision:
+    // that one promises the MLMultiArray tile path, this one the SoftSpan
+    // path, and no backend today offers both.
+    public func supportsSoftTokens() async -> Bool {
+        await backend.supportsSoftTokens()
     }
 
     private func trace(_ kind: TraceEvent.Kind, from t0: Date? = nil,
@@ -362,6 +388,7 @@ public actor ChatSession {
     public func reset() async {
         history = Array(history.prefix(1))
         committed = []
+        attachmentCounts = [:]
         await backend.reset()
         lastMetrics = TurnMetrics(ctx: 0, thinkTokens: 0, contentTokens: 0)
         trace(.reset, ctx: 0, summary: "new chat")
@@ -377,12 +404,14 @@ public actor ChatSession {
         let state: any BackendState
         let history: [AgentMessage]
         let committed: [Int32]
+        let attachments: [String: Int]
     }
 
     // Snapshot the live conversation so another can run, then be resumed.
     public func park() async throws -> ChatContext {
         ChatContext(state: try await backend.saveState(),
-                    history: history, committed: committed)
+                    history: history, committed: committed,
+                    attachments: attachmentCounts)
     }
 
     // Make a parked conversation live again: restore its engine state and its
@@ -392,6 +421,7 @@ public actor ChatSession {
         try await backend.loadState(context.state)
         history = context.history
         committed = context.committed
+        attachmentCounts = context.attachments
     }
 
     // A codable envelope of the resumable conversation; the engine state rides
@@ -402,6 +432,9 @@ public actor ChatSession {
         let committed: [Int32]
         let roles: [String]
         let contents: [String]
+        // Without this a resumed conversation restarts at Picture 1 and
+        // collides with numbers already sitting in its own KV.
+        let attachments: [String: Int]
     }
 
     // Persist the live conversation to `url`, tagged with `stamp` (a content
@@ -414,7 +447,8 @@ public actor ChatSession {
         let meta = ContextMeta(
             stamp: stamp, committed: context.committed,
             roles: context.history.map { $0.role },
-            contents: context.history.map { $0.content })
+            contents: context.history.map { $0.content },
+            attachments: context.attachments)
         var out = Data()
         let json = try JSONEncoder().encode(meta)
         var len = Int64(json.count).littleEndian
@@ -450,6 +484,7 @@ public actor ChatSession {
             }
             history = restored
             committed = meta.committed
+            attachmentCounts = meta.attachments
             loaded = true
         }
         return loaded
@@ -472,15 +507,36 @@ public actor ChatSession {
     // and drop the probe's own render as a suffix. Empty on a template where
     // that subtraction does not hold -- precook/prime then no-op. An empty
     // tail makes the whole block the prefix (the date bakes at cook time).
+    // What the template emits before any message: gemma-4 opens a system turn
+    // whenever enable_thinking is set, even with no messages at all. Every
+    // Qwen-shaped template renders nothing here.
+    private func leadingBlock() -> String {
+        (try? renderPrompt(
+            template: template, messages: [], tools: [],
+            addGenerationPrompt: false,
+            enableThinking: enableThinking,
+            bosToken: backend.bosToken)) ?? ""
+    }
+
     private func systemRenders() -> (full: String, prefix: String) {
         let probe = AgentMessage(role: "user", content: "x")
         let both = (try? renderPrompt(
             template: template, messages: [history[0], probe],
             tools: toolSpecs, addGenerationPrompt: false,
-            enableThinking: enableThinking)) ?? ""
-        let probeText = (try? renderPrompt(
+            enableThinking: enableThinking,
+            bosToken: backend.bosToken)) ?? ""
+        var probeText = (try? renderPrompt(
             template: template, messages: [probe], tools: [],
-            addGenerationPrompt: false, enableThinking: enableThinking)) ?? ""
+            addGenerationPrompt: false, enableThinking: enableThinking,
+            bosToken: backend.bosToken)) ?? ""
+        // Subtract the probe's own TURN, not its whole render: on a template
+        // with a leading block (above) the probe render carries one too and
+        // it differs from `both`'s, so a plain suffix test fails and the
+        // whole precooked-prefix cache silently switches itself off.
+        let lead = leadingBlock()
+        if !lead.isEmpty, probeText.hasPrefix(lead) {
+            probeText = String(probeText.dropFirst(lead.count))
+        }
         var full = ""
         if !both.isEmpty, !probeText.isEmpty, both.hasSuffix(probeText) {
             full = String(both.dropLast(probeText.count))
@@ -657,6 +713,34 @@ public actor ChatSession {
         }
     }
 
+    // Stream one turn carrying attachments already encoded into SoftSpans
+    // (image / clip / video, in any combination). `parts` is the COMPLETE
+    // content list, text included, so a caller can interleave positionally --
+    // [.text("is "), .image, .text(" inside "), .image, .text("?")] renders
+    // in that order on both shipped templates. `user` is the plain string
+    // history and the trace carry.
+    //
+    // The attachment is prefilled on THIS turn and carried, so later plain
+    // reply() turns still see it -- and a LATER attachment appends its own
+    // delta rather than re-encoding the earlier ones.
+    public nonisolated func replySoft(
+        _ user: String, parts: [ContentPart], spans: [SoftSpan],
+        labelled: Bool = true,
+        onReasoning: (@Sendable (String) -> Void)? = nil,
+        onToolRound: (@Sendable (ToolRoundEvent) -> Void)? = nil
+    ) -> AsyncStream<String> {
+        AsyncStream { cont in
+            let task = Task {
+                await self.runSoftTurn(
+                    user, parts: parts, spans: spans, labelled: labelled,
+                    onReasoning: onReasoning, onToolRound: onToolRound
+                ) { piece in cont.yield(piece) }
+                cont.finish()
+            }
+            cont.onTermination = { _ in task.cancel() }
+        }
+    }
+
     // A short title for the CURRENT conversation, generated on THIS model with
     // no second model and no disturbance to the live chat. The conversation is
     // already in the KV, so this appends a brief title instruction, decodes a
@@ -705,9 +789,17 @@ public actor ChatSession {
         return title
     }
 
+    // Name the SUBJECT. Left to itself a model will happily title a turn by
+    // its shape rather than its content -- "Audio Clip Reply", "Picture 1
+    // Description" -- which reads the same for every spoken or attached
+    // conversation and so tells the user nothing when they come back to a
+    // list of them.
     static let titleInstruction =
-        "In a few words, give a short title for this conversation. At most "
-        + "four words, no punctuation, no quotes. Reply with the title only."
+        "In a few words, give a short title for this conversation, naming "
+        + "what it is ABOUT. Never mention audio, pictures, recordings, "
+        + "attachments or their labels, and never say that anything was "
+        + "spoken or attached. At most four words, no punctuation, no "
+        + "quotes. Reply with the title only."
 
     // The first line, trimmed of quotes / markup / a "Title:" prefix, capped to
     // a handful of words.
@@ -747,8 +839,34 @@ public actor ChatSession {
               summary: String(user.prefix(80)), text: user)
         history.append(AgentMessage(role: "user", content: user))
         await installTurnSampler(vision: visionContext)
-        await runSeed(vision: nil, numberImages: false, saved: saved,
+        await runSeed(vision: nil, soft: [], numberImages: false, saved: saved,
                       onReasoning: onReasoning, onTool: onTool,
+                      onToolRound: onToolRound, yield)
+    }
+
+    // A turn carrying tower features. It seeds like every other turn -- the
+    // delta render emits the template's own placeholders and extendSoft
+    // splices the rows over them -- so nothing about the continuation model
+    // changes; only where the embeddings come from at those positions.
+    private func runSoftTurn(
+        _ user: String, parts: [ContentPart], spans: [SoftSpan],
+        labelled: Bool,
+        onReasoning: (@Sendable (String) -> Void)?,
+        onToolRound: (@Sendable (ToolRoundEvent) -> Void)?,
+        _ yield: @Sendable (String) -> Void) async {
+        await priming?.value
+        let saved = await enterTurn()
+        let rows = spans.reduce(0) { sum, span in sum + span.rows }
+        trace(.user, ctx: await backend.position,
+              summary: String(user.prefix(80))
+                  + " [\(spans.count) attachment(s), \(rows) soft]",
+              text: user)
+        history.append(AgentMessage(role: "user", content: user,
+                                    contentParts: numbered(parts,
+                                                            labelled)))
+        await installTurnSampler(vision: true)
+        await runSeed(vision: nil, soft: spans, numberImages: false,
+                      saved: saved, onReasoning: onReasoning, onTool: nil,
                       onToolRound: onToolRound, yield)
     }
 
@@ -778,8 +896,8 @@ public actor ChatSession {
         await installTurnSampler(vision: true)
         let v = (tiles: tiles, gridH: gridH, gridW: gridW,
                  tokensPerImage: tokensPerImage)
-        await runSeed(vision: v, numberImages: numberImages, saved: saved,
-                      onReasoning: onReasoning, onTool: nil,
+        await runSeed(vision: v, soft: [], numberImages: numberImages,
+                      saved: saved, onReasoning: onReasoning, onTool: nil,
                       onToolRound: onToolRound, yield)
     }
 
@@ -791,13 +909,15 @@ public actor ChatSession {
     private func runSeed(
         vision: (tiles: VisionTiles, gridH: Int, gridW: Int,
                  tokensPerImage: Int)?,
+        soft: [SoftSpan],
         numberImages: Bool, saved: SavedTurn,
         onReasoning: (@Sendable (String) -> Void)?,
         onTool: (@Sendable (String) -> Void)?,
         onToolRound: (@Sendable (ToolRoundEvent) -> Void)?,
         _ yield: @Sendable (String) -> Void) async {
         let first = await seedOnce(fresh: committed.isEmpty,
-                                   numberImages: numberImages, vision: vision)
+                                   numberImages: numberImages, vision: vision,
+                                   soft: soft)
         if first.stopped {
             await rollbackTurn(saved)
         } else {
@@ -834,7 +954,8 @@ public actor ChatSession {
                 trace(.toolCall, summary: call.functionName
                           + (resolved == call.functionName || resolved == nil
                              ? "" : " -> \(resolved!)"),
-                      text: "<tool_call>" + call.rawBlock + "</tool_call>")
+                      text: wire.toolCallOpen + call.rawBlock
+                          + wire.toolCallClose)
                 toolLog("tool call \(round): \(call.functionName) "
                     + call.params.map { "\($0.name)=\($0.value)" }
                         .joined(separator: " ")
@@ -897,7 +1018,8 @@ public actor ChatSession {
     private func seedOnce(
         fresh: Bool, numberImages: Bool,
         vision: (tiles: VisionTiles, gridH: Int, gridW: Int,
-                 tokensPerImage: Int)?
+                 tokensPerImage: Int)?,
+        soft: [SoftSpan]
     ) async -> (seed: Int32, pp: Double, stopped: Bool) {
         let t0 = Date()
         var seed = backend.eos
@@ -906,7 +1028,7 @@ public actor ChatSession {
         do {
             let r = try await seedDelta(fresh: fresh,
                                         numberImages: numberImages,
-                                        vision: vision)
+                                        vision: vision, soft: soft)
             seed = r.seed
             added = r.added
         } catch EngineError.stopped {
@@ -953,7 +1075,8 @@ public actor ChatSession {
     private func seedDelta(
         fresh: Bool, numberImages: Bool,
         vision: (tiles: VisionTiles, gridH: Int, gridW: Int,
-                 tokensPerImage: Int)?
+                 tokensPerImage: Int)?,
+        soft: [SoftSpan]
     ) async throws -> (seed: Int32, added: Int) {
         // Non-fresh with only [system, user] in history = the first turn
         // over a precooked/primed prefix: the system block is already in the
@@ -968,14 +1091,28 @@ public actor ChatSession {
         // assistant/user message and the template's tool-injection breaks on a
         // non-system-first conversation. The specs are already in the KV.
         let tools = fresh ? toolSpecs : []
-        let closedText = (try? renderPrompt(
+        var closedText = (try? renderPrompt(
             template: template, messages: deltaMsgs, tools: tools,
             addGenerationPrompt: false, enableThinking: enableThinking,
-            addVisionId: numberImages)) ?? ""
-        let fullText = (try? renderPrompt(
+            addVisionId: numberImages,
+            bosToken: backend.bosToken)) ?? ""
+        var fullText = (try? renderPrompt(
             template: template, messages: deltaMsgs, tools: tools,
             addGenerationPrompt: true, enableThinking: enableThinking,
-            addVisionId: numberImages)) ?? ""
+            addVisionId: numberImages,
+            bosToken: backend.bosToken)) ?? ""
+        // The delta model holds only while rendering [prev assistant, new
+        // user] alone equals the tail of rendering the whole history. Gemma-4
+        // breaks it: `enable_thinking` ALONE opens its system turn, so every
+        // delta carries an empty "<|turn>system\n<|think|>\n<turn|>\n" the
+        // fresh turn already laid, and laying it again splices one spurious
+        // system turn into the KV per turn. Templates with no such block
+        // render nothing here and the subtraction is a no-op.
+        let lead = fresh ? "" : leadingBlock()
+        if !lead.isEmpty, closedText.hasPrefix(lead), fullText.hasPrefix(lead) {
+            closedText = String(closedText.dropFirst(lead.count))
+            fullText = String(fullText.dropFirst(lead.count))
+        }
         if !fullText.hasPrefix(closedText) {
             // A template whose generation prompt is not a pure render suffix
             // breaks the delta-continuation model; mark after everything
@@ -984,11 +1121,16 @@ public actor ChatSession {
         }
         let genText = fullText.hasPrefix(closedText)
             ? String(fullText.dropFirst(closedText.count)) : ""
-        genClosedThink = genText.contains("</think>")
+        genStartsThink = wire.startsInReasoning(genPrompt: genText,
+                                                enabled: true)
         let expanded = Continuation.expandPads(
             backend.encode(closedText), pad: imagePadId,
             count: vision?.tokensPerImage ?? 0)
-        let closed = expanded.ids
+        // The two expansions never both apply: a soft turn's model spells no
+        // <|image_pad|>, so imagePadId is -1 there and expandPads passes the
+        // ids through untouched.
+        let closed = soft.isEmpty ? expanded.ids
+            : Continuation.expandSpans(expanded.ids, soft)
         let gen = backend.encode(genText)
         if fresh {
             // Conversation start: the engine is normally already empty (New
@@ -1019,6 +1161,8 @@ public actor ChatSession {
             afterHead = try await backend.extendVision(
                 closed, tiles: vision.tiles, imageStarts: expanded.starts,
                 gridH: vision.gridH, gridW: vision.gridW)
+        } else if !soft.isEmpty {
+            afterHead = try await backend.extendSoft(closed, spans: soft)
         } else {
             afterHead = try await backend.extend(closed)
         }
@@ -1026,6 +1170,66 @@ public actor ChatSession {
         try await backend.mark()
         let seed = gen.isEmpty ? afterHead : try await backend.extend(gen)
         return (seed, closed.count + gen.count)
+    }
+
+    // A conversation-global count per modality, so an attachment gets a name
+    // the user (and the model) can refer to for the rest of the turn -- "is
+    // Picture 1 inside Picture 2". Conversation-global rather than per-turn
+    // because an attachment already laid into the KV can never be re-labelled:
+    // the delta render only ever sees the CURRENT turn, so a name skipped now
+    // is unreachable forever.
+    private var attachmentCounts: [String: Int] = [:]
+
+    // Qwen's own nouns, so a model whose template does the numbering itself
+    // and one numbered here read the same to a user.
+    private static func noun(_ part: ContentPart) -> String? {
+        switch part {
+        case .image: "Picture"
+        case .audio: "Audio"
+        case .video: "Video"
+        case .text: nil
+        }
+    }
+
+    // `parts` with a label ahead of each attachment, unless the TEMPLATE
+    // numbers them itself. Gemma trims each text part, so the label
+    // necessarily abuts its marker ("Picture 1:<|image|>") -- there is no way
+    // to carry a separator across a part boundary.
+    //
+    // DICTATION passes labelled: false. A name earns its place on something
+    // handed over to be referred to later; speech is the user talking, and
+    // labelling it turns the turn into an exhibit -- shown "Audio 1:" the
+    // model reasons about "two audio snippets ... presented as text
+    // contextually" and answers ABOUT the recording instead of to the person.
+    private func numbered(_ parts: [ContentPart],
+                          _ labelled: Bool = true) -> [ContentPart] {
+        var out: [ContentPart] = []
+        for part in parts {
+            if let noun = ChatSession.noun(part), !templateNumbers, labelled {
+                let n = (attachmentCounts[noun] ?? 0) + 1
+                attachmentCounts[noun] = n
+                out.append(.text("\(noun) \(n): "))
+            }
+            out.append(part)
+        }
+        return out
+    }
+
+    // Whether the template numbers attachments on its own, DERIVED rather
+    // than assumed: render the same two-image turn with add_vision_id on and
+    // off and see whether it changed anything. Qwen renders "Picture 1: " and
+    // must not be numbered twice; gemma ignores the flag entirely.
+    private static func numbersAttachments(_ template: String) -> Bool {
+        let msg = AgentMessage(role: "user", content: "x",
+                               contentParts: [.image, .image, .text("x")])
+        func render(_ vid: Bool) -> String {
+            (try? renderPrompt(template: template, messages: [msg], tools: [],
+                               addGenerationPrompt: false,
+                               enableThinking: false,
+                               addVisionId: vid)) ?? ""
+        }
+        let on = render(true)
+        return !on.isEmpty && on != render(false)
     }
 
     // Pre-turn snapshot for a clean prefill-cancel rollback: the engine
@@ -1147,29 +1351,39 @@ public actor ChatSession {
         if gate.armed {
             gate.grammar?.advance(backend.tokenBytes(token))
             if gate.grammar?.dead ?? true { gate.grammar = nil }
-        } else if let off = ChatSession.stillOpen(bytes) {
+        } else if let off = stillOpen(bytes) {
             let g = Grammar.toolCall()
             g.advance(Array(bytes[off...]))
             gate.grammar = g
         }
     }
 
-    // Byte offset of the last "<tool_call>" with no "</tool_call>" after it (an
-    // open call the grammar should constrain), or nil.
-    private static let openTag = Array("<tool_call>".utf8)
-    private static let closeTag = Array("</tool_call>".utf8)
+    // The markers the decode loop matches on, out of the model's OWN template
+    // (ChatWire). Qwen says <think> / <tool_call>, gemma-4 says
+    // <|channel>thought / <|tool_call> and closes them asymmetrically; a
+    // template that renders neither leaves the Qwen wire standing.
+    private let openTag: [UInt8]
+    private let closeTag: [UInt8]
+    private let thinkOpen: [UInt8]
+    private let thinkClose: [UInt8]
     // No trailing '>': the rotting 4B emitted "</function >", and the
-    // spaced close is still a complete body.
+    // spaced close is still a complete body. Stays literal -- it is a repair
+    // for the Qwen XML call dialect specifically, not part of any wire.
     private static let closeFn = Array("</function".utf8)
-    private static let thinkClose = Array("</think>".utf8)
-    private static let thinkOpen = Array("<think>".utf8)
 
     // Whether the decoded stream's LEADING bytes (past any whitespace) are a
-    // re-opened <think>: settled once they equal it (.isThink) or diverge from
-    // it (.notThink); .pending while a partial prefix could still complete it.
-    enum LeadingThink { case pending, isThink, notThink }
+    // re-opened reasoning marker: settled once they equal it (.isThink) or
+    // diverge from it (.notThink); .pending while a partial prefix could still
+    // complete it. For gemma this is the NORMAL path, not a stray: its
+    // generation prompt never opens the channel, so the model always opens
+    // <|channel>thought itself as its first output.
+    // `.isThink` carries the byte index just PAST the opener, because a model
+    // that emits its own opener has put markup in the stream and the caller
+    // has to step over it -- the closer's own handling already does exactly
+    // that (`emitted = at + thinkClose.count`).
+    enum LeadingThink { case pending, isThink(Int), notThink }
 
-    static func leadingThink(_ b: [UInt8]) -> LeadingThink {
+    static func leadingThink(_ b: [UInt8], _ open: [UInt8]) -> LeadingThink {
         var i = 0
         while i < b.count && (b[i] == 0x20 || b[i] == 0x09
                               || b[i] == 0x0A || b[i] == 0x0D) { i += 1 }
@@ -1178,11 +1392,11 @@ public actor ChatSession {
         if rest == 0 {
             result = .pending
         } else {
-            let n = min(rest, thinkOpen.count)
+            let n = min(rest, open.count)
             var j = 0
-            while j < n && b[i + j] == thinkOpen[j] { j += 1 }
-            if j == thinkOpen.count {
-                result = .isThink
+            while j < n && b[i + j] == open[j] { j += 1 }
+            if j == open.count {
+                result = .isThink(i + open.count)
             } else if j == n {
                 result = .pending
             }
@@ -1205,10 +1419,10 @@ public actor ChatSession {
         }
         return hold
     }
-    private static func stillOpen(_ b: [UInt8]) -> Int? {
+    private func stillOpen(_ b: [UInt8]) -> Int? {
         var result: Int? = nil
-        if let open = lastIndex(b, openTag),
-           index(b, closeTag, open + openTag.count) == nil {
+        if let open = ChatSession.lastIndex(b, openTag),
+           ChatSession.index(b, closeTag, open + openTag.count) == nil {
             result = open
         }
         return result
@@ -1268,8 +1482,9 @@ public actor ChatSession {
         var bytes: [UInt8] = []
         // Incremental split state, all byte offsets into `bytes`, so each
         // token costs O(new bytes), not a rescan from position 0: `emitted`
-        // is the stream watermark, closeAt the "</think>" marker, toolAt the
-        // answer-region "<tool_call>" opener; the *Search cursors make each
+        // is the stream watermark, closeAt the reasoning-close marker,
+        // toolAt the answer-region tool-call opener (both out of the
+        // template, see ChatWire); the *Search cursors make each
         // rolling marker search touch every byte once.
         var emitted = 0
         var closeAt: Int? = nil
@@ -1284,7 +1499,7 @@ public actor ChatSession {
         // that stray block to reasoning too, so only real content reaches
         // `yield`. thinkDecided holds the split until the leading bytes settle
         // to <think> or diverge; a <think> later in the answer stays content.
-        let startsInThink = enableThinking && !genClosedThink
+        let startsInThink = enableThinking && genStartsThink
         var inThinkRegion = startsInThink
         var thinkDecided = startsInThink
         var wsDone = !startsInThink
@@ -1303,7 +1518,7 @@ public actor ChatSession {
         // reply starts; tg fills in as tokens land.
         lastMetrics = TurnMetrics(ctx: startCtx, thinkTokens: 0,
                                   contentTokens: 0, pp: pp, tg: 0)
-        while cur != backend.eos && !stop && !Task.isCancelled
+        while !backend.eosIds.contains(cur) && !stop && !Task.isCancelled
               && !backend.shouldStop() {
             ids.append(cur)
             bytes.append(contentsOf: backend.tokenBytes(cur))
@@ -1322,9 +1537,15 @@ public actor ChatSession {
             // model-emitted <think> re-opens it -- decided once, from the
             // settling leading bytes.
             if !thinkDecided {
-                switch ChatSession.leadingThink(bytes) {
-                case .isThink:
+                switch ChatSession.leadingThink(bytes, thinkOpen) {
+                case .isThink(let past):
                     inThinkRegion = true
+                    // The model emitted the opener itself (gemma opens
+                    // <|channel>thought where Qwen's opener sits in the
+                    // PROMPT and never reaches this stream). It is markup:
+                    // step over it, or it streams into the reasoning
+                    // disclosure as its first words.
+                    emitted = past
                     wsDone = false          // skip the ws after its </think>
                     thinkDecided = true
                 case .notThink:
@@ -1334,11 +1555,11 @@ public actor ChatSession {
                 }
             }
             if inThinkRegion && closeAt == nil {
-                closeAt = ChatSession.index(bytes, ChatSession.thinkClose,
+                closeAt = ChatSession.index(bytes, thinkClose,
                                             thinkSearch)
                 if closeAt == nil {
                     thinkSearch = max(thinkSearch,
-                        bytes.count - ChatSession.thinkClose.count + 1)
+                        bytes.count - thinkClose.count + 1)
                 }
             }
             let inThink = inThinkRegion && closeAt == nil
@@ -1360,18 +1581,18 @@ public actor ChatSession {
             // the stream (see the pending == nil recovery).
             if toolsActive && toolAt == nil {
                 toolAt = ChatSession.index(
-                    bytes, ChatSession.openTag, toolSearch)
+                    bytes, openTag, toolSearch)
                 if toolAt == nil {
                     toolSearch = max(toolSearch,
-                        bytes.count - ChatSession.openTag.count + 1)
+                        bytes.count - openTag.count + 1)
                 }
             }
             let openHold = toolsActive && toolAt == nil
-                ? ChatSession.partialSuffix(bytes, ChatSession.openTag, n)
+                ? ChatSession.partialSuffix(bytes, openTag, n)
                 : 0
             if inThink {
                 let hold = max(openHold, ChatSession.partialSuffix(
-                    bytes, ChatSession.thinkClose, n))
+                    bytes, thinkClose, n))
                 let end = min(toolAt ?? Int.max, n - hold)
                 if end > emitted {
                     onReasoning?(String(decoding: bytes[emitted ..< end],
@@ -1385,7 +1606,7 @@ public actor ChatSession {
                         onReasoning?(String(decoding: bytes[emitted ..< flush],
                                             as: UTF8.self))
                     }
-                    emitted = at + ChatSession.thinkClose.count
+                    emitted = at + thinkClose.count
                 }
                 while !wsDone && emitted < n {
                     let b = bytes[emitted]
@@ -1438,15 +1659,15 @@ public actor ChatSession {
             // re-seeds. The opener is searched only in the ANSWER region, so
             // a call quoted inside reasoning never triggers.
             if toolsActive && pending == nil, let open = toolAt {
-                if toolCloseSearch < open + ChatSession.openTag.count {
-                    toolCloseSearch = open + ChatSession.openTag.count
+                if toolCloseSearch < open + openTag.count {
+                    toolCloseSearch = open + openTag.count
                 }
-                if toolReopenSearch < open + ChatSession.openTag.count {
-                    toolReopenSearch = open + ChatSession.openTag.count
+                if toolReopenSearch < open + openTag.count {
+                    toolReopenSearch = open + openTag.count
                 }
-                let at = ChatSession.index(bytes, ChatSession.closeTag,
+                let at = ChatSession.index(bytes, closeTag,
                                            toolCloseSearch)
-                let reopen = ChatSession.index(bytes, ChatSession.openTag,
+                let reopen = ChatSession.index(bytes, openTag,
                                                toolReopenSearch)
                 if let reopen, at == nil || reopen < at! {
                     // A second opener before the close IMPLICITLY ends the
@@ -1455,18 +1676,18 @@ public actor ChatSession {
                     // next call's params into this one and swallows it.
                     pending = Tools.parse(Substring(String(
                         decoding: bytes[
-                            (open + ChatSession.openTag.count) ..< reopen],
+                            (open + openTag.count) ..< reopen],
                         as: UTF8.self)))
                     // No <function=> in the span: junk markup. Release it
                     // to the stream and track the NEW opener instead.
                     if pending == nil {
                         toolAt = reopen
                         toolSearch = reopen
-                        toolCloseSearch = reopen + ChatSession.openTag.count
-                        toolReopenSearch = reopen + ChatSession.openTag.count
+                        toolCloseSearch = reopen + openTag.count
+                        toolReopenSearch = reopen + openTag.count
                     }
                 } else if let at {
-                    let end = at + ChatSession.closeTag.count
+                    let end = at + closeTag.count
                     pending = completedCall(String(
                         decoding: bytes[open ..< end], as: UTF8.self))
                     // A malformed pair (no <function=> body -- markup merely
@@ -1481,9 +1702,9 @@ public actor ChatSession {
                     }
                 } else {
                     toolCloseSearch = max(toolCloseSearch,
-                        bytes.count - ChatSession.closeTag.count + 1)
+                        bytes.count - closeTag.count + 1)
                     toolReopenSearch = max(toolReopenSearch,
-                        bytes.count - ChatSession.openTag.count + 1)
+                        bytes.count - openTag.count + 1)
                 }
             }
             let openRunaway = toolAt.map { at in
@@ -1506,9 +1727,10 @@ public actor ChatSession {
                     if loopRescue { thinkRescues = 1 }
                     // Force the model out of <think>: inject </think> so it
                     // must produce the answer next. The next iteration's
-                    // marker search finds the injected "</think>" and the
+                    // marker search finds the injected close marker and the
                     // whitespace skip eats its "\n\n", so none of it streams.
-                    let close = backend.encode("</think>\n\n")
+                    let close = backend.encode(
+                        wire.reasoningClose + "\n\n")
                     ids.append(contentsOf: close)
                     for id in close {
                         bytes.append(contentsOf: backend.tokenBytes(id))
@@ -1525,11 +1747,13 @@ public actor ChatSession {
                 // nothing). Close the think exactly like the caps do and
                 // decode on, ONCE; a model that EOSes again commits empty
                 // as before.
-                if cur == backend.eos, inThinkRegion, closeAt == nil,
+                if backend.eosIds.contains(cur), inThinkRegion,
+                   closeAt == nil,
                    toolAt == nil, thinkRescues == 0,
                    await backend.queuedCount() == 0 {
                     thinkRescues = 1
-                    let close = backend.encode("</think>\n\n")
+                    let close = backend.encode(
+                        wire.reasoningClose + "\n\n")
                     ids.append(contentsOf: close)
                     for id in close {
                         bytes.append(contentsOf: backend.tokenBytes(id))
@@ -1547,11 +1771,11 @@ public actor ChatSession {
         // dispatch the round -- the re-lay writes the canonical close
         // anyway. A span with no </function> may be cut mid-value and
         // never dispatches; Stop / cancel / breaker ends never rescue.
-        if pending == nil, cur == backend.eos, !Task.isCancelled,
+        if pending == nil, backend.eosIds.contains(cur), !Task.isCancelled,
            !backend.shouldStop(), let open = toolAt,
            ChatSession.index(bytes, ChatSession.closeFn, open) != nil {
             pending = Tools.parse(Substring(String(
-                decoding: bytes[(open + ChatSession.openTag.count)...],
+                decoding: bytes[(open + openTag.count)...],
                 as: UTF8.self)))
             if pending != nil {
                 toolLog("eos-cut call rescued (body complete)")
@@ -1566,7 +1790,7 @@ public actor ChatSession {
             reason = "cancelled"
         } else if backend.shouldStop() {
             reason = "stop"
-        } else if cur == backend.eos {
+        } else if backend.eosIds.contains(cur) {
             reason = "eos"
         } else if steps >= maxTokens {
             reason = "max-tokens"
@@ -1597,7 +1821,7 @@ public actor ChatSession {
             // answer (EOS right after it, nothing streamed): committing
             // it would teach the model its own malformed wire on the next
             // delta. Markup quoted INSIDE prose keeps the prose.
-            if ChatSession.strippedOfToolBlocks(answer).isEmpty {
+            if strippedOfToolBlocks(answer).isEmpty {
                 answer = ""
             }
             history.append(AgentMessage(role: "assistant", content: answer))
@@ -1605,10 +1829,11 @@ public actor ChatSession {
         } else {
             let decoded = backend.text(ids)
             var body = inThinkRegion ? "" : decoded
-            if inThinkRegion, let c = decoded.range(of: "</think>") {
+            if inThinkRegion,
+               let c = decoded.range(of: wire.reasoningClose) {
                 body = String(decoded[c.upperBound...])
             }
-            if let tc = body.range(of: "<tool_call>") {
+            if let tc = body.range(of: wire.toolCallOpen) {
                 body = String(body[..<tc.lowerBound])
             }
             preamble = body.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1631,10 +1856,13 @@ public actor ChatSession {
         return (pending, preamble)
     }
 
-    // Parse the first complete <tool_call>..</tool_call> in the decoded text.
+    // Parse the first complete tool-call block in the decoded text, framed by
+    // this template's own markers.
     private func completedCall(_ text: String) -> ToolCall? {
         var result: ToolCall? = nil
-        if let body = Tools.findToolCall(in: text, from: 0) {
+        if let body = Tools.findToolCall(in: text, from: 0,
+                                         open: wire.toolCallOpen,
+                                         close: wire.toolCallClose) {
             result = Tools.parse(text[body])
         }
         return result
@@ -1791,25 +2019,30 @@ public actor ChatSession {
                          toolCalls: [AgentToolCall(
                              name: call.functionName,
                              arguments: sanitizedArgs(call, resolved))]),
-            AgentMessage(role: "tool", content: result),
+            AgentMessage(role: "tool", content: result,
+                         name: resolved ?? call.functionName),
         ]
         let prefix = (try? renderPrompt(
             template: template, messages: [user], tools: [],
             addGenerationPrompt: false,
-            enableThinking: enableThinking)) ?? ""
+            enableThinking: enableThinking,
+            bosToken: backend.bosToken)) ?? ""
         let closedText = (try? renderPrompt(
             template: template, messages: round, tools: [],
             addGenerationPrompt: false,
-            enableThinking: enableThinking)) ?? ""
+            enableThinking: enableThinking,
+            bosToken: backend.bosToken)) ?? ""
         let fullText = (try? renderPrompt(
             template: template, messages: round, tools: [],
             addGenerationPrompt: true,
-            enableThinking: enableThinking)) ?? ""
+            enableThinking: enableThinking,
+            bosToken: backend.bosToken)) ?? ""
         let head = closedText.hasPrefix(prefix)
             ? String(closedText.dropFirst(prefix.count)) : closedText
         let genText = fullText.hasPrefix(closedText)
             ? String(fullText.dropFirst(closedText.count)) : ""
-        genClosedThink = genText.contains("</think>")
+        genStartsThink = wire.startsInReasoning(genPrompt: genText,
+                                                enabled: true)
         var seed = backend.eos
         do {
             let t0 = Date()
@@ -1837,13 +2070,13 @@ public actor ChatSession {
         return seed
     }
 
-    // The answer minus every complete <tool_call>..</tool_call> span:
-    // empty means the "answer" was nothing but markup and must not commit.
-    private static func strippedOfToolBlocks(_ s: String) -> String {
+    // The answer minus every complete tool-call span: empty means the
+    // "answer" was nothing but markup and must not commit.
+    private func strippedOfToolBlocks(_ s: String) -> String {
         var out = s
-        while let open = out.range(of: "<tool_call>"),
+        while let open = out.range(of: wire.toolCallOpen),
               let close = out.range(
-                  of: "</tool_call>",
+                  of: wire.toolCallClose,
                   range: open.upperBound ..< out.endIndex) {
             out.removeSubrange(open.lowerBound ..< close.upperBound)
         }
@@ -1857,7 +2090,7 @@ public actor ChatSession {
     private func answerText(_ decoded: String) -> String {
         var body = ""
         if enableThinking {
-            if let close = decoded.range(of: "</think>") {
+            if let close = decoded.range(of: wire.reasoningClose) {
                 body = String(decoded[close.upperBound...])
             }
         } else {

@@ -2,25 +2,68 @@ import Foundation
 
 // Shared pure helpers for the ChatSession turn loop: vision pad expansion
 // and the runaway loop breaker. Offline-testable, no backend touched.
-enum Continuation {
-    // Replicate each `pad` token into `count` copies -- the tower's merged
-    // vision rows the chat template emits a single <|image_pad|> for. Returns
-    // the expanded ids and the start index of each expanded run, so the caller
-    // can splice the image feats and (re)build a KV whose length matches the
-    // committed vision state across turns.
-    static func expandPads(_ ids: [Int32], pad: Int32, count: Int)
+public enum Continuation {
+    // Replicate each `pad` token into its image's own number of copies -- the
+    // tower's merged vision rows the chat template emits a single placeholder
+    // for. `counts` is per image in order of appearance; a tower with a fixed
+    // rate passes one value per image all the same.
+    //
+    // Per image rather than one rate because a NATIVE-RESOLUTION tower strips
+    // padding after pooling, so its output length follows the aspect ratio:
+    // gemma-4 measures 252 to 273 across the fixture set against a configured
+    // "280" that is a ceiling no real image reaches. The starts are a running
+    // offset for the same reason -- with unequal runs there is no stride.
+    // Missing entries fall back to the last count, so a short list behaves
+    // like the fixed-rate case rather than dropping images.
+    static func expandPads(_ ids: [Int32], pad: Int32, counts: [Int])
         -> (ids: [Int32], starts: [Int]) {
         var out: [Int32] = []
         var starts: [Int] = []
+        var image = 0
         for id in ids {
             if id == pad {
+                let n = counts.isEmpty ? 0
+                    : counts[min(image, counts.count - 1)]
                 starts.append(out.count)
-                out.append(contentsOf: Array(repeating: pad, count: count))
+                out.append(contentsOf: Array(repeating: pad, count: n))
+                image += 1
             } else {
                 out.append(id)
             }
         }
         return (out, starts)
+    }
+
+    // Every image at the same rate.
+    static func expandPads(_ ids: [Int32], pad: Int32, count: Int)
+        -> (ids: [Int32], starts: [Int]) {
+        expandPads(ids, pad: pad, counts: [count])
+    }
+
+    // Replace each span's placeholder with that span's own id block. The
+    // template writes ONE placeholder per attachment, so several spans sharing
+    // a placeholder id are consumed in the order the template emitted them.
+    //
+    // A block's OWN inner placeholders pass through untouched -- they are the
+    // soft positions the features land on, not further attachments -- which is
+    // why this walks the input once rather than expanding what it appends.
+    public static func expandSpans(_ ids: [Int32], _ spans: [SoftSpan]) -> [Int32] {
+        var blocks: [Int32: [[Int32]]] = [:]
+        for span in spans {
+            blocks[span.placeholder, default: []].append(span.ids)
+        }
+        var used: [Int32: Int] = [:]
+        var out: [Int32] = []
+        for id in ids {
+            let at = used[id] ?? 0
+            if let queue = blocks[id], at < queue.count {
+                out.append(contentsOf: queue[at])
+                used[id] = at + 1
+            } else {
+                out.append(id)
+            }
+        }
+        return out
     }
 
     // Runaway loop breaker: an uncapped no-EOS decode often degenerates into

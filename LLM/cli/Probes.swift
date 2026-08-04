@@ -17,8 +17,9 @@ func probeWrap(_ user: String) -> String {
 }
 
 // Bonsai-27B vision tower gate: run the Swift ViT (SIMD/Accelerate) over the
-// exact pixels a numpy reference preprocessed and cosine-compare its merged
-// embeddings, no LM load. Pixels and reference are supplied as raw f32 files.
+// exact pixels the numpy reference preprocessed and cosine-compare its merged
+// embeddings, no LM load. Reference + pixels come from
+// scripts/convert/qwen35/bonsai27b_vit_ref.py.
 //   gadeon-cli --vit mmproj.gguf --vit-pixels pixels.bin --vit-ref ref.bin
 @MainActor func probeVit() throws {
     if let vtIdx = rawArgs.firstIndex(of: "--vit") {
@@ -368,7 +369,7 @@ func probeWrap(_ user: String) -> String {
 }
 
 // Per-op ANE placement audit of a whole model set (MLComputePlan) -- the Swift
-// counterpart of the Python placement gate, run with no Python. For every
+// counterpart of scripts/convert/placement.py, run with no Python. For every
 // .mlmodelc the engine loads, count where each op lands and FAIL if a planned
 // function runs under 99% on the Neural Engine: a silent CPU/GPU fallback is
 // invisible at runtime, since the tokens come out correct either way. Reads

@@ -37,7 +37,7 @@ public final class MetalViT {
     public init(path: String) throws {
         let g = try GGUF(path: path)
         let c = ViTConfig(g)
-        let context = try MetalContext(mapBase: g.map, mapSize: g.mapSize)
+        let context = try MetalContext(g)
         try context.prewarm()
         let dev = context.device
         func f32(_ name: String) -> MTLBuffer {

@@ -4,8 +4,8 @@ import XCTest
 // Pure-math gates (no model) for the multi-turn / multi-image vision plumbing:
 // visionPositionsMulti must seed its M-RoPE scalar at startScalar so a
 // mid-conversation image continues from the running position (the extend
-// carry), and expandPads must replicate each image placeholder into the tower's
-// merged-token run for every image in a turn.
+// carry), and expandPads must replicate each image placeholder into that
+// image's own merged-token run.
 final class EngineVisionTests: XCTestCase {
 
     // Text-only positions advance a shared 3D scalar from startScalar; next is
@@ -54,5 +54,30 @@ final class EngineVisionTests: XCTestCase {
         let out = Continuation.expandPads([7, 5, 7, 9], pad: 7, count: 3)
         XCTAssertEqual(out.ids, [7, 7, 7, 5, 7, 7, 7, 9])
         XCTAssertEqual(out.starts, [0, 4])
+    }
+
+    // A native-resolution tower gives each image its own length, so the runs
+    // differ and the starts cannot come from a stride.
+    func testExpandPadsPerImageCounts() {
+        let out = Continuation.expandPads([7, 5, 7, 9], pad: 7,
+                                          counts: [2, 4])
+        XCTAssertEqual(out.ids, [7, 7, 5, 7, 7, 7, 7, 9])
+        XCTAssertEqual(out.starts, [0, 3])
+    }
+
+    // A short list keeps the last rate rather than dropping the image, so a
+    // fixed-rate tower behaves exactly as it did.
+    func testExpandPadsShortCountListRepeatsLast() {
+        let out = Continuation.expandPads([7, 7], pad: 7, counts: [2])
+        XCTAssertEqual(out.ids, [7, 7, 7, 7])
+        XCTAssertEqual(out.starts, [0, 2])
+    }
+
+    // No counts at all deletes the placeholders rather than leaving a token
+    // the tower never produced features for.
+    func testExpandPadsEmptyCountsDropsPads() {
+        let out = Continuation.expandPads([7, 5], pad: 7, counts: [])
+        XCTAssertEqual(out.ids, [5])
+        XCTAssertEqual(out.starts, [0])
     }
 }

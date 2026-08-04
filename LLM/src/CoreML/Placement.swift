@@ -5,8 +5,8 @@ import Foundation
 // one honest answer to "does this program really run on the Neural Engine".
 // A single silent CPU/GPU fallback is invisible at runtime (the tokens are
 // still correct, they were merely computed on the wrong processor) and only a
-// placement plan reveals it. Swift counterpart of the Python placement
-// gate, with the SAME rules so the two agree:
+// placement plan reveals it. Swift counterpart of
+// scripts/convert/placement.py, with the SAME rules so the two gates agree:
 //   * `const` is data, not compute -- never counted as an offender.
 //   * an op whose usage is nil was NOT planned. MLComputePlan plans only the
 //     model's default function, so in a multifunction package every

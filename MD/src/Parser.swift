@@ -577,11 +577,46 @@ extension Markdown {
         return t.contains("|") && !t.isEmpty
     }
 
+    // A well-formed delimiter cell: dashes, optionally colon-anchored.
+
+    static func isAlignmentCell(_ cell: String) -> Bool {
+        let t = cell.trimmingCharacters(in: .whitespaces)
+        return t.contains("-") && t.allSatisfy { ch in "-: ".contains(ch) }
+    }
+
+    // A cell that is malformed but still clearly punctuation rather than
+    // content. ":**" is the one models actually emit, mid-row, where ":---"
+    // belonged.
+
+    static func isJunkCell(_ cell: String) -> Bool {
+        cell.allSatisfy { ch in !ch.isLetter && !ch.isNumber }
+    }
+
+    // The delimiter row, read tolerantly. Requiring EVERY cell to be
+    // well-formed costs the reader the entire table for one stray character
+    // -- it degrades into a wall of pipes -- and a small model emitting
+    // "| :--- | :--- | :--- | :** |" is not hypothetical. One good cell and
+    // no cell carrying actual content is enough to read the row as what it
+    // plainly is; the malformed cell just takes the default alignment.
+    //
+    // The no-letters-or-digits condition is what keeps a real paragraph out:
+    // "Cost | 5 - 3" has a good-looking second cell and is not a table.
+
     static func isTableSeparator(_ s: String) -> Bool {
         var result = false
         let t = s.trimmedOuter()
         if t.contains("|"), t.contains("-") {
-            result = t.allSatisfy { ch in "-:| \t".contains(ch) }
+            let cells = parseRow(t)
+            var good = 0
+            var usable = true
+            for cell in cells {
+                if isAlignmentCell(cell) {
+                    good += 1
+                } else if !isJunkCell(cell) {
+                    usable = false
+                }
+            }
+            result = usable && good > 0
         }
         return result
     }

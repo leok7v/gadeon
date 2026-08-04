@@ -8,5 +8,10 @@
     <string>gadeon-cli</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- Required for --gemma-mic: macOS refuses microphone access to a
+         process with no usage string, and kills it rather than prompting. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>gadeon-cli listens so the speech gate and the audio tower can be
+    tested without the app.</string>
 </dict>
 </plist>

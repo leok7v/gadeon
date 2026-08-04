@@ -33,6 +33,10 @@ let specNVal = stripValue(&rawArgs, "--spec-n", Int.init)
 // KV cache is ~1% of the bytes a token moves and any KV-side change is
 // invisible; at 8K it is the dominant term on a dense model.
 let benchCtxVal = stripValue(&rawArgs, "--ctx", Int.init)
+// --metal-golden DIR: dump each Metal kernel's output bytes on fixed inputs,
+// or byte-compare against an earlier dump. The acceptance test for a kernel
+// REFACTOR, where cosine is too weak to see a one-ulp change.
+let metalGoldenDir = stripValue(&rawArgs, "--metal-golden")
 // --reasoning-effort none|on|low|medium|high. Qwen3.5 implements only none /
 // on, so anything but `none` enables thinking; absent -> none (empty-think,
 // the direct-answer default).
@@ -47,9 +51,9 @@ let maxReasoning = stripValue(&rawArgs, "--max-reasoning", Int.init) ?? 0
 // --soft-reasoning N: SOFT cap -- end <think> at the next paragraph break once
 // it passes N tokens (0 = off), a cleaner cut than the hard --max-reasoning.
 let softReasoning = stripValue(&rawArgs, "--soft-reasoning", Int.init) ?? 0
-// --vl-gate DIR runs the vision roundtrip: load the fixture (patches.bin plus
-// a vl_ref.json holding the HF reference), fuse-prefill the image + prompt,
-// greedy-decode, and check the first token against HF's argmax.
+// --vl-gate DIR runs the vision roundtrip: load the fixture (patches.bin +
+// vl_ref.json dumped by scripts/convert/vl_gate.py), fuse-prefill the image +
+// prompt, greedy-decode, and check the first token against HF's argmax.
 let vlDir = stripValue(&rawArgs, "--vl-gate")
 // --vl-preprocess PNG REF.bin gates the Swift image preprocessor byte-vs-HF
 // (no model needed). --vl-image PNG runs the real path: Swift-preprocess ->
@@ -62,6 +66,8 @@ let viPng = stripValue(&rawArgs, "--vl-image")
 // ChatSession.replyVision, later turns are text follow-ups that must still see
 // the image (the carry gate for multi-turn image).
 let vcPng = stripValue(&rawArgs, "--vl-chat")
+// Comma-separated images through ONE numbered turn (the A-inside-B gate).
+let viPair = stripValue(&rawArgs, "--vl-images")
 // --system PROMPT sets the system message (@path reads it from a file); absent
 // -> the neutral default.
 let sysVal = stripValue(&rawArgs, "--system")
@@ -114,6 +120,7 @@ rawArgs.removeAll {
      "--greedy"].contains($0)
 }
 
+try probeTTS()
 try probeVit()
 try probeVLPreprocess()
 
@@ -250,6 +257,9 @@ if let pkVal, let session {
 
 if let vlDir {
     try await runVLGate(vlDir)
+} else if let viPair {
+    try await runVLImages(viPair.split(separator: ",").map(String.init),
+                          turnArgs.first ?? VLPrompt.defaultPrompt)
 } else if let vcPng {
     try await runVLChat(vcPng, turnArgs)
 } else if let viPng {

@@ -9,9 +9,19 @@ import MD
 // threshold gated, so a smooth session is silent.
 
 enum Instrument {
+    // Wall-clock zero for the debug view's timestamps.
+    static let launched = Date()
+
     static func install() -> Bool {
+        // Fix that zero HERE. It is a lazy static, and the debug view may not
+        // be opened for minutes -- reading it first from there would date the
+        // launch to whenever someone tapped the ladybug.
+        _ = launched
         MarkdownDiag.report = { s in Diag.shared.report(s) }
         MainThreadWatch.shared.start()
+        Footprint.watch()
+        // LLM reports through this because it cannot reach App directly.
+        Diag.memory = { tag in Footprint.report(tag) }
         return true
     }
 
@@ -73,12 +83,24 @@ final class MainThreadWatch: @unchecked Sendable {
         }
     }
 
+    // Every ping queued DURING a block runs when it ends, so one stall
+    // arrives as a descending run of them -- 888, 789, 689, ... one line per
+    // 100 ms it lasted. Reported raw, a single 888 ms stall reads as seven
+    // stalls, and a reader counting lines overstates it sevenfold. Only the
+    // first of a burst is a measurement; every later one was already in
+    // flight when it was reported, so `sent` before the last report is
+    // exactly the test for "same block".
+    private var drained = DispatchTime.now().uptimeNanoseconds
+
     private func ping() {
         let sent = DispatchTime.now()
-        DispatchQueue.main.async {
-            let ms = Double(DispatchTime.now().uptimeNanoseconds
+        DispatchQueue.main.async { [weak self] in
+            let now = DispatchTime.now()
+            let ms = Double(now.uptimeNanoseconds
                 - sent.uptimeNanoseconds) / 1e6
-            if ms >= MainThreadWatch.thresholdMs {
+            if let self, ms >= MainThreadWatch.thresholdMs,
+               sent.uptimeNanoseconds >= self.drained {
+                self.drained = now.uptimeNanoseconds
                 Diag.shared.report(String(
                     format: "[hang] main thread stalled %.0fms", ms))
             }

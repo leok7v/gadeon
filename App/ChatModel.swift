@@ -25,6 +25,43 @@ import UniformTypeIdentifiers
         let thumbnail: CGImage?
     }
 
+    // An attached sound or video. Kept as a URL rather than bytes: a clip is
+    // orders of magnitude larger than a picture, only the decode needs it,
+    // and holding a video in memory for the life of a conversation is how an
+    // app gets jetsammed.
+    struct ClipAttachment: Identifiable {
+        let id = UUID()
+        let name: String
+        let url: URL
+        let isVideo: Bool
+        // A frame for the chip; nil for sound, which has no picture.
+        let thumbnail: CGImage?
+
+        // A video carries BOTH its frames and its own soundtrack. The
+        // library keeps them apart so a caller can order them; a person
+        // dropping a movie means picture AND sound, and a clip whose speech
+        // never reaches the model produces exactly the answer it gave for
+        // the zoo video -- "I only have a series of still images".
+        func spans(_ media: Gemma4Media) async throws
+            -> [(ContentPart, SoftSpan)] {
+            var out: [(ContentPart, SoftSpan)] = []
+            if isVideo {
+                out.append((.video, try await media.video(url: url)))
+                // A silent clip is ordinary, and a soundtrack past the
+                // model's ceiling should cost the SOUND rather than the
+                // whole attachment.
+                for heard in (try? await media.audio(url: url)) ?? [] {
+                    out.append((.audio, heard))
+                }
+            } else {
+                for heard in try await media.audio(url: url) {
+                    out.append((.audio, heard))
+                }
+            }
+            return out
+        }
+    }
+
     // One tool round of an assistant turn, a row in the transcript's tool
     // strip. `result` is the exact string the model received back as the
     // tool response; nil while the tool is still running (the row shimmers).
@@ -53,6 +90,11 @@ import UniformTypeIdentifiers
         // disclosure above the answer. Empty for user turns and when
         // reasoning-effort is off.
         var reasoning = ""
+        // A user turn whose text is a STAND-IN rather than words: a
+        // dictated turn shows "Spoken, 1.9s" because the speech itself
+        // cannot be shown. Nothing that names the conversation may come
+        // from one.
+        var placeholder = false
         // The runaway loop breaker ended this turn with NO committed answer
         // (it fired mid-think); the transcript explains itself instead of
         // showing silence.
@@ -82,19 +124,6 @@ import UniformTypeIdentifiers
                     + "pictures; slower and heavier on memory."
             }
             return result
-        }
-    }
-
-    // Status bar detail under the composer (Settings + macOS View menu).
-    enum StatusBarMode: String, CaseIterable, Identifiable {
-        case off, short, extended
-        var id: String { rawValue }
-        var label: String {
-            switch self {
-            case .off: return "None"
-            case .short: return "Short"
-            case .extended: return "Extended"
-            }
         }
     }
 
@@ -129,6 +158,10 @@ import UniformTypeIdentifiers
     // Attached .txt/.md docs for the next turn: shown as chips, referenced
     // inline as "@name", and substituted into the prompt in place at send.
     var attachedDocs: [Doc] = []
+    // Sound / video for the next turn, on a model that takes them. Referenced
+    // inline as "@name" exactly like images and docs, so one composer gesture
+    // covers every kind.
+    var attachedClips: [ClipAttachment] = []
     var status = "loading model..."
     // Servable: a built session AND the whole compile finished (build makes
     // the session before the warmup/carry compiles complete, so the session
@@ -137,8 +170,41 @@ import UniformTypeIdentifiers
     // The in-flight generation IS the busy state; no parallel flag to keep
     // in sync with it.
     var busy: Bool { genTask != nil }
-    var statsLabel = ""             // full pp/tg/ctx/mem (status bar, Option held)
-    var statsCompact = ""           // reasoning + mem (status bar, default)
+    // Anything the user is WAITING THROUGH: the prompt being ingested, tokens
+    // arriving, a reply still being read, the microphone open. Wider than
+    // `busy`, which ends with the last token while the voice reads on.
+    var inTurn: Bool { busy || listening || speech.engaged }
+
+    // The last turn was SPOKEN and nothing has been typed since: the
+    // conversation is still a voice one, so the transport stays up with the
+    // microphone offered rather than collapsing to a composer the speaker is
+    // not using. Offered, not opened -- a microphone that reopens itself is
+    // how one gets left on, and the room it would open into is the one the
+    // reply just played into.
+    var voiceReady: Bool {
+        lastTurnSpoken && canAttachAudio && !busy && !listening
+            && !speech.engaged && input.isEmpty
+    }
+
+    private(set) var lastTurnSpoken = false
+    var statsLabel = ""             // the status line's one line of numbers
+    // The speaking half of a voice conversation. Owns its own persisted
+    // settings and its playback; the chat only tells it what arrived.
+    let speech = VoiceSession()
+    // The microphone is open. Drives the composer button's state; the turn
+    // itself only starts once it closes.
+    var listening = false
+    // Speech CAPTURED so far this session, in seconds. Shown while listening
+    // because a rotating phrase only proves the app is awake -- this is the
+    // one number that answers the question the speaker is actually asking,
+    // which is whether their words reached anything at all.
+    var heardSeconds = 0.0
+    // The gate has a speech run OPEN right now, and how far over its bar the
+    // voice is sitting. Drives the ring around the microphone, so what it
+    // reacts to is what will actually be sent rather than whatever the room
+    // is doing.
+    var hearingSpeech = false
+    var speechLevel = 0.0
     // Prefill is running (before the first decoded token): the ingest stage,
     // which the transcript quip and status bar draw a phrase from.
     var prefilling = false
@@ -198,7 +264,7 @@ import UniformTypeIdentifiers
         let text = input.trimmingCharacters(
             in: .whitespacesAndNewlines)
         let has = !text.isEmpty || !attachedImages.isEmpty
-            || !attachedDocs.isEmpty
+            || !attachedDocs.isEmpty || !attachedClips.isEmpty
         return ready && !busy && has
     }
 
@@ -226,6 +292,65 @@ import UniformTypeIdentifiers
     // until its vision splice lands). Gates the attach button, image drops,
     // and the vision send path, so an unsupported model never dead-ends.
     private(set) var modelSupportsVision = false
+
+    // Whether the ACTIVE model takes tower features directly (gemma-4's
+    // image / clip / video soft tokens). A DIFFERENT capability from
+    // modelSupportsVision, which promises the CoreML tile path: no backend
+    // offers both, and the two feed different send paths.
+    private(set) var modelSupportsSoftTokens = false
+    // The soft-token model's attachment encoder, held for the session so its
+    // vision and audio towers are built once. nil for every other backend.
+    @ObservationIgnored var media: Gemma4Media?
+
+    // What the composer may offer, asked ONCE per modality rather than by
+    // naming a backend. Images ride either path; sound and video exist only
+    // on the soft-token one.
+    var canAttachImages: Bool {
+        modelSupportsVision || modelSupportsSoftTokens
+    }
+    var canAttachAudio: Bool { modelSupportsSoftTokens }
+    var canAttachVideo: Bool { modelSupportsSoftTokens }
+
+    // What the open panel accepts, so the picker offers exactly what the
+    // model can take rather than letting a user choose a file that will be
+    // silently ignored. Docs ride every model.
+    var attachableTypes: [UTType] {
+        var out: [UTType] = [.plainText]
+        if canAttachImages { out.append(.image) }
+        if canAttachAudio { out.append(.audio) }
+        if canAttachVideo { out.append(.movie) }
+        return out
+    }
+
+    var hasAttachments: Bool {
+        !attachedImages.isEmpty || !attachedClips.isEmpty
+            || !attachedDocs.isEmpty
+    }
+
+    // The glyph shows what is ALREADY attached, so the button reads as state
+    // rather than only as an action.
+    var attachGlyph: String {
+        var out = "plus"
+        if !attachedClips.isEmpty {
+            out = attachedClips.contains(where: { c in c.isVideo })
+                ? "film.fill" : "waveform"
+        } else if !attachedImages.isEmpty {
+            out = "photo.fill"
+        } else if !attachedDocs.isEmpty {
+            out = "doc.text.fill"
+        }
+        return out
+    }
+
+    var attachHelp: String {
+        var out = "Attach a document"
+        if canAttachAudio {
+            out = "Attach an image, sound, video or document"
+        } else if canAttachImages {
+            out = "Attach an image or document"
+        }
+        return out
+    }
 
     // Whether the ACTIVE model reasons at all, asked of its own chat template
     // at session build (templateSupportsThinking). A model whose generation
@@ -309,17 +434,26 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Transient toggle confirmation (Thinking / access tier), shown centered
-    // for ~3s then dissolved: iOS has no hover help, so a toolbar state flip
-    // needs visible confirmation; macOS gets the same flash.
-    private(set) var hud: String?
+    // A centered flash that dissolves on its own and nothing can click:
+    // either a toggle confirmation (Thinking / access tier), since iOS has no
+    // hover help and a state flip has to be said out loud, or the
+    // acknowledgement a spoken turn opens with.
+    struct Flash: Equatable {
+        let text: String
+        // Larger, for the flash a user is WAITING on rather than one
+        // confirming something they just did with their own hand.
+        let prominent: Bool
+    }
+
+    private(set) var hud: Flash?
     @ObservationIgnored private var hudTask: Task<Void, Never>?
 
-    private func flashHUD(_ text: String) {
+    private func flashHUD(_ text: String, prominent: Bool = false,
+                          seconds: Double = 3) {
         hudTask?.cancel()
-        hud = text
+        hud = Flash(text: text, prominent: prominent)
         hudTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: .seconds(seconds))
             if !Task.isCancelled { hud = nil }
         }
     }
@@ -392,17 +526,11 @@ import UniformTypeIdentifiers
                                       forKey: "confirmDeleteConversation")
         }
     }
-    // Status bar detail (Settings / macOS View menu), persisted. Default None:
-    // the whimsical "working" line now lives in the transcript, so the bar is
-    // hidden until a user opts into the throughput stats.
-    var statusBarMode: StatusBarMode = {
-        let raw = UserDefaults.standard.string(forKey: "statusBarMode") ?? ""
-        return StatusBarMode(rawValue: raw) ?? .off
-    }() {
-        didSet {
-            UserDefaults.standard.set(statusBarMode.rawValue,
-                                      forKey: "statusBarMode")
-        }
+    // The status line under the composer (Settings / macOS View menu),
+    // persisted. Default off: the whimsical "working" line lives in the
+    // transcript, so the numbers are there for whoever wants them.
+    var statusLine: Bool = UserDefaults.standard.bool(forKey: "statusLine") {
+        didSet { UserDefaults.standard.set(statusLine, forKey: "statusLine") }
     }
     // Settings is shown in-view (like the disclaimer), gated by this flag.
     var showSettings = false
@@ -498,10 +626,6 @@ import UniformTypeIdentifiers
     // the reply stream (the decode loop breaks on Task.isCancelled) and the
     // send task clears busy. Generation is otherwise unbounded (runs to EOS).
     private var genTask: Task<Void, Never>?
-    // Bytes of the mmapped weights (a CoreML set's weight.bin sum, or the
-    // whole GGUF): file-backed evictable pages, not in phys_footprint, so
-    // refreshStats reports them separately.
-    private var weightsBytes: Int64 = 0
     // Compiles each downloaded .mlmodelc in-process WHILE the rest of the set
     // still streams (macOS and iOS), so the one-time "Optimizing" compile
     // overlaps the download.
@@ -542,6 +666,17 @@ import UniformTypeIdentifiers
         UserDefaults.standard.set(true, forKey: "disclaimerAccepted")
     }
 
+    // Gemma's own licence gate. Separate from the EULA and the disclaimer
+    // because it binds the user to a THIRD party's terms, and separate from
+    // the size-consent panel because agreeing to a licence and agreeing to
+    // spend 2.7 GB are different decisions.
+    var gemmaTermsAccepted = GemmaTerms.accepted
+
+    func acceptGemmaTerms() {
+        GemmaTerms.accept()
+        gemmaTermsAccepted = true
+    }
+
     // Resolve the pinned set for `name` on disk. Present and verified -> build
     // it straight on the ANE. Absent -> surface the download-consent panel
     // (the app ships no weights); confirmDownload then fetches it from the Hub
@@ -576,34 +711,88 @@ import UniformTypeIdentifiers
         compileDoneLoC = 0
         compileTotalLoC = 0
         phaseStart = Date()
-        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-        weightsBytes = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
         loadError = nil
         // No ANE compile: the wait is a GGUF mmap + GPU upload, so the
         // screen says Loading (indeterminate), never Optimizing.
         firstCompile = false
+        // DROP THE OUTGOING MODEL BEFORE MAPPING THE NEW ONE. Building
+        // first and assigning after -- the obvious order, and what this did
+        // -- keeps BOTH alive for the whole load: the old mmap, its Metal
+        // buffers, its towers and its session, plus everything the new one
+        // maps. Switching Bonsai (442 MB) to E2B (2.7 GB) therefore needs
+        // room for the sum, which is what jetsammed a 4 GB iPhone that had
+        // ample room for either alone.
+        //
+        // Order matters within this too: `session` retains the backend, so
+        // clearing it first is what actually lets the backend go. ARC frees
+        // on the last release, and until then the mapping stays.
+        session = nil
+        chat = nil
+        media = nil
+        ggufBackend = nil
         Task.detached { [weak self] in
             var built: (backend: any AgentBackend, template: String,
                         vocab: Int, presets: SamplingPresets)?
+            var media: Gemma4Media? = nil
+            // Bracket the load: the DELTA is what says whether a set fits a
+            // device, and for an mmap'd GGUF most of it lands in file-backed
+            // pages rather than in the footprint jetsam counts. With the
+            // outgoing model already released, "before" is the floor the new
+            // one grows from rather than a sum of the two.
+            Footprint.report("before \(name)")
             do {
-                let c = try MetalChat(ggufPath: path)
-                built = (c.backend(), c.chatTemplate,
-                         c.tokenizer.vocabCount, c.samplingPresets)
+                // The FILE says which engine it needs, by its own
+                // general.architecture -- never the catalog name, which is a
+                // label we chose.
+                if Gemma4Model.isGemma4(path: path) {
+                    let c = try GemmaChat(ggufPath: path)
+                    let gpu = try c.metalBackend()
+                    built = (gpu, c.chatTemplate,
+                             c.vocabCount, c.samplingPresets)
+                    // Held for the session so the vision and audio towers are
+                    // built once rather than per attachment, and over the text
+                    // engine's own mapping rather than a second one.
+                    media = c.media(ctx: gpu.ctx)
+                } else {
+                    let c = try MetalChat(ggufPath: path)
+                    built = (c.backend(), c.chatTemplate,
+                             c.tokenizer.vocabCount, c.samplingPresets)
+                }
             } catch {
+                // Say WHY. A swallowed reason here is the difference between
+                // "cannot be prepared" and a diagnosis: on a 4 GB phone the
+                // whole GGUF is wrapped in ONE bytesNoCopy MTLBuffer, and
+                // Metal's maxBufferLength is a hard per-device ceiling that
+                // a 2.67 GB set can exceed -- which is not a memory-tuning
+                // problem and cannot be inferred from a footprint log.
+                Diag.shared.report("model prep FAILED \(name): \(error)")
                 built = nil
             }
+            Footprint.report("loaded \(name)")
             let vision = await built?.backend.supportsVision() ?? false
+            let soft = await built?.backend.supportsSoftTokens() ?? false
             await MainActor.run {
                 if let b = built {
-                    self?.chat = nil
                     self?.ggufBackend = b.backend
                     self?.ggufTemplate = b.template
                     self?.ggufVocabCount = b.vocab
                     self?.activePresets = b.presets
                     self?.modelSupportsVision = vision
-                    self?.makeSession()
-                    self?.compiling = false
-                    self?.status = ""
+                    self?.modelSupportsSoftTokens = soft
+                    self?.media = media
+                    // A ~479 ms main-thread stall has been logged starting
+                    // exactly here, right after "loaded <model>", and never
+                    // attributed -- the two candidates are the session build
+                    // (a jinja render for templateSupportsThinking, plus the
+                    // ChatSession init) and SwiftUI laying out the whole chat
+                    // for the first time as `compiling` clears. Both are
+                    // frame-gated, so they say nothing until one of them is
+                    // the answer.
+                    Instrument.timed("makeSession") { self?.makeSession() }
+                    Instrument.timed("show chat") {
+                        self?.compiling = false
+                        self?.status = ""
+                    }
                     self?.primeSession()
                 } else {
                     self?.compiling = false
@@ -700,7 +889,6 @@ import UniformTypeIdentifiers
         compileTotalLoC = 0
         phaseStart = Date()
         optimizeFinish = nil
-        weightsBytes = Self.weightBytes(setDir)
         activePresets = Self.presets(setDir)
         loadError = nil
         let key = Self.compiledKey(setDir)
@@ -737,6 +925,8 @@ import UniformTypeIdentifiers
                 self?.chat = built
                 if built != nil {
                     self?.modelSupportsVision = vision
+                    self?.modelSupportsSoftTokens = false
+                    self?.media = nil
                     self?.makeSession()
                 } else {
                     self?.buildFailed(setDir, attempt)
@@ -885,10 +1075,13 @@ import UniformTypeIdentifiers
         // Pending images belong to the OLD model's vision path; the new one
         // may not have eyes at all. The capability re-probes after build.
         modelSupportsVision = false
+        modelSupportsSoftTokens = false
+        media = nil
         for img in attachedImages {
             input = AttachmentRefs.scrub(img.name, from: input)
         }
         attachedImages = []
+        attachedClips = []
         clampCaret()
         downloading = false
         compiling = false
@@ -897,7 +1090,6 @@ import UniformTypeIdentifiers
         messages = []
         generatedTitle = nil
         statsLabel = ""
-        statsCompact = ""
         modelName = name
         UserDefaults.standard.set(name, forKey: "modelName")
         visionMode = ChatModel.visionMode(for: name)
@@ -1035,10 +1227,29 @@ import UniformTypeIdentifiers
                 + "(get_news); for anything else answer from your own "
                 + "knowledge."
         }
+        // Speech reaches the model as its OWN tower's output, but it does
+        // not know that: shown a spoken turn it reasons "I cannot process
+        // audio directly ... they have given me a transcript snippet
+        // instead", spends the reasoning budget arguing with itself, and is
+        // one step from the refusal that poisons every later turn. Asserting
+        // it up front is the lever that works -- correcting it afterwards is
+        // measured NOT to.
+        //
+        // The second sentence is the one that makes dictation a conversation:
+        // without it a spoken "how are you?" comes back transcribed rather
+        // than answered.
+        if canAttachAudio {
+            s += "\nThe user may speak to you. Their speech reaches you "
+                + "already encoded by your own audio tower, so you hear it "
+                + "directly: never say you cannot process audio, and never "
+                + "treat it as a transcript someone pasted. Spoken words are "
+                + "the user talking TO you -- answer them as you would the "
+                + "same words typed, and write them out only when asked to."
+        }
         // A text-tuned checkpoint with a grafted tower (the 27B) reflexively
         // claims it cannot see images even while describing one; assert the
         // vision channel whenever the active model actually has it.
-        if modelSupportsVision {
+        if canAttachImages {
             s += "\nThe user may attach images. Each is encoded by your "
                 + "vision tower and fully visible to you: describe what you "
                 + "actually see, and never claim you cannot view images. "
@@ -1170,6 +1381,8 @@ import UniformTypeIdentifiers
     // takes effect, then resets the engine (dropping the prior KV + GDN state).
 
     func newChat() {
+        lastTurnSpoken = false
+        speech.stopSpeaking()
         commitCurrent()
         readOnly = false
         currentConversationId = nil
@@ -1257,13 +1470,27 @@ import UniformTypeIdentifiers
         // wastes context/RSS. A text-only model attaches nothing (the button
         // is disabled too; this covers drops and pickers).
         let dup = attachedImages.contains { $0.data == data }
-        if modelSupportsVision, attachedImages.count < Self.maxImages, !dup {
+        if canAttachImages, attachedImages.count < Self.maxImages, !dup {
             let unique = uniqueName(name)
             // 96px covers a ~24pt chip at up to 3x; decoded straight to size, so
             // even a huge source never materializes its full bitmap.
             let thumb = VisionPreprocess.thumbnail(data, maxPx: 96)
             attachedImages.append(
                 ImageAttachment(name: unique, data: data, thumbnail: thumb))
+            insertRef(unique, at: offset)
+        }
+    }
+
+    // A dropped sound or video. Only the URL is kept -- the decode happens at
+    // send, so a long video never sits in memory waiting to be asked about.
+    func attachClip(_ url: URL, isVideo: Bool, at offset: Int) {
+        let allowed = isVideo ? canAttachVideo : canAttachAudio
+        let dup = attachedClips.contains { c in c.url == url }
+        if allowed, attachedClips.count < Self.maxClips, !dup {
+            let unique = uniqueName(url.lastPathComponent)
+            attachedClips.append(ClipAttachment(
+                name: unique, url: url, isVideo: isVideo,
+                thumbnail: isVideo ? nil : nil))
             insertRef(unique, at: offset)
         }
     }
@@ -1296,6 +1523,14 @@ import UniformTypeIdentifiers
         clampCaret()
     }
 
+    func clearClip(_ id: UUID) {
+        if let clip = attachedClips.first(where: { c in c.id == id }) {
+            input = AttachmentRefs.scrub(clip.name, from: input)
+        }
+        attachedClips.removeAll { c in c.id == id }
+        clampCaret()
+    }
+
     func clearDoc(_ id: UUID) {
         if let doc = attachedDocs.first(where: { $0.id == id }) {
             input = AttachmentRefs.scrub(doc.name, from: input)
@@ -1318,6 +1553,10 @@ import UniformTypeIdentifiers
             input = AttachmentRefs.scrub(img.name, from: input)
         }
         attachedImages.removeAll { !live.contains($0.name) }
+        for clip in attachedClips where !live.contains(clip.name) {
+            input = AttachmentRefs.scrub(clip.name, from: input)
+        }
+        attachedClips.removeAll { c in !live.contains(c.name) }
         clampCaret()
     }
 
@@ -1336,8 +1575,9 @@ import UniformTypeIdentifiers
     private func uniqueName(_ name: String) -> String {
         var candidate = name
         var n = 2
-        while attachedDocs.contains(where: { $0.name == candidate })
-            || attachedImages.contains(where: { $0.name == candidate }) {
+        while attachedDocs.contains(where: { d in d.name == candidate })
+            || attachedImages.contains(where: { i in i.name == candidate })
+            || attachedClips.contains(where: { c in c.name == candidate }) {
             candidate = "\(name) (\(n))"
             n += 1
         }
@@ -1347,8 +1587,28 @@ import UniformTypeIdentifiers
     static let imageExts: Set<String> =
         ["png", "jpg", "jpeg", "heic", "heif", "gif", "webp", "bmp", "tiff"]
     static let docExts: Set<String> = ["txt", "md", "markdown", "text"]
+    // Sound and video are recognised by the SYSTEM's own type conformance,
+    // not by a list here: the file panel already filters on UTType.audio /
+    // .movie, so an extension list can only disagree with it -- and it did,
+    // silently swallowing the ogg and opus the panel happily offered.
+    // Whatever the system calls audio gets through, and the DECODE is the
+    // arbiter, failing at send with a real message.
+    static func clipKind(_ url: URL) -> Bool? {
+        let type = UTType(filenameExtension:
+                            url.pathExtension.lowercased())
+        var out: Bool? = nil
+        if type?.conforms(to: .movie) == true {
+            out = true
+        } else if type?.conforms(to: .audio) == true {
+            out = false
+        }
+        return out
+    }
     static let maxDocs = 6
     static let maxImages = 4
+    // One clip is already hundreds to thousands of soft tokens; several would
+    // bury the question under them.
+    static let maxClips = 2
     static let maxDocBytes = 8192
     // Warn once the pending attachments cross this rough prefill-token estimate
     // (a few thousand tokens is a noticeable ingest).
@@ -1360,9 +1620,12 @@ import UniformTypeIdentifiers
     // URLs here (macOS: the user-selected-files entitlement covers drops).
     func handleDrop(_ urls: [URL], at offset: Int) {
         caret = max(0, min(offset, input.utf16.count))
+        var refused: [String] = []
         for url in urls where ready {
             let ext = url.pathExtension.lowercased()
             let scoped = url.startAccessingSecurityScopedResource()
+            let before = attachedImages.count + attachedDocs.count
+                + attachedClips.count
             if Self.imageExts.contains(ext),
                attachedImages.count < Self.maxImages,
                let data = try? Data(contentsOf: url) {
@@ -1371,9 +1634,38 @@ import UniformTypeIdentifiers
                       attachedDocs.count < Self.maxDocs,
                       let text = try? String(contentsOf: url, encoding: .utf8) {
                 attachDoc(url.lastPathComponent, text, at: caret)
+            } else if let isVideo = Self.clipKind(url) {
+                attachClip(url, isVideo: isVideo, at: caret)
             }
+            // Nothing appeared, so the drop was refused somewhere -- an
+            // unreadable type, a model that cannot take this kind, or a full
+            // slate. Any of them looked identical before: silence.
+            let after = attachedImages.count + attachedDocs.count
+                + attachedClips.count
+            if after == before { refused.append(ext.isEmpty ? "file" : ext) }
             if scoped { url.stopAccessingSecurityScopedResource() }
         }
+        if !refused.isEmpty { flashHUD(refusedText(refused)) }
+    }
+
+    // Names the FIRST reason that fits, because a drop of several files
+    // usually fails for one shared reason and a list of every kind would say
+    // less than one sentence does.
+    private func refusedText(_ kinds: [String]) -> String {
+        let what = Set(kinds).sorted()
+            .map { k in "." + k }.joined(separator: " ")
+        var out = "Cannot read \(what)"
+        if kinds.contains(where: { k in Self.imageExts.contains(k) }) {
+            out = canAttachImages
+                ? "Already at \(Self.maxImages) images"
+                : "\(Models.display(modelName)) cannot see images"
+        } else if kinds.contains(where: { k in Self.clipKind(
+            URL(fileURLWithPath: "x." + k)) != nil }) {
+            out = canAttachAudio
+                ? "Already at \(Self.maxClips) clips"
+                : "\(Models.display(modelName)) cannot hear or watch"
+        }
+        return out
     }
 
     // The prompt to send: each inline doc reference is replaced in place by that
@@ -1389,15 +1681,181 @@ import UniformTypeIdentifiers
                     || doc.name.hasSuffix(".markdown")
                 out = "\n\n\(doc.name):\n```\(md ? "markdown" : "")\n"
                     + "\(doc.content)\n```\n\n"
-            } else if self.attachedImages.contains(where: { $0.name == name }) {
+            } else if self.attachedImages.contains(
+                            where: { img in img.name == name })
+                || self.attachedClips.contains(
+                            where: { c in c.name == name }) {
                 out = ""
             }
             return out
         }
     }
 
+    // ---- dictation ------------------------------------------------------
+    // The mic gates what it hears (SpeechGate) and only the speech becomes an
+    // attachment: a session that recorded the clock would spend most of its
+    // context on room tone at 25 soft tokens a second. Each utterance is one
+    // span and the whole session rides ONE turn, which is the shape a long
+    // file already proved.
+
+    @ObservationIgnored private var mic: Microphone?
+    @ObservationIgnored private var gate: SpeechGate?
+    @ObservationIgnored private let heard = HeardSpeech()
+    @ObservationIgnored private var rateInUse: Double = 1
+    @ObservationIgnored private var endOfTurn: Task<Void, Never>?
+    @ObservationIgnored private var micPhrases: Task<Void, Never>?
+    // Quiet after the last utterance CLOSED that means "I am done talking to
+    // you", as against the 700 ms inside SpeechGate that only means "that was
+    // a sentence". The two are different questions and this is the one the
+    // speaker cannot answer with a pause -- so it is deliberately long
+    // enough to think in: with the gate's own hangover ahead of it, sending
+    // costs about 2.2 s of real silence.
+    private static let endOfTurnSilence = 1.5
+
+    // A second tap stops and sends; the button reads as state either way.
     func voice() {
-        log.info("TBD: voice")
+        if listening { endListening() } else { beginListening() }
+    }
+
+    private func beginListening() {
+        // BARGE-IN. Opening the mic silences the reply and nothing else: the
+        // turn keeps generating, so interrupting costs the listener only the
+        // audio they had already decided not to hear. It also has to happen
+        // BEFORE the input is claimed -- on iOS the record category makes
+        // output silent, and a player left running into that never finishes.
+        speech.stopSpeaking()
+        // Still gated on !busy: one session drives one turn, so the mic can
+        // only open once generation has ended. In practice the voice runs
+        // several times longer than the decode, so an interruption during
+        // reading finds the turn already finished.
+        if let media, ready, !busy {
+            let rate = media.audioSampleRate
+            rateInUse = rate
+            let gate = SpeechGate(rate: rate,
+                                  maxSeconds: media.maxAudioSeconds)
+            let mic = Microphone(rate: rate)
+            heard.clear()
+            heardSeconds = 0
+            Task { @MainActor in
+                guard await Microphone.permission() else {
+                    flashHUD("Microphone access is off")
+                    return
+                }
+                AudioSession.beginRecording()
+                do {
+                    try mic.start { [heard] block in
+                        heard.captured(block.count)
+                        heard.observe(block)
+                        heard.add(gate.push(block))
+                    }
+                    self.mic = mic
+                    self.gate = gate
+                    listening = true
+                    micPhrases?.cancel()
+                    micPhrases = phraseCycler()
+                    watchForEndOfTurn()
+                    Diag.shared.report("[mic] listening at \(Int(rate)) Hz "
+                        + AudioSession.describe())
+                } catch {
+                    AudioSession.endRecording()
+                    Diag.shared.report("[mic] FAILED to start: \(error)")
+                    flashHUD("\(error)")
+                }
+            }
+        }
+    }
+
+    // Stop, take what was said, and send it as a turn. Nothing said means
+    // nothing sent -- a span with no speech in it comes back as invented
+    // speech, so silence must reach neither the tower nor the transcript.
+    // Send when the speaker stops for long enough, so a dictated turn needs
+    // one tap rather than two. The tap remains, and sends at once -- waiting
+    // out a timeout you have already decided the end of is its own annoyance.
+    private func watchForEndOfTurn() {
+        endOfTurn?.cancel()
+        var ticks = 0
+        endOfTurn = Task { @MainActor in
+            while listening && !Task.isCancelled {
+                // Fast enough that the ring tracks a syllable; the gate's own
+                // hop is 20 ms, so nothing here is the limiting factor.
+                try? await Task.sleep(for: .milliseconds(60))
+                heardSeconds = heard.seconds
+                hearingSpeech = gate?.hearing ?? false
+                speechLevel = Double(gate?.level ?? 0)
+                // A gate that opens and never closes produces no utterance,
+                // so the stop line that would explain it never gets written
+                // either. One line a second while the mic is open is the only
+                // way to see the run from outside.
+                ticks += 1
+                if ticks % 16 == 0, let gate {
+                    Diag.shared.report(String(
+                        format: "[mic] .. %4.1fs open, hearing %@, bar %.5f, "
+                            + "loudestFrame %.5f (%.1fx bar), peak %.5f, "
+                            + "kept %.1fs, %d utt",
+                        Double(heard.samples) / max(rateInUse, 1),
+                        gate.hearing ? "YES" : "no ", gate.speechThreshold,
+                        gate.loudestFrameEnergy,
+                        gate.speechThreshold > 0
+                            ? gate.loudestFrameEnergy / gate.speechThreshold
+                            : 0,
+                        heard.peak, heard.seconds,
+                        heard.utteranceCount))
+                }
+                let quiet = Date().timeIntervalSince(heard.lastAt)
+                if listening && heard.hasSpeech
+                    && quiet >= ChatModel.endOfTurnSilence {
+                    endListening()
+                }
+            }
+        }
+    }
+
+    private func endListening() {
+        endOfTurn?.cancel()
+        endOfTurn = nil
+        micPhrases?.cancel()
+        micPhrases = nil
+        mic?.stop()
+        AudioSession.endRecording()
+        heard.add(gate?.finish() ?? [])
+        let bar = gate?.speechThreshold ?? 0
+        mic = nil
+        gate = nil
+        listening = false
+        hearingSpeech = false
+        speechLevel = 0
+        let said = heard.take()
+        // Report the SAMPLE count and the bar the gate was holding, not just
+        // the verdict: every way this goes wrong looks the same from outside.
+        // No audio at all is a microphone that never opened (a missing
+        // sandbox entitlement does exactly that, silently); all of it as
+        // speech is a background measured too low; none of it, in a room that
+        // was talking, is one measured too high.
+        let secs = Double(heard.samples) / max(rateInUse, 1)
+        // The PEAK is what separates the two silent failures from each other.
+        // A dead session and a quiet room both come back as "nothing was
+        // said"; only an amplitude tells them apart, and an exact zero peak
+        // over tens of seconds is not a room, it is an input that was never
+        // really running.
+        Diag.shared.report(String(
+            format: "[mic] stopped: %.1fs captured, %d utterance(s), "
+                + "%.1fs of speech, bar %.5f, peak %.6f, rms %.6f, %@",
+            secs, said.count,
+            said.reduce(0.0) { sum, u in sum + u.seconds }, bar,
+            heard.peak, heard.rms, AudioSession.describe()))
+        if said.isEmpty {
+            flashHUD(secs < 0.5 ? "No audio from the microphone"
+                                : "Nothing was said")
+        } else {
+            // The one gap in the whole flow with nothing in it: the mic has
+            // closed, the towers have not run, and the transcript is still
+            // the previous turn. A speaker who has just finished a sentence
+            // reads that silence as not having been heard -- so this answers
+            // BEFORE the working phrases start narrating.
+            flashHUD(Whimsical.current(.heard, hold: 0), prominent: true,
+                     seconds: 2)
+            sendSpoken(said)
+        }
     }
 
     // Stop the in-flight generation (the Send button shows Stop while busy).
@@ -1408,6 +1866,7 @@ import UniformTypeIdentifiers
     // next turn.
 
     func stop() {
+        speech.stopSpeaking()
         genTask?.cancel()
         // The engine stop flag (raised through the session's active backend) is
         // the reliable lever: nonisolated, so it lands even while a synchronous
@@ -1476,11 +1935,280 @@ import UniformTypeIdentifiers
     }
 
     func send() {
-        if !attachedImages.isEmpty, ready, !busy {
-            sendVision()
+        let attached = !attachedImages.isEmpty || !attachedClips.isEmpty
+        if attached, ready, !busy {
+            // A SIBLING rather than a flag on sendVision: that path speaks
+            // MLMultiArray tiles on a square grid at one token rate, and a
+            // native-resolution tower has none of those -- its count follows
+            // each picture's aspect ratio and is known only once it has run.
+            if modelSupportsSoftTokens {
+                sendSoft()
+            } else {
+                sendVision()
+            }
         } else {
             sendText()
         }
+    }
+
+    // The soft-token turn: encode every attachment through the model's own
+    // towers, then hand ChatSession the parts and their spans. The order the
+    // user attached them IS the order they reach the template, so a question
+    // can refer to them positionally.
+    // What to ask when a turn carries attachments and no typed question.
+    //
+    // Each phrasing is MEASURED (3 runs, reasoning on and off), not chosen for
+    // style. Ask about PERCEPTION, never about the medium: "write out what you
+    // hear" is answered every time, while "transcribe any speech in the audio"
+    // is refused every time with reasoning on -- naming the audio makes the
+    // model hunt for a file it was never given and conclude none exists. It
+    // has the sound either way; only the question differs.
+    //
+    // The picture wording is insensitive to this and video is too, so the
+    // perception form is used throughout for one voice rather than because
+    // each kind demands it.
+    private static func softDefaultPrompt(_ parts: [ContentPart]) -> String {
+        var images = 0, videos = 0, sounds = 0
+        for part in parts {
+            switch part {
+            case .image: images += 1
+            case .video: videos += 1
+            case .audio: sounds += 1
+            case .text: break
+            }
+        }
+        var asks: [String] = []
+        if images > 0 {
+            asks.append(images == 1 ? "Describe what you see."
+                                    : "Describe what you see in each picture.")
+        }
+        if videos > 0 { asks.append("Describe what you see happening.") }
+        if sounds > 0 { asks.append("Write out what you hear.") }
+        return asks.joined(separator: " ")
+    }
+
+    private func sendSoft() {
+        let raw = input
+        let typed = promptFor(raw)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var scrubbed = raw
+        for item in attachedImages {
+            scrubbed = AttachmentRefs.scrub(item.name, from: scrubbed)
+        }
+        for item in attachedClips {
+            scrubbed = AttachmentRefs.scrub(item.name, from: scrubbed)
+        }
+        let display = AttachmentRefs.stripped(scrubbed)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let media {
+            let images = attachedImages
+            let clips = attachedClips
+            let previews = images.compactMap { img in
+                VisionPreprocess.thumbnail(img.data, maxPx: 640)
+            }
+            input = ""
+            caret = 0
+            attachedImages = []
+            attachedClips = []
+            attachedDocs = []
+            spokenTurn = false
+            lastTurnSpoken = false
+            softTurn(display: display, typed: typed, previews: previews) {
+                try await ChatModel.encode(media, images: images,
+                                           clips: clips)
+            }
+        }
+    }
+
+    // A dictated turn: the gate already decided what is speech, so each
+    // utterance goes to the tower as it stands and no clip is re-cut.
+    private func sendSpoken(_ said: [SpeechGate.Utterance]) {
+        if let media {
+            let secs = said.reduce(0.0) { sum, u in sum + u.seconds }
+            spokenTurn = true
+            lastTurnSpoken = true
+            softTurn(display: String(format: "Spoken, %.1fs", secs),
+                     typed: ChatModel.spokenPrompt, previews: [],
+                     labelled: false) {
+                try await ChatModel.encode(media, speech: said)
+            }
+        }
+    }
+
+    // What a DICTATED turn asks, as against an attached clip's "write out
+    // what you hear". Someone holding the microphone is talking, not filing a
+    // transcription job, and the default that suits a dropped file answered a
+    // spoken "how are you?" by repeating it back.
+    //
+    // It names no medium, deliberately: asking for "the audio" sends this
+    // model hunting for a file and it concludes none exists (measured 0/3
+    // against 3/3 for a perception-shaped ask).
+    private static let spokenPrompt = "Reply to what I just said."
+
+    // One soft-token turn, however its spans were produced: the attachment
+    // path encodes files, dictation encodes utterances, and everything from
+    // the bubbles to the rollback is the same afterwards.
+    private func softTurn(
+        display: String, typed: String, previews: [CGImage],
+        labelled: Bool = true,
+        _ encode: @escaping @Sendable () async throws
+            -> (parts: [ContentPart], spans: [SoftSpan], perImage: Int)
+    ) {
+        if let session, ready, !busy {
+            prefilling = true
+            activePrefillStage = .vision
+            var asked = Message(fromUser: true, text: display,
+                                images: previews)
+            asked.placeholder = spokenTurn
+            messages.append(asked)
+            messages.append(Message(fromUser: false, text: ""))
+            let idx = messages.count - 1
+            resetLiveBuffers()
+            let onReasoning: @Sendable (String) -> Void = { piece in
+                Task { @MainActor in
+                    if self.prefilling { self.prefilling = false }
+                    self.speech.reasoningArrived(piece)
+                    if self.messages.indices.contains(idx) {
+                        self.liveReason += piece
+                        self.messages[idx].reasoningStream.append(piece)
+                        self.flushLive(idx)
+                    }
+                }
+            }
+            let onToolRound: @Sendable (ToolRoundEvent) -> Void = { event in
+                Task { @MainActor in self.applyToolRound(event, at: idx) }
+            }
+            speech.beginTurn()
+            genTask = Task {
+                let phrases = phraseCycler()
+                let ticker = statsTicker(session)
+                await session.setReasoningCaps(soft: thinkTokenCap,
+                                               hard: thinkTokenCap * 2)
+                do {
+                    let built = try await encode()
+                    if built.perImage > 0 { perImageTokens = built.perImage }
+                    let ask = typed.isEmpty
+                        ? ChatModel.softDefaultPrompt(built.parts) : typed
+                    let stream = session.replySoft(
+                        ask, parts: built.parts + [.text(ask)],
+                        spans: built.spans, labelled: labelled,
+                        onReasoning: onReasoning,
+                        onToolRound: onToolRound)
+                    for await piece in stream {
+                        if prefilling { prefilling = false }
+                        speech.answerArrived(piece)
+                        if messages.indices.contains(idx) {
+                            liveAnswer += piece
+                            messages[idx].answerStream.append(piece)
+                            flushLive(idx)
+                        }
+                    }
+                    speech.endTurn()
+                    flushLive(idx, force: true)
+                    finishDocs(idx)
+                    if await session.turnRolledBack {
+                        if messages.count >= 2 { messages.removeLast(2) }
+                    } else {
+                        await refreshStats(session)
+                        recordTG(await session.lastMetrics.tg)
+                        noteLoopStop(await session.lastMetrics, idx)
+                        commitCurrent()
+                        maybeGenerateTitle()
+                    }
+                } catch {
+                    if messages.indices.contains(idx) {
+                        messages[idx].text = ChatModel.attachmentFailed(error)
+                    }
+                }
+                phrases.cancel()
+                ticker.cancel()
+                genTask = nil
+                prefilling = false
+            }
+        }
+    }
+
+    // Every attachment through its tower, off the main actor -- a picture is
+    // roughly a second of GPU and a video is far more. Ordered images first
+    // then clips, matching the composer's own chip order.
+    private static func encode(
+        _ media: Gemma4Media, images: [ImageAttachment],
+        clips: [ClipAttachment]
+    ) async throws -> (parts: [ContentPart], spans: [SoftSpan],
+                       perImage: Int) {
+        try await Task.detached(priority: .userInitiated) {
+            var parts: [ContentPart] = []
+            var spans: [SoftSpan] = []
+            var widest = 0
+            for img in images {
+                let t0 = Date()
+                let span = try media.image(img.data)
+                widest = max(widest, span.rows)
+                parts.append(.image)
+                spans.append(span)
+                ChatModel.note("image", img.name, span.rows, t0)
+            }
+            for clip in clips {
+                let t0 = Date()
+                for (part, span) in try await clip.spans(media) {
+                    parts.append(part)
+                    spans.append(span)
+                    ChatModel.note(part.noun, clip.name, span.rows, t0)
+                }
+            }
+            // The towers run HERE, so this is the peak an attachment turn
+            // reaches -- the moment a device short of headroom would be
+            // killed, and the one a load-time number cannot predict.
+            if !images.isEmpty || !clips.isEmpty {
+                Footprint.report("encoded \(images.count) img "
+                    + "\(clips.count) clip")
+            }
+            return (parts, spans, widest)
+        }.value
+    }
+
+    // Utterances through the tower, off the main actor. The gate already
+    // bounded each one under the tower's ceiling, so media.audio returns a
+    // single span per utterance and re-cutting never happens.
+    private static func encode(
+        _ media: Gemma4Media, speech: [SpeechGate.Utterance]
+    ) async throws -> (parts: [ContentPart], spans: [SoftSpan],
+                       perImage: Int) {
+        try await Task.detached(priority: .userInitiated) {
+            let t0 = Date()
+            var parts: [ContentPart] = []
+            var spans: [SoftSpan] = []
+            for u in speech {
+                for span in try media.audio(u.samples) {
+                    parts.append(.audio)
+                    spans.append(span)
+                }
+            }
+            ChatModel.note("speech", "\(speech.count) utterance(s)",
+                           spans.reduce(0) { sum, s in sum + s.rows }, t0)
+            return (parts, spans, 0)
+        }.value
+    }
+
+    // Every attachment names itself in diag.log: what kind, which file, how
+    // many soft tokens the tower produced, and how long it took. Without it
+    // a turn that went wrong is indistinguishable from one that never
+    // encoded anything.
+    nonisolated private static func note(_ kind: String, _ name: String,
+                                        _ rows: Int, _ since: Date) {
+        Diag.shared.report(String(
+            format: "attach %@ %@ -> %d soft tokens (%.1fs)",
+            kind, name, rows, Date().timeIntervalSince(since)))
+    }
+
+    // The model's own refusal reaches the transcript: the clip ceiling is the
+    // one a user can act on ("use a shorter clip"), and a generic apology
+    // would hide it.
+    private static func attachmentFailed(_ error: any Error) -> String {
+        // Gemma4MediaError prints its own sentence; anything else would leak
+        // a Swift case name into the transcript.
+        error is Gemma4MediaError
+            ? "\(error)" : "Could not process the attachment."
     }
 
     // ---- empty-screen sample pills -----------------------------------
@@ -1563,7 +2291,7 @@ import UniformTypeIdentifiers
     private var applicableSampleIds: [String] {
         var ids = ["calc"]
         if accessState != .offline { ids.append("research") }
-        if modelSupportsVision, ChatModel.samplePictureThumb != nil {
+        if canAttachImages, ChatModel.samplePictureThumb != nil {
             ids.append("picture")
         }
         return ids
@@ -1649,6 +2377,14 @@ import UniformTypeIdentifiers
             let args = event.params
                 .map { param in "\(param.name): \"\(param.value)\"" }
                 .joined(separator: "  ")
+            // Both edges drive the spoken cue, and from HERE rather than from
+            // onTool because every send path reports rounds this way while
+            // only the text one carries onTool.
+            if event.result == nil {
+                speech.toolStarted(event.resolved ?? event.name)
+            } else {
+                speech.toolFinished()
+            }
             let at = messages[idx].toolRounds.firstIndex { row in
                 row.id == event.round
             }
@@ -1697,7 +2433,6 @@ import UniformTypeIdentifiers
             attachedDocs = []
             prefilling = true
             activePrefillStage = .vision
-            statsLabel = ""
             // Bounded display decode (640px long edge, ~1.6MB each, at most
             // four): crisp at transcript sizes without retaining full
             // bitmaps for the life of the conversation.
@@ -1718,6 +2453,7 @@ import UniformTypeIdentifiers
             let onReasoning: @Sendable (String) -> Void = { piece in
                 Task { @MainActor in
                     if self.prefilling { self.prefilling = false }
+                    self.speech.reasoningArrived(piece)
                     if self.messages.indices.contains(idx) {
                         self.liveReason += piece
                         self.messages[idx].reasoningStream.append(piece)
@@ -1728,6 +2464,7 @@ import UniformTypeIdentifiers
             let onToolRound: @Sendable (ToolRoundEvent) -> Void = { event in
                 Task { @MainActor in self.applyToolRound(event, at: idx) }
             }
+            speech.beginTurn()
             genTask = Task {
                 let phrases = phraseCycler()
                 let ticker = statsTicker(session)
@@ -1751,12 +2488,14 @@ import UniformTypeIdentifiers
                         onReasoning: onReasoning, onToolRound: onToolRound)
                     for await piece in stream {
                         if prefilling { prefilling = false }
+                        speech.answerArrived(piece)
                         if messages.indices.contains(idx) {
                             liveAnswer += piece
                             messages[idx].answerStream.append(piece)
                             flushLive(idx)
                         }
                     }
+                    speech.endTurn()
                     flushLive(idx, force: true)
                     finishDocs(idx)
                     // A prefill-phase Stop rolls the turn back in the session;
@@ -1809,14 +2548,15 @@ import UniformTypeIdentifiers
         if !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            ready, !busy, let session {
             activePrefillStage = attachedDocs.isEmpty ? .prefill : .documents
+            spokenTurn = false
+            lastTurnSpoken = false
             input = ""
             caret = 0
             attachedDocs = []
-            // Prefill runs before the first decoded token: the status bar
-            // shows a cycling phrase (prefilling drives the shimmer), no stats
-            // yet.
+            // Prefill runs before the first decoded token. The status
+            // line keeps the previous turn's numbers (shimmering) rather
+            // than blanking; only a turn-zero context shows a phrase.
             prefilling = true
-            statsLabel = ""
             messages.append(Message(fromUser: true, text: display))
             messages.append(Message(fromUser: false, text: ""))
             let idx = messages.count - 1
@@ -1829,6 +2569,7 @@ import UniformTypeIdentifiers
                 Task { @MainActor in
                     if self.prefilling { self.prefilling = false }
                     if self.consulting { self.consulting = false }
+                    self.speech.reasoningArrived(piece)
                     if self.messages.indices.contains(idx) {
                         self.liveReason += piece
                         self.messages[idx].reasoningStream.append(piece)
@@ -1848,6 +2589,7 @@ import UniformTypeIdentifiers
             let onToolRound: @Sendable (ToolRoundEvent) -> Void = { event in
                 Task { @MainActor in self.applyToolRound(event, at: idx) }
             }
+            speech.beginTurn()
             genTask = Task {
                 let phrases = phraseCycler()
                 let ticker = statsTicker(session)
@@ -1861,12 +2603,14 @@ import UniformTypeIdentifiers
                 for await piece in stream {
                     if prefilling { prefilling = false }  // first token
                     if consulting { consulting = false }
+                    speech.answerArrived(piece)
                     if messages.indices.contains(idx) {
                         liveAnswer += piece
                         messages[idx].answerStream.append(piece)
                         flushLive(idx)
                     }
                 }
+                speech.endTurn()
                 flushLive(idx, force: true)
                 finishDocs(idx)
                 phrases.cancel()
@@ -1902,43 +2646,44 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Pull throughput + context metrics into the status bar: pp/tg t/s, total
-    // ctx (💾), and the reasoning (🤔) / content (💬) split. Called on a ~400ms
-    // ticker while streaming and once at the end, never per token. The memory
-    // walk (task_vm_info) is charged only at this cadence.
+    // The status line's one line: context size, the reasoning (🤔) / answer
+    // (💬) split, footprint (🐏), and prefill/decode t/s. Called on a ~400ms
+    // ticker while streaming and once at the end, never per token -- the
+    // memory walk (task_vm_info) is charged only at this cadence.
+    //
+    // With reasoning off there is no split to show, so the one count is every
+    // token decoded rather than a 🤔 0 nobody needs to read.
     private func refreshStats(_ session: ChatSession) async {
         let t = await session.lastMetrics
         if t.pp > 0 { lastPP = t.pp }   // feeds the attachment time estimate
-        let gib = 1_073_741_824.0
-        // The mmapped weights are not in phys_footprint, so report their size
-        // explicitly or the number reads as if the model were not loaded.
-        let mem = weightsBytes > 0
-            ? String(format: "   mem: %.1fGB + %.1fGB weights",
-                     Self.footprintGiB(), Double(weightsBytes) / gib)
-            : String(format: "   mem: %.1fGB", Self.footprintGiB())
-        let speeds = "pp \(Self.rate(t.pp)) t/s   tg \(Self.rate(t.tg)) t/s"
-        let tokens = "🤔 \(t.thinkTokens)   💬 \(t.contentTokens)"
-        statsCompact = "\(tokens)\(mem)"
-        statsLabel = "\(speeds)   ctx: \(t.ctx) 💾   \(tokens)\(mem)"
-    }
-
-    // t/s for the status bar: one decimal below 10 so a slow decode does not
-    // read as a flat 0 t/s.
-    private static func rate(_ v: Double) -> String {
-        v < 10 ? String(format: "%.1f", v) : String(format: "%.0f", v)
+        // ctx 0 is a conversation that has not run a turn yet, where every
+        // number would read 0. Publish nothing and the working phrase keeps
+        // the line -- which is why this gate lives here rather than in the
+        // view: an empty label IS "there is nothing to say yet".
+        if t.ctx > 0 {
+            let tokens = thinkingActive
+                ? "🤔 \(t.thinkTokens) 💬 \(t.contentTokens)"
+                : "💬 \(t.thinkTokens + t.contentTokens)"
+            statsLabel = "\(t.ctx): \(tokens) "
+                + String(format: "🐏 %.1fGB t/s: %.1f/%.1f",
+                         Self.footprintGiB(), t.pp, t.tg)
+        }
     }
 
     // Poll the running throughput a few times a second (not per token) so the
-    // status bar shows a live pp/tg rate while a reply streams. It idles until
-    // the first token (status cleared), so prefill still shows "Thinking...".
+    // status line shows a live pp/tg rate while a turn runs -- through the
+    // prefill as well, so a second prompt's ingest is visible rather than
+    // hidden behind a phrase.
     // The same cadence refreshes the live message's Markdown snapshots --
     // never per token; only the stream's open block re-parses.
     private func statsTicker(_ session: ChatSession) -> Task<Void, Never> {
         Task { @MainActor in
             while busy && !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(400))
-                if busy && !prefilling {
-                    refreshDocs()
+                if busy {
+                    // Through the prefill too: pp lands the moment decode
+                    // starts, and the line is on screen to receive it.
+                    if !prefilling { refreshDocs() }
                     await refreshStats(session)
                 }
             }
@@ -2004,11 +2749,23 @@ import UniformTypeIdentifiers
     // ingesting the prompt it is the in-flight turn's stage (prefill / documents
     // / vision), and once tokens flow it is the reasoning verbs. Set at send.
     private var activePrefillStage: Whimsical.Stage = .prefill
+    // A spoken turn gets its own pair -- speech is a conversation, and
+    // "Analyzing pixels" over a sentence someone just said reads as the wrong
+    // machine answering. Cleared when the turn ends, so a typed follow-up is
+    // back to the ordinary words.
+    private var spokenTurn = false
     private var whimsicalStage: Whimsical.Stage {
-        if consulting {
-            return .consulting
+        let out: Whimsical.Stage
+        if listening {
+            out = .listening
+        } else if consulting {
+            out = .consulting
+        } else if prefilling {
+            out = spokenTurn ? .listening : activePrefillStage
+        } else {
+            out = spokenTurn ? .mulling : .reasoning
         }
-        return prefilling ? activePrefillStage : .reasoning
+        return out
     }
 
     // Cycle the three playful phrases every ~5s while a reply runs (prefill
@@ -2016,12 +2773,15 @@ import UniformTypeIdentifiers
     // reasoning label, and the status bar never show the same one.
     private func phraseCycler() -> Task<Void, Never> {
         Task { @MainActor in
-            while busy && !Task.isCancelled {
+            while (busy || listening) && !Task.isCancelled {
                 let p = Whimsical.trio(whimsicalStage)
                 thinkStatus = p.first
                 thinkLabel = p.second
                 barStatus = p.third
-                try? await Task.sleep(for: .seconds(5))
+                // Faster while listening: the phrase IS the feedback there,
+                // and a line that has not moved in five seconds reads as a
+                // frozen app rather than an attentive one.
+                try? await Task.sleep(for: .seconds(listening ? 2 : 5))
             }
         }
     }
@@ -2040,24 +2800,6 @@ import UniformTypeIdentifiers
         }
         let gib = 1_073_741_824.0
         return kr == KERN_SUCCESS ? Double(info.phys_footprint) / gib : 0
-    }
-
-    // Sum of the set's weight.bin blobs: the mmapped weight bytes the status
-    // bar reports as the "+ N.NGB weights" term.
-    private static func weightBytes(_ setDir: URL) -> Int64 {
-        let fm = FileManager.default
-        var total: Int64 = 0
-        let en = fm.enumerator(at: setDir,
-                               includingPropertiesForKeys: [.fileSizeKey])
-        if let en {
-            for case let url as URL in en
-                where url.lastPathComponent == "weight.bin" {
-                let sz = (try? url.resourceValues(
-                    forKeys: [.fileSizeKey]))?.fileSize ?? 0
-                total += Int64(sz)
-            }
-        }
-        return total
     }
 
     // The model's own sampling matrix (generation_config.json's
@@ -2137,8 +2879,18 @@ import UniformTypeIdentifiers
             // Download scales with bytes; compile time tracks op count,
             // superlinear in model size (~n^1.3 measured), so a linear byte
             // ratio undersells a big set's first-install optimize.
+            // A GGUF set names its files explicitly and runs on the GPU:
+            // there is no ANE compile, so there is no optimize phase to
+            // estimate. buildGguf already knows this (it sets firstCompile
+            // false and shows Loading, never Optimizing) -- the consent
+            // panel did not, and extrapolated an ANE compile time from the
+            // base model by byte ratio. That is how a 2.67 GB GPU model came
+            // to promise "~34 min optimize" for work it never does.
+            let gpuOnly = ModelCatalog.source(name)?.files != nil
             result = (Self.minutes(dl > 0 ? dl : dl0 * ratio),
-                      Self.minutes(opt > 0 ? opt : opt0 * pow(ratio, 1.3)))
+                      gpuOnly ? 0
+                              : Self.minutes(opt > 0 ? opt
+                                                     : opt0 * pow(ratio, 1.3)))
         }
         return result
     }
@@ -2160,4 +2912,114 @@ import UniformTypeIdentifiers
         UserDefaults.standard.double(forKey: timeKey(phase, name))
     }
 
+}
+
+// Utterances arrive on the audio thread and are read on the main one when the
+// mic closes. A lock rather than an actor: the audio thread cannot await.
+final class HeardSpeech: @unchecked Sendable {
+    private let lock = NSLock()
+    private var said: [SpeechGate.Utterance] = []
+    private var count = 0
+    private var at = Date()
+
+    // When the last utterance CLOSED. The end-of-turn watch measures from
+    // here rather than from the last audio block, because blocks keep
+    // arriving through silence and would never let the turn end.
+    var lastAt: Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return at
+    }
+
+    var hasSpeech: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !said.isEmpty
+    }
+
+    var utteranceCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return said.count
+    }
+
+    // Speech kept so far, which is NOT the time the mic has been open: the
+    // pauses are already gone.
+    var seconds: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return said.reduce(0.0) { sum, u in sum + u.seconds }
+    }
+
+    // How many samples the microphone actually delivered, which is the one
+    // number that tells a silent room from a silent input.
+    var samples: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func captured(_ n: Int) {
+        lock.lock()
+        count += n
+        lock.unlock()
+    }
+
+    // Loudest sample seen and the running mean square, so a stopped mic can
+    // be told from a quiet one after the fact.
+    private var loudest: Float = 0
+    private var square: Double = 0
+
+    func observe(_ block: [Float]) {
+        var top: Float = 0
+        var sum: Double = 0
+        for s in block {
+            let a = abs(s)
+            if a > top { top = a }
+            sum += Double(s) * Double(s)
+        }
+        lock.lock()
+        if top > loudest { loudest = top }
+        square += sum
+        lock.unlock()
+    }
+
+    var peak: Float {
+        lock.lock()
+        defer { lock.unlock() }
+        return loudest
+    }
+
+    var rms: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return count > 0 ? (square / Double(count)).squareRoot() : 0
+    }
+
+    func add(_ more: [SpeechGate.Utterance]) {
+        if !more.isEmpty {
+            lock.lock()
+            said.append(contentsOf: more)
+            at = Date()
+            lock.unlock()
+        }
+    }
+
+    func clear() {
+        lock.lock()
+        said = []
+        count = 0
+        loudest = 0
+        square = 0
+        at = Date()
+        lock.unlock()
+    }
+
+    func take() -> [SpeechGate.Utterance] {
+        lock.lock()
+        defer { lock.unlock() }
+        let out = said
+        said = []
+        return out
+    }
 }

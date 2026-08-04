@@ -22,9 +22,8 @@ enum AppTheme: String, CaseIterable, Identifiable {
 
 // The menu sidebar, shown as an overlay drawer sliding in from the leading
 // edge. Search + read-only conversation history (swipe to delete) when there
-// is any, a quiet hint when there is not, and Theme + Settings + For Nerds
-// pinned at the bottom (the thumb zone). Selecting a conversation opens it
-// read-only; the footer buttons route Settings / Debug.
+// is any, a quiet hint when there is not, and Theme + Settings pinned at the
+// bottom (the thumb zone). Selecting a conversation opens it read-only.
 
 struct Sidebar: View {
 
@@ -35,7 +34,6 @@ struct Sidebar: View {
     let onNewChat: () -> Void
     let onSearch: () -> Void
     let onSettings: () -> Void
-    let onDebug: () -> Void
 
     // The conversation whose trash was tapped (macOS): its row shows an inline
     // red Delete to confirm -- the same two-step feel as the iOS swipe -- and
@@ -258,17 +256,11 @@ struct Sidebar: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            HStack {
-                Button(action: onSettings) {
-                    Label("Settings", systemImage: "gearshape")
-                }
-                Spacer()
-                Button(action: onDebug) {
-                    Image(systemName: "ladybug")
-                }
-                .help("For Nerds")
+            Button(action: onSettings) {
+                Label("Settings", systemImage: "gearshape")
             }
             .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(16)
     }

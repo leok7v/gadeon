@@ -141,3 +141,32 @@ func runVLChat(_ png: String, _ turns: [String]) async throws {
         }
     }
 }
+
+// Several images in ONE turn, numbered by the template itself
+// (add_vision_id -> "Picture 1: "), so a question can refer to them: "is
+// Picture 1 inside Picture 2". Fit mode is what makes the numbering line up
+// with the PICTURES -- tiling emits one placeholder per TILE, so a tiled
+// image would consume several numbers on its own.
+@MainActor
+func runVLImages(_ pngs: [String], _ question: String) async throws {
+    let grid = await eng.visionGrid() ?? VisionGrid.canonical
+    var tiles: [MLMultiArray] = []
+    for png in pngs {
+        let data = try Data(contentsOf: URL(fileURLWithPath: png))
+        tiles.append(contentsOf: try VisionPreprocess.imageSet(
+            data, tiled: false, grid: grid))
+    }
+    err("[vl-images] \(pngs.count) image(s) -> \(tiles.count) tile(s) "
+        + "@\(grid.side)px\n")
+    if let session {
+        print("\nUSER: [\(pngs.count) images] \(question)\nASSISTANT: ",
+              terminator: "")
+        fflush(stdout)
+        let stream = session.replyVision(
+            question, tiles: tiles, gridH: grid.gridH, gridW: grid.gridW,
+            tokensPerImage: grid.mergedTokens, numberImages: true,
+            onReasoning: { r in err(r) })
+        for await piece in stream { print(piece, terminator: ""); fflush(stdout) }
+        print()
+    }
+}

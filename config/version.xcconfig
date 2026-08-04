@@ -1,4 +1,8 @@
-// version.xcconfig -- MARKETING_VERSION is YY.MM.DD, CURRENT_PROJECT_VERSION
-// is YYMMDD.HHMM (UTC). Edit by hand when cutting a build.
+// version.xcconfig -- committed fallback stamp (md.too convention).
+// MARKETING_VERSION is YY.MM.DD; CURRENT_PROJECT_VERSION is YYMMDD.HHMM (UTC).
+// The "Stamp Version" build phase (scripts/stamp-version.sh) refreshes
+// version-generated.xcconfig on every build; the optional include below lets
+// it override these values, and a fresh checkout builds with the fallback.
 MARKETING_VERSION = 26.07.24
 CURRENT_PROJECT_VERSION = 260724.0833
+#include? "version-generated.xcconfig"

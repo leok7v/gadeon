@@ -197,6 +197,17 @@ public struct SamplerConfig: Sendable {
         if let k = g.int("general.sampling.top_k") {
             cfg.topK = k; cfg.setMask.insert(.topK)
         }
+        if let m = g.double("general.sampling.min_p") {
+            cfg.minP = Float(m); cfg.setMask.insert(.minP)
+        }
+        if let p = g.double("general.sampling.presence") {
+            cfg.presencePenalty = Float(p)
+            cfg.setMask.insert(.presencePenalty)
+        }
+        if let r = g.double("general.sampling.repeat_penalty") {
+            cfg.repeatPenalty = Float(r)
+            cfg.setMask.insert(.repeatPenalty)
+        }
         return cfg
     }
 
@@ -301,6 +312,22 @@ public struct SamplingPresets: Sendable {
         nonThinkingText: .instructGeneral,
         nonThinkingVision: .instructGeneral)
 
+    // The four cells of a "_sampling_presets" object, whichever carrier it
+    // arrived in. Each cell layers onto its own fallback row, so a matrix
+    // that names only one cell keeps the card values for the other three.
+    static func from(presets p: [String: Any],
+                     fallback: SamplingPresets) -> SamplingPresets {
+        SamplingPresets(
+            thinkingText: SamplerConfig.row(
+                p["thinking_text"], base: fallback.thinkingText),
+            thinkingVision: SamplerConfig.row(
+                p["thinking_vision"], base: fallback.thinkingVision),
+            nonThinkingText: SamplerConfig.row(
+                p["nonthinking_text"], base: fallback.nonThinkingText),
+            nonThinkingVision: SamplerConfig.row(
+                p["nonthinking_vision"], base: fallback.nonThinkingVision))
+    }
+
     // Overlay whatever cells "_sampling_presets" carries onto `fallback`, so a
     // config supplies the matrix and an older one keeps the card defaults.
     public static func from(generationConfig url: URL,
@@ -311,15 +338,23 @@ public struct SamplingPresets: Sendable {
         var result = fallback
         if let dict = obj as? [String: Any],
            let p = dict["_sampling_presets"] as? [String: Any] {
-            result = SamplingPresets(
-                thinkingText: SamplerConfig.row(
-                    p["thinking_text"], base: fallback.thinkingText),
-                thinkingVision: SamplerConfig.row(
-                    p["thinking_vision"], base: fallback.thinkingVision),
-                nonThinkingText: SamplerConfig.row(
-                    p["nonthinking_text"], base: fallback.nonThinkingText),
-                nonThinkingVision: SamplerConfig.row(
-                    p["nonthinking_vision"], base: fallback.nonThinkingVision))
+            result = from(presets: p, fallback: fallback)
+        }
+        return result
+    }
+
+    // The same matrix out of a single-file model. A GGUF has no sidecar, so
+    // the emitter records the object under one key and it is read through the
+    // SAME cell logic -- flattening it into per-field keys would let the two
+    // carriers drift apart.
+    static func from(gguf g: GGUF,
+                     fallback: SamplingPresets) -> SamplingPresets {
+        var result = fallback
+        if let text = g.string("general.sampling.presets_json"),
+           let data = text.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data),
+           let p = obj as? [String: Any] {
+            result = from(presets: p, fallback: fallback)
         }
         return result
     }

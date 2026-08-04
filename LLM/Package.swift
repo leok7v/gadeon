@@ -6,6 +6,13 @@ import PackageDescription
 // src/{Shared,CoreML,Metal,SIMD,Slugs}. gadeon-cli (cli/) is a macOS
 // command-line harness for driving and testing it without the UI. The SwiftUI
 // app links LLM from the Xcode project; see config/platform.xcconfig.
+// Binds cblas_sgemm$NEWLAPACK. Without the define Swift binds the LEGACY
+// cblas_sgemm -- a DIFFERENT entry point, and nothing guarantees the two
+// agree in the last bits at every shape. The reference C the speech engine is
+// compared against is built with it, so the comparison is only meaningful
+// while this matches.
+let accelerateNewLapack = ["-Xcc", "-DACCELERATE_NEW_LAPACK"]
+
 let package = Package(
     name: "gadeon",
     platforms: [.macOS(.v15), .iOS(.v18)],
@@ -17,10 +24,18 @@ let package = Package(
         .target(
             name: "LLM",
             path: "src",
-            // The Slugs MiniLM+index model ships INSIDE the package so every
-            // consumer (app framework, SwiftPM clients) resolves one copy --
-            // WikiSlugs.bundledModel finds it in either bundle form.
-            resources: [.copy("Slugs/minilm.gguf")],
+            // The Slugs MiniLM+index model and the TTS speech set ship INSIDE
+            // the package so every consumer (app framework, SwiftPM clients)
+            // resolves one copy -- WikiSlugs.bundledModel and Speech.bundled
+            // find them in either bundle form.
+            resources: [
+                .copy("Slugs/minilm.gguf"),
+                .copy("TTS/kitten_full.gguf"),
+                .copy("TTS/voices.safetensors"),
+                .copy("TTS/en_rules"),
+                .copy("TTS/en_list"),
+            ],
+            swiftSettings: [.unsafeFlags(accelerateNewLapack)],
             plugins: ["MetalBuild"]
         ),
         .plugin(
