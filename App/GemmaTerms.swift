@@ -1,22 +1,33 @@
 import LLM
 import SwiftUI
 
-// Google's Gemma Terms of Use, shown BEFORE gemma-4 is downloaded.
+// A consent gate for a model whose licence binds the END USER, shown before
+// that model is downloaded.
 //
-// WHY this exists when no other model has one: every other entry in the
-// catalog is Apache-2.0, which asks nothing of an end user. Gemma is not --
-// its terms bind whoever uses the model, and they oblige a distributor to
-// pass that on. Bundling it silently would leave a user bound by terms they
-// were never shown, so consent is a gate rather than a footnote.
+// WHY it can exist and name nothing: a licence that asks something of the
+// user is a property of the model, not of the app, and it can arrive with any
+// future release. Keeping the gate armed and empty costs one lookup and means
+// the next such model needs a name here rather than a screen built under time
+// pressure.
 //
-// Deliberately NOT a reproduction of the licence: linking the canonical text
-// is both what Google asks and the only version that cannot go stale here.
+// Deliberately NOT a reproduction of any licence: linking the canonical text
+// is the only version that cannot go stale here.
 enum GemmaTerms {
-    // The catalog names it; matching on the name keeps the gate with the
-    // model rather than scattered through the download flow.
-    static let modelName = "gemma-4-E2B"
+    // EMPTY, and that is a finding rather than an oversight. Every gemma-4
+    // checkpoint Google publishes is Apache-2.0 and UNGATED on the Hub --
+    // license_link resolves to a page titled "Apache License 2.0", and the
+    // gemma-3 repos beside them are still `gated: manual` under `license:
+    // gemma`, which is what makes the change deliberate rather than sloppy
+    // metadata. Apache-2.0 asks nothing of an end user, so there is nothing
+    // left to consent to.
+    //
+    // What it DOES ask of a redistributor is met elsewhere: the licence text,
+    // the attribution and the statement that these weights are modified (they
+    // are repacked from the QAT checkpoints) belong with the credits, not
+    // behind a gate.
+    static let modelNames: Set<String> = []
 
-    static func applies(to name: String) -> Bool { name == modelName }
+    static func applies(to name: String) -> Bool { modelNames.contains(name) }
 
     static let termsURL = URL(string: "https://ai.google.dev/gemma/terms")!
     static let policyURL =
@@ -40,6 +51,7 @@ enum GemmaTerms {
 // than starting a download itself: the licence and the "this costs you 2.7 GB"
 // question are different consents and should not be collapsed into one tap.
 struct GemmaTermsView: View {
+    let model: String
     let onAgree: () -> Void
     let onCancel: () -> Void
 
@@ -49,7 +61,7 @@ struct GemmaTermsView: View {
                 .font(.largeTitle)
                 .foregroundStyle(.secondary)
             Text("Gemma Terms of Use").font(.title2).bold()
-            Text("\(Models.display(GemmaTerms.modelName)) is provided by "
+            Text("\(Models.display(model)) is provided by "
                + "Google under the Gemma Terms of Use, not the open-source "
                + "licence the other models use. By continuing you agree to "
                + "those terms and to the Prohibited Use Policy, which "

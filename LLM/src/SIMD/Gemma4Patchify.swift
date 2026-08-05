@@ -17,7 +17,12 @@ import ImageIO
 // different budget needs no code change here.
 
 public struct Gemma4Patchify {
-    public let cfg: Gemma4VisionConfig
+    // The geometry, read straight off the file rather than through a tower's
+    // config: a UNIFIED checkpoint has no tower to configure and still cuts
+    // its images to exactly these numbers.
+    public let patchSize: Int
+    public let poolKernel: Int
+    public let maxSoftTokens: Int
     private let rescale: Float
     private let normalize: Bool
     private let mean: [Float]
@@ -27,15 +32,26 @@ public struct Gemma4Patchify {
     // patch budget is a soft-token budget times that area. A still image and
     // a video FRAME get different budgets from the file (280 against 70), so
     // it is a parameter rather than a property of the tower.
-    public var maxPatches: Int { patchBudget(cfg.maxSoftTokens) }
+    public var maxPatches: Int { patchBudget(maxSoftTokens) }
+    public var patchDim: Int { patchSize * patchSize * 3 }
+    // The side of a MERGED patch, which is the unit a unified checkpoint
+    // embeds directly and the pooling unit a tower would reduce over.
+    public var mergedSide: Int { poolKernel * patchSize }
+    public var mergedDim: Int { mergedSide * mergedSide * 3 }
 
     public func patchBudget(_ softTokens: Int) -> Int {
-        softTokens * cfg.poolKernel * cfg.poolKernel
+        softTokens * poolKernel * poolKernel
     }
 
     public init(_ model: Gemma4Model) throws {
         let g = model.gguf
-        cfg = try Gemma4VisionConfig(g)
+        func i(_ k: String) throws -> Int {
+            try requireInt(g, "gemma4.vision." + k,
+                           "an image cannot be cut without it")
+        }
+        patchSize = try i("patch_size")
+        poolKernel = try i("pool_kernel")
+        maxSoftTokens = try i("max_soft_tokens")
         rescale = Float(g.double("gemma4.vision.rescale_factor") ?? (1 / 255))
         normalize = g.bool("gemma4.vision.normalize") ?? false
         mean = (g.doubles("gemma4.vision.image_mean") ?? [0, 0, 0])
@@ -43,7 +59,10 @@ public struct Gemma4Patchify {
         std = (g.doubles("gemma4.vision.image_std") ?? [1, 1, 1])
             .map { v in Float(v) }
         let want = g.string("gemma4.vision.resample") ?? "bicubic"
-        // Any other filter would be silently approximated by `.high`.
+        // Only Pillow's bicubic is implemented, and the filter shapes the
+        // pixels the model sees -- an encoder-free checkpoint feels the
+        // difference directly, so substituting a near one is a wrong answer
+        // rather than an approximation.
         if want != "bicubic" {
             throw GGUFErr.parse("gemma4.vision.resample is \(want); this "
                                 + "build resizes bicubic")
@@ -56,8 +75,8 @@ public struct Gemma4Patchify {
     // pooled block, so they are refused rather than silently reshaped.
     func target(width: Int, height: Int,
                 budget: Int) throws -> (w: Int, h: Int) {
-        let patch = cfg.patchSize
-        let sideMult = cfg.poolKernel * patch
+        let patch = patchSize
+        let sideMult = mergedSide
         let targetPx = Double(budget * patch * patch)
         let totalPx = Double(width * height)
         let factor = (targetPx / totalPx).squareRoot()
@@ -83,6 +102,16 @@ public struct Gemma4Patchify {
         return out
     }
 
+    // An encoded image straight to merged patches.
+    public func merged(_ data: Data, softTokens: Int)
+        -> (pixels: [Float], pos: [(Int, Int)])? {
+        var out: (pixels: [Float], pos: [(Int, Int)])? = nil
+        if let img = VisionPreprocess.decodeCapped(data) {
+            out = merged(img, softTokens: softTokens)
+        }
+        return out
+    }
+
     // A decoded frame at an explicit budget. Video frames all share one size,
     // so every frame yields the same count and none of them pads.
     public func patches(_ img: CGImage, budget: Int)
@@ -90,29 +119,31 @@ public struct Gemma4Patchify {
         var out: (pixels: [Float], pos: [(Int, Int)])? = nil
         if let size = try? target(width: img.width, height: img.height,
                                   budget: budget),
-           let rgb = draw(img, size.w, size.h) {
-            out = split(rgb, size.w, size.h, budget)
+           let rgb = Resample.bicubicRGB(img, size.w, size.h) {
+            out = split(rgb, size.w, size.h, budget, side: patchSize)
         }
         return out
     }
 
-    // The resized image as row-major RGB, row 0 the image's top.
-    private func draw(_ img: CGImage, _ w: Int, _ h: Int) -> [UInt8]? {
-        var out: [UInt8]? = nil
-        let ctx = CGContext(
-            data: nil, width: w, height: h, bitsPerComponent: 8,
-            bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
-        if let ctx, let base = ctx.data {
-            // Closest CoreGraphics offers; switch if it ever exposes bicubic.
-            ctx.interpolationQuality = .high
-            ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
-            let p = base.bindMemory(to: UInt8.self, capacity: w * h * 4)
-            var rgb = [UInt8](repeating: 0, count: w * h * 3)
-            for i in 0..<(w * h) {
-                for c in 0..<3 { rgb[i * 3 + c] = p[i * 4 + c] }
-            }
-            out = rgb
+    // The MERGED patches a unified checkpoint embeds directly: one 48-pixel
+    // block per soft token, positioned in the merged grid.
+    //
+    // Cutting the block whole is not a shortcut, it is what upstream's merge
+    // computes. That merge orders each k*k group x-fastest and then permutes
+    // (l,k,k,p,q,c) to (l,k,p,k,q,c), which reassembles the group into one
+    // spatially contiguous block in this same [y][x][channel] order; and the
+    // merged position is min(floor(pos/k)) over the group, which is the
+    // block's own index. So the two agree element for element.
+    public func merged(_ img: CGImage, softTokens: Int)
+        -> (pixels: [Float], pos: [(Int, Int)])? {
+        var out: (pixels: [Float], pos: [(Int, Int)])? = nil
+        if let size = try? target(width: img.width, height: img.height,
+                                  budget: patchBudget(softTokens)),
+           let rgb = Resample.bicubicRGB(img, size.w, size.h) {
+            // No padding: nothing downstream masks, and a unified checkpoint
+            // scatters exactly the tokens it is handed.
+            let count = (size.w / mergedSide) * (size.h / mergedSide)
+            out = split(rgb, size.w, size.h, count, side: mergedSide)
         }
         return out
     }
@@ -120,11 +151,11 @@ public struct Gemma4Patchify {
     // Row-major patches with x fastest, each laid out [y][x][channel], then
     // padded to the budget. A padded slot keeps zero pixels and the (-1, -1)
     // that marks it for the tower's mask and pooler.
-    private func split(_ rgb: [UInt8], _ w: Int, _ h: Int, _ budget: Int)
+    private func split(_ rgb: [UInt8], _ w: Int, _ h: Int, _ budget: Int,
+                       side patch: Int)
         -> (pixels: [Float], pos: [(Int, Int)]) {
-        let patch = cfg.patchSize
         let cols = w / patch, rows = h / patch
-        let dim = cfg.patchDim
+        let dim = patch * patch * 3
         var pixels = [Float](repeating: 0, count: budget * dim)
         var pos = [(Int, Int)](repeating: (-1, -1), count: budget)
         for y in 0..<rows {

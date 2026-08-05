@@ -32,7 +32,6 @@ struct Sidebar: View {
     let onClose: () -> Void
     let onOpen: (UUID) -> Void
     let onNewChat: () -> Void
-    let onSearch: () -> Void
     let onSettings: () -> Void
 
     // The conversation whose trash was tapped (macOS): its row shows an inline
@@ -40,23 +39,44 @@ struct Sidebar: View {
     // auto-disarms after a beat. Only one row is armed at a time.
     @State private var armedDelete: UUID?
     @State private var disarmTask: Task<Void, Never>?
+    @State private var query = ""
 
     private var hasHistory: Bool { !ConversationStore.shared.list.isEmpty }
 
+    // Ranking is not free, so it happens ONCE per body evaluation and the
+    // result is handed down rather than recomputed by each part that needs
+    // it.
     var body: some View {
-        VStack(spacing: 0) {
+        let items = shown
+        return VStack(spacing: 0) {
             closeRow
             newChatRow
             if hasHistory {
-                searchRow
+                searchField
                 Divider()
-                history
+                if items.isEmpty {
+                    noMatches
+                } else {
+                    history(items)
+                }
             } else {
                 emptyState
             }
             Divider()
             footer
         }
+    }
+
+    // The conversations the list is showing: all of them, or the ones the
+    // query answers. Search NARROWS this list rather than opening a view of
+    // its own -- the row a hit produces is the row that was already there,
+    // so finding a conversation and picking one out of the list are the same
+    // gesture rather than two.
+    private var shown: [ConversationStore.Convo] {
+        let store = ConversationStore.shared
+        return ConversationSearch.active(query)
+            ? ConversationSearch.rank(store.list, store.words, query)
+            : store.list
     }
 
     private var emptyState: some View {
@@ -105,27 +125,59 @@ struct Sidebar: View {
         .padding(.vertical, 12)
     }
 
-    private var searchRow: some View {
-        Button(action: onSearch) {
-            Label("Search", systemImage: "magnifyingglass")
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Search", text: $query)
+                .textFieldStyle(.plain)
+            if !query.isEmpty {
+                Button { query = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .buttonStyle(.plain)
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
     }
 
+    private var noMatches: some View {
+        VStack(spacing: 6) {
+            Text("No matches").foregroundStyle(.secondary)
+            Text("for \u{201C}\(query)\u{201D}")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(24)
+    }
+
     // Deleting the open chat starts a fresh one (deleteConversation).
-    private var history: some View {
+    // Filtered results are ordered by how WELL they match, so the date
+    // sections would cut across that order and claim a grouping the list no
+    // longer has; a filtered list is flat.
+    private func history(_ items: [ConversationStore.Convo]) -> some View {
         List {
-            ForEach(Sidebar.groups(ConversationStore.shared.list)) { group in
-                Section(group.title) {
-                    ForEach(group.items) { convo in
-                        historyRow(convo)
-                            .listRowBackground(Color.clear)
+            if ConversationSearch.active(query) {
+                ForEach(items) { convo in
+                    historyRow(convo)
+                        .listRowBackground(Color.clear)
+                }
+                .onDelete { offsets in delete(offsets, in: items) }
+            } else {
+                ForEach(Sidebar.groups(items)) { group in
+                    Section(group.title) {
+                        ForEach(group.items) { convo in
+                            historyRow(convo)
+                                .listRowBackground(Color.clear)
+                        }
+                        .onDelete { offsets in
+                            delete(offsets, in: group.items)
+                        }
                     }
-                    .onDelete { offsets in delete(offsets, in: group.items) }
                 }
             }
         }
@@ -228,12 +280,19 @@ struct Sidebar: View {
         return result
     }
 
+    // The second line answers "why is this row here". Ordinarily that is when
+    // it was last touched; under a filter whose match is NOT in the title it
+    // is the matching text instead, so a hit on the body does not read as an
+    // unexplained row.
     private func row(_ convo: ConversationStore.Convo) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        let reason = ConversationSearch.active(query)
+            ? ConversationSearch.reason(convo, query) : nil
+        return VStack(alignment: .leading, spacing: 2) {
             Text(convo.title).lineLimit(1)
-            Text(Sidebar.when(convo.updated))
+            Text(reason ?? Sidebar.when(convo.updated))
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())

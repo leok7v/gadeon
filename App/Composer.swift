@@ -104,52 +104,72 @@ struct Composer: View {
         if model.canSend { model.send() }
     }
 
-    // A live voice exchange swaps the whole control row for a transport, so
-    // the two or three things that matter mid-conversation are big enough to
-    // hit at arm's length. It REPLACES rather than overlays: an overlay would
-    // cover the text field, and typing mid-conversation is common.
+    // A live voice exchange ADDS a transport row above the ordinary controls,
+    // so the two or three things that matter at arm's length are big enough to
+    // hit. It sits above rather than overlaying: an overlay would cover the
+    // text field, and typing mid-conversation is common.
     //
     // The trigger is the exchange, not the preference -- someone who leaves
-    // "speak replies" on permanently must still get the ordinary composer
-    // back between turns.
+    // "speak replies" on permanently gets the transport only while there is
+    // something to transport.
     private var inVoiceExchange: Bool {
         model.listening || model.speech.engaged || model.voiceReady
     }
 
-    @ViewBuilder
+    // The two rows carry different KINDS of control and that is why both are
+    // present. The transport is momentary and about this sound: pause it,
+    // resume it, stop the turn. The row below is modal and outlives the turn:
+    // whether replies are spoken at all, and whether the microphone is open.
+    // Swapping one for the other stranded the modes exactly when a listener
+    // most wants them -- someone interrupted mid-reply has to silence the
+    // voice and close the mic, and going to Settings for that means leaving
+    // the conversation.
+
     private var controls: some View {
-        if inVoiceExchange {
-            transport
-        } else {
+        VStack(spacing: 8) {
+            if inVoiceExchange { transport }
             standardControls
         }
     }
 
+    // The big mic is the ARM'S-LENGTH affordance: it belongs to the moment
+    // when it is the speaker's move, or when the mic is open and the ring
+    // needs somewhere to live. While a reply is being READ it would be a
+    // second microphone next to the small one, so it stands down and the row
+    // is what it says it is -- pause and stop for the sound.
+    private var showBigMic: Bool { model.listening || model.voiceReady }
+
     private var transport: some View {
         HStack(spacing: transportGap) {
             Spacer()
-            transportButton(model.listening ? "microphone.fill" : "microphone",
-                            model.listening ? "Stop and send" : "Speak",
-                            // Orange is the system's OWN microphone-in-use
-                            // colour on both platforms (the menu-bar pill,
-                            // the privacy dot), so an open mic needs no
-                            // convention of ours learned. Red would also
-                            // collide with Stop beside it.
-                            // Green at a turn boundary: the reply is done and
-                            // it is the speaker's move, which a resting
-                            // accent circle does not say.
-                            micTint,
-                            listening: model.listening,
-                            action: model.voice)
+            if showBigMic {
+                // Orange is the system's OWN microphone-in-use colour on both
+                // platforms (the menu-bar pill, the privacy dot), so an open
+                // mic needs no convention of ours learned. Red would also
+                // collide with Stop beside it. Green at a turn boundary: the
+                // reply is done and it is the speaker's move, which a resting
+                // accent circle does not say.
+                transportButton(
+                    model.listening ? "microphone.fill" : "microphone",
+                    model.listening ? "Stop and send" : "Speak",
+                    micTint,
+                    listening: model.listening,
+                    action: model.voice)
+            }
             if model.speech.paused {
                 transportButton("play.fill", "Resume", .accentColor) {
                     model.speech.resume()
                 }
+                // Silences the VOICE and nothing else -- the answer goes on
+                // being written and can still be read. Cancelling the turn is
+                // the Send button in the row below, which shows a stop glyph
+                // whenever generation is running, so the two live on separate
+                // controls instead of one glyph meaning both.
+                //
                 // Red, not grey: a muted fill on a large control reads as
-                // disabled rather than as secondary, and this is the one
-                // button that ends the turn.
-                transportButton("stop.fill", "Stop", .red) {
-                    model.stop()
+                // disabled rather than as secondary.
+                transportButton("stop.fill", "Stop speaking", .red) {
+                    model.speech.stopSpeaking()
                 }
             } else if model.speech.engaged {
                 // Keyed to the turn, not to `speaking`: sound stops between
@@ -209,15 +229,14 @@ struct Composer: View {
             accessButton
             thinkingButton
             Spacer()
-            // The mic keeps its slot so Send never shifts as text arrives;
-            // it just fades out once there is text (future buttons can sit
-            // beside it in the reserved gap). While it is open it stays put
-            // and colours -- a recording control that hides itself is how a
-            // microphone gets left on.
+            // Both stay VISIBLE while typing. They used to fade out once
+            // there was text, which hid them in the state that needs them
+            // most: someone who breaks off a spoken exchange to type is
+            // exactly the person reaching for "stop reading to me" and "close
+            // the mic". A recording control that hides itself is also how a
+            // microphone gets left open.
             speakerButton
-                .opacity(model.typing && !model.speech.speaking ? 0 : 1)
             micButton
-                .opacity(model.typing && !model.listening ? 0 : 1)
             sendButton
         }
         .font(.system(size: controlSize))
@@ -234,6 +253,15 @@ struct Composer: View {
     // "be quiet" while sound played and "switch off" the rest of the time
     // read as a setting that would not stay off.
 
+    // The filled glyph carries "sound is playing" on its own, WITHOUT a
+    // symbol effect. An indefinite effect (.variableColor, .pulse) keeps the
+    // SwiftUI display link running, so every display refresh becomes a view
+    // graph update, a CA commit, and a synchronous round trip to the render
+    // server -- and the whole conversation lives in that one surface group,
+    // so the round trip grows with it. Bound to a flag that stays true for as
+    // long as sound is queued, that outruns the render server and the window
+    // stops updating altogether.
+
     private var speakerButton: some View {
         let on = model.speech.enabled
         let live = model.speech.speaking
@@ -248,7 +276,6 @@ struct Composer: View {
                                    : (on ? "speaker.wave.2" : "speaker.slash"))
                 .foregroundStyle(on ? Color.accentColor : .secondary)
                 .frame(width: slotSize, height: slotSize)
-                .symbolEffect(.variableColor, isActive: live)
         }
         .buttonStyle(.plain)
         .disabled(!model.speech.available)
@@ -412,75 +439,39 @@ struct Composer: View {
     // user needs an out). No .keyboardShortcut(.defaultAction) -- it would
     // register a second Return handler racing PromptEditor's.
     //
-    // While a reply is being READ, Stop is the wrong first offer: the common
-    // wish is to hold the voice for a moment, not to throw the answer away.
-    // So it becomes Pause, and pausing reveals Resume beside Stop. The pair
-    // exists only while paused, so the resting row never grows.
+    // It says nothing about the VOICE. Pause, Resume and Stop for the sound
+    // live in the transport row, which is on screen whenever there is sound to
+    // control; offering them here as well gave one glyph two meanings and left
+    // the user guessing whether Stop would silence the voice or discard the
+    // answer.
 
-    @ViewBuilder
     private var sendButton: some View {
-        if model.speech.paused {
-            HStack(spacing: 8) {
-                glyphButton("play.fill", "Resume") { model.speech.resume() }
-                glyphButton("stop.fill", "Stop") { model.stop() }
-            }
-        } else {
-            Button(action: fire) {
-                Image(systemName: primaryIcon)
-                    .font(.system(size: labelSize, weight: .semibold))
-                    .frame(width: sendSize, height: sendSize)
-                    .foregroundStyle(sendLive ? .white : .secondary)
-                    .background(sendBackground,
-                                in: RoundedRectangle(cornerRadius: 7))
-            }
-            .buttonStyle(.plain)
-            .disabled(!sendLive)
-            .help(primaryHelp)
-        }
-    }
-
-    private func glyphButton(_ symbol: String, _ label: String,
-                             _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
+        Button(action: fire) {
+            Image(systemName: primaryIcon)
                 .font(.system(size: labelSize, weight: .semibold))
                 .frame(width: sendSize, height: sendSize)
-                .foregroundStyle(.white)
-                .background(Color.accentColor,
+                .foregroundStyle(sendLive ? .white : .secondary)
+                .background(sendBackground,
                             in: RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
-        .help(label)
+        .disabled(!sendLive)
+        .help(primaryHelp)
     }
 
     private var primaryIcon: String {
-        var icon = "arrow.up"
-        if model.speech.speaking {
-            icon = "pause.fill"
-        } else if model.busy {
-            icon = "stop.fill"
-        }
-        return icon
+        model.busy ? "stop.fill" : "arrow.up"
     }
 
     private var primaryHelp: String {
-        var help = "Send"
-        if model.speech.speaking {
-            help = "Pause"
-        } else if model.busy {
-            help = "Stop"
-        }
-        return help
+        model.busy ? "Stop" : "Send"
     }
 
-    // Pause the voice while it reads, else Stop while a reply streams, else
-    // send. A plain method, not a method-reference ternary in the Button,
-    // which overloads inference.
+    // Stop while a reply streams, else send. A plain method, not a
+    // method-reference ternary in the Button, which overloads inference.
 
     private func fire() {
-        if model.speech.speaking {
-            model.speech.pause()
-        } else if model.busy {
+        if model.busy {
             model.stop()
         } else {
             model.send()
@@ -488,7 +479,7 @@ struct Composer: View {
     }
 
     private var sendLive: Bool {
-        model.busy || model.canSend || model.speech.speaking
+        model.busy || model.canSend
     }
 
     private var sendBackground: Color {

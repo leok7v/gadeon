@@ -96,24 +96,20 @@ enum Whimsical {
         return result
     }
 
-    // Three phrases from the stage's shuffled ring, one per surface that can
-    // show a phrase at once (transcript quip, reasoning label, status bar).
-    // The up and down cursors wrap around; the third rides one past the up
-    // cursor; collisions skip a slot, so with three or more phrases in the
-    // list no two surfaces ever show the same word.
-    static func trio(_ stage: Stage) -> (first: String, second: String,
-                                         third: String) {
+    // Two phrases from the stage's shuffled ring, one per surface that can
+    // show a phrase at once: the transcript quip and the reasoning label. The
+    // up and down cursors wrap around in opposite directions and a collision
+    // pushes the second along, so with two or more phrases in the list the
+    // two surfaces never show the same word.
+    static func pair(_ stage: Stage) -> (first: String, second: String) {
         let all = list(stage)
         let n = all.count
-        var result = (first: "Thinking", second: "Thinking",
-                      third: "Thinking")
+        var result = (first: "Thinking", second: "Thinking")
         if n > 0 {
             lock.lock()
             var (up, down) = cursors[stage] ?? (0, n - 1)
             if up == down { down = (down + n - 1) % n }
-            var mid = (up + 1) % n
-            if mid == down { mid = (mid + 1) % n }
-            result = (first: all[up], second: all[down], third: all[mid])
+            result = (first: all[up], second: all[down])
             cursors[stage] = ((up + 1) % n, (down + n - 1) % n)
             lock.unlock()
         }

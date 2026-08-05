@@ -1,4 +1,4 @@
-// The port of vendor/tts.cli/src/kittens.c starts here.
+// The port of kittens.c from github.com/leok7v/tts.cli starts here.
 //
 // Mechanical transliteration: same declaration order, same names in Swift
 // casing, same loop bounds, same arithmetic in the same sequence.

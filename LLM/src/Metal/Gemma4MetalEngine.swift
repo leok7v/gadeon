@@ -28,6 +28,15 @@ public final class Gemma4MetalEngine {
 
     public private(set) var pos = 0
     var sampler: Sampler?
+    // Lock-backed stop flag, the same lever MetalEngine carries for the
+    // ternary models. The forward is synchronous and passes no suspension
+    // point, so Task cancellation does not reach it -- without this a Stop
+    // pressed during a long prefill did NOTHING here, and the turn ran to
+    // completion before anything noticed. Cleared at the start of each extend
+    // so a prior turn's Stop cannot kill this one.
+    private let stopSignal = MetalStopSignal()
+    public func requestStop() { stopSignal.raise() }
+    public func shouldStop() -> Bool { stopSignal.raisedNow }
 
     // One pool per NON-shared layer; a shared layer reads its source's.
     private var kv: [Int: MetalKVPool] = [:]
@@ -125,6 +134,28 @@ public final class Gemma4MetalEngine {
             .environment["LLM_GEMMA_PREFILL_LAYERS"]
         return max(1, raw.flatMap { v in Int(v) } ?? 1)
     }()
+    // The bisection gate's readback, on the BATCHED path -- the only one that
+    // can express a vision block, since a per-token prefill has not appended
+    // the block's forward keys when it computes a query inside it. Absolute
+    // positions to sample, and the sink for (layer, position, hidden).
+    // DEBUG only: setting it drains the queue after every layer group, where
+    // the shipping path lets those buffers run back to back.
+    public var probe: Set<Int> = []
+    public var onLayer: ((Int, Int, [Float]) -> Void)?
+
+    // Diagnostic: LLM_SKIP=attn,ffn omits a kernel group from the forward, so
+    // a METAL_TIMING drop attributes that group's cost. The forward is
+    // numerically WRONG while skipping. Decode needs it as much as prefill:
+    // past a few hundred cached positions attention is the term that grows
+    // with context, and nothing else says by how much.
+    static let skip: Set<String> = Set(
+        (ProcessInfo.processInfo.environment["LLM_SKIP"] ?? "")
+            .split(separator: ",").map(String.init))
+    // Per-commit GPU-vs-wall milliseconds on stderr. Wall-clock t/s swings far
+    // too much on a shared GPU to A/B against; the GPU interval does not.
+    static let timing =
+        ProcessInfo.processInfo.environment["METAL_TIMING"] != nil
+
     // The trained activation clamps, keyed by weight name.
     private var scales: [String: SRQ] = [:]
 
@@ -132,12 +163,13 @@ public final class Gemma4MetalEngine {
     // GPU needs their byte offsets into the mapped file instead, resolved once
     // here rather than looked up per token.
     private struct LayerNorms {
-        let attn, postAttn, ffn, postFfn, perLayerPost, qNorm: WeightRef
+        let attn, postAttn, ffn, postFfn, qNorm: WeightRef
         let kNorm: WeightRef?
+        let perLayerPost: WeightRef?
     }
     private var norms: [LayerNorms] = []
     private let outputNormOff: WeightRef
-    private let perLayerProjNormOff: WeightRef
+    private let perLayerProjNormOff: WeightRef?
 
     public init(_ model: Gemma4Model, pageP: Int = 512) throws {
         self.model = model
@@ -150,52 +182,69 @@ public final class Gemma4MetalEngine {
         // lm_head is untied on this checkpoint, so token_embd is gather-only
         // -- a TIED one is walked end to end every token, where suppressing
         // readahead would be exactly wrong.
-        model.gguf.gathered(model.perLayerEmbd)
+        if let ple = model.perLayerEmbd { model.gguf.gathered(ple) }
         if model.output.name != model.tokEmbd.name {
             model.gguf.gathered(model.tokEmbd)
         }
         let c = cfg
-        // Scratch is sized to the WIDEST layer: the head dim and the MLP width
-        // both vary by layer, and a short layer just uses a prefix.
+        // Scratch is sized to the WIDEST layer: the head dim, the kv width and
+        // the MLP width all vary by layer, and a short layer uses a prefix.
+        // The kv width is a PRODUCT of two things that vary in opposite
+        // directions -- a full layer is twice as wide per head and has a
+        // fraction of the heads -- so it is maximised over the layers rather
+        // than from the two maxima, which would over-allocate by 8x here.
         let maxHd = max(c.headDimSliding, c.headDimFull)
         let maxFF = (0..<c.nLayer)
             .map { il in model.layers[il].nFF }.max() ?? 0
-        let pleWidth = c.nLayer * c.perLayerDim
+        let maxKV = (0..<c.nLayer)
+            .map { il in c.headDim(il) * model.layers[il].nHeadKV }.max() ?? 0
+        // A model with no per-layer inputs has no PLE scratch at all, and a
+        // zero-length MTLBuffer is nil rather than empty.
+        let pleWidth = max(1, c.nLayer * c.perLayerDim)
+        let pleDim = max(1, c.perLayerDim)
         bx = ctx.makeF32(c.nEmbd)
         bNormed = ctx.makeF32(c.nEmbd)
         bContrib = ctx.makeF32(c.nEmbd)
         bQ = ctx.makeF32(maxHd * c.nHead)
-        bK = ctx.makeF32(maxHd * c.nHeadKV)
-        bV = ctx.makeF32(maxHd * c.nHeadKV)
+        bK = ctx.makeF32(maxKV)
+        bV = ctx.makeF32(maxKV)
         bAttnOut = ctx.makeF32(maxHd * c.nHead)
         bGateNull = ctx.makeF32(maxHd * c.nHead)
         bFfnGate = ctx.makeF32(maxFF)
         bFfnUp = ctx.makeF32(maxFF)
         bPle = ctx.makeF32(pleWidth)
         bPleProj = ctx.makeF32(pleWidth)
-        bPleGate = ctx.makeF32(c.perLayerDim)
+        bPleGate = ctx.makeF32(pleDim)
         bLogits = ctx.makeF32(c.nVocab)
         bClamp = ctx.makeF32(max(maxFF, max(pleWidth, c.nEmbd)))
-        let B = ctx.matrixUnits ? Gemma4MetalEngine.defaultBatch : 1
+        // A blockwise-vision checkpoint must fit its widest image in ONE
+        // chunk, so the scratch is sized to the budget the FILE offers rather
+        // than to the batch default -- a block that does not fit cannot be
+        // attended correctly at all. [vision-block]
+        let widest = cfg.blockwiseVision
+            ? (model.gguf.int("gemma4.vision.max_soft_tokens") ?? 0) : 0
+        let B = ctx.matrixUnits
+            ? max(Gemma4MetalEngine.defaultBatch, widest) : 1
         capacity = B
         batchStore = B
         bXN = ctx.makeF32(B * c.nEmbd)
         bNormedN = ctx.makeF32(B * c.nEmbd)
         bContribN = ctx.makeF32(B * c.nEmbd)
         bQN = ctx.makeF32(B * maxHd * c.nHead)
-        bKN = ctx.makeF32(B * maxHd * c.nHeadKV)
-        bVN = ctx.makeF32(B * maxHd * c.nHeadKV)
+        bKN = ctx.makeF32(B * maxKV)
+        bVN = ctx.makeF32(B * maxKV)
         bAttnOutN = ctx.makeF32(B * maxHd * c.nHead)
         bGateNullN = ctx.makeF32(B * maxHd * c.nHead)
         bFfnGateN = ctx.makeF32(B * maxFF)
         bFfnUpN = ctx.makeF32(B * maxFF)
         bPleN = ctx.makeF32(B * pleWidth)
         bPleProjN = ctx.makeF32(B * pleWidth)
-        bPleGateN = ctx.makeF32(B * c.perLayerDim)
+        bPleGateN = ctx.makeF32(B * pleDim)
         bClampN = ctx.makeF32(B * max(maxFF, max(pleWidth, c.nEmbd)))
         for il in 0..<c.nLayer where !c.isShared(il) {
-            kv[il] = MetalKVPool(device: ctx.device, P: pageP,
-                                 kvDim: c.headDim(il) * c.nHeadKV)
+            kv[il] = MetalKVPool(
+                device: ctx.device, P: pageP,
+                kvDim: c.headDim(il) * model.layers[il].nHeadKV)
         }
         let g = model.gguf
         for L in model.layers {
@@ -217,23 +266,28 @@ public final class Gemma4MetalEngine {
                          "gemma norm \(name) is \(t.type), expected bf16")
             return context.window(UInt64(t.base - g.map))
         }
+        func normOffIfPresent(_ name: String) -> WeightRef? {
+            g.maybe(name).map { _ in normOff(name) }
+        }
         outputNormOff = normOff("output_norm.weight")
-        perLayerProjNormOff = normOff("per_layer_proj_norm.weight")
+        perLayerProjNormOff = normOffIfPresent("per_layer_proj_norm.weight")
         for il in 0..<c.nLayer {
             norms.append(LayerNorms(
                 attn: normOff("blk.\(il).attn_norm.weight"),
                 postAttn: normOff("blk.\(il).post_attn_norm.weight"),
                 ffn: normOff("blk.\(il).ffn_norm.weight"),
                 postFfn: normOff("blk.\(il).post_ffn_norm.weight"),
-                perLayerPost: normOff("blk.\(il).per_layer_post_norm.weight"),
                 qNorm: normOff("blk.\(il).attn_q_norm.weight"),
                 kNorm: c.isShared(il)
-                    ? nil : normOff("blk.\(il).attn_k_norm.weight")))
+                    ? nil : normOff("blk.\(il).attn_k_norm.weight"),
+                perLayerPost: normOffIfPresent(
+                    "blk.\(il).per_layer_post_norm.weight")))
         }
     }
 
     public func reset() {
         pos = 0
+        stopSignal.clear()
         for (_, pool) in kv { pool.truncate(to: 0) }
     }
 
@@ -252,10 +306,20 @@ public final class Gemma4MetalEngine {
     public func extend(_ ids: [Int32],
                        softAt: (Int32) -> [Float]?) -> Int32 {
         let B = batch
+        stopSignal.clear()
         Diag.memory?("prefill start \(ids.count) ids at pos \(pos)")
+        // Where each id may attend across, absolute. Empty everywhere unless
+        // this checkpoint asks for blockwise vision.
+        let blocks = cfg.blockwiseVision
+            ? cfg.visionBlocks(ids, from: pos)
+            : [(Int, Int)](repeating: (0, 0), count: ids.count)
         var i = 0
-        while i < ids.count {
-            let n = B > 1 ? min(B, ids.count - i) : 1
+        // The stop is the loop PREDICATE, so a Stop lands between chunks and
+        // leaves `pos` and the KV consistent -- the caller then throws
+        // EngineError.stopped and ChatSession rolls the turn back.
+        while i < ids.count && !stopSignal.raisedNow {
+            let n = B > 1 ? chunk(blocks, at: i, want: min(B, ids.count - i))
+                          : 1
             var soft: [Int: [Float]] = [:]
             for j in 0..<n {
                 if let feature = softAt(ids[i + j]) { soft[j] = feature }
@@ -267,13 +331,29 @@ public final class Gemma4MetalEngine {
                     forward(token: Int(ids[i]), pos: pos)
                 }
             } else {
-                forwardChunk(Array(ids[i ..< (i + n)]), soft)
+                forwardChunk(Array(ids[i ..< (i + n)]), soft, blocks[i])
             }
             pos += n
             i += n
         }
         Diag.memory?("prefill done at pos \(pos)")
         return pick(logits())
+    }
+
+    // How many ids the next chunk takes. A vision block reads FORWARD across
+    // itself, and a key in a later chunk has not been appended yet, so a
+    // block must ride ONE chunk: a chunk that starts inside one runs to its
+    // end, and one that would only reach part way into the next stops short
+    // of it. Without blockwise vision every range is empty and this is
+    // `want`. [vision-block]
+
+    private func chunk(_ blocks: [(Int, Int)], at i: Int, want: Int) -> Int {
+        let out = cfg.chunkLength(blocks, at: i, want: want)
+        precondition(out <= capacity,
+                     "a \(out)-token vision block must ride one chunk and "
+                     + "this engine allocated \(capacity); raise "
+                     + "LLM_GEMMA_BATCH or lower the image budget")
+        return out
     }
 
     public func decode(_ token: Int32) -> Int32 {
@@ -312,17 +392,32 @@ public final class Gemma4MetalEngine {
     // in bNormed. The KV appends are encoded on the same buffer, so the pools
     // advance with the forward rather than in a separate pass.
     public func forward(token: Int, pos: Int) {
+        seedToken(token)
+        encode("forward pos=\(pos)") { f in
+            if cfg.hasPerLayerInputs { buildPLE(f) }
+            layers(f, pos: pos)
+        }
+    }
+
+    // The CPU-side seed: the embedding row, and the token-identity half of the
+    // per-layer input. Split from the encode so the bisection tap can reuse it
+    // without duplicating the gather rules.
+    private func seedToken(_ token: Int) {
         let c = cfg
         gatherEmbed(token, into: bx.f32(c.nEmbd).baseAddress!)
-        gatherPLE(token,
-                  into: bPle.f32(c.nLayer * c.perLayerDim).baseAddress!)
+        if c.hasPerLayerInputs {
+            gatherPLE(token,
+                      into: bPle.f32(c.nLayer * c.perLayerDim).baseAddress!)
+        }
+    }
+
+    // One command buffer around one encoded step, committed and waited on.
+    private func encode(_ tag: String, _ body: (MetalEnc) -> Void) {
         let cb = ctx.queue.makeCommandBuffer()!
         let e = cb.makeComputeCommandEncoder()!
-        let f = MetalEnc(ctx: ctx, e: e)
-        buildPLE(f)
-        layers(f, pos: pos)
+        body(MetalEnc(ctx: ctx, e: e))
         e.endEncoding()
-        commit(cb, "forward pos=\(pos)")
+        commit(cb, tag)
     }
 
     // The two embedding tables are ROW-GATHERED -- a token reads one row and
@@ -350,7 +445,7 @@ public final class Gemma4MetalEngine {
                            into dst: UnsafeMutablePointer<Float>) {
         let c = cfg
         let width = c.nLayer * c.perLayerDim
-        GQ.gather(model.perLayerEmbd, row: token, from: 0, count: width,
+        GQ.gather(model.perLayerEmbd!, row: token, from: 0, count: width,
                   into: dst)
         for i in 0..<width { dst[i] *= c.perLayerEmbedScale }
     }
@@ -361,6 +456,14 @@ public final class Gemma4MetalEngine {
     // -- while the CONTEXT half still projects the feature itself. And the
     // feature enters UNSCALED: embed_scale multiplies text embeddings only.
     public func forward(embedding: [Float], pos: Int) {
+        seedEmbedding(embedding)
+        encode("soft forward pos=\(pos)") { f in
+            if cfg.hasPerLayerInputs { buildPLE(f) }
+            layers(f, pos: pos)
+        }
+    }
+
+    private func seedEmbedding(_ embedding: [Float]) {
         let c = cfg
         precondition(embedding.count == c.nEmbd,
                      "soft token is \(embedding.count) wide, expected "
@@ -369,15 +472,49 @@ public final class Gemma4MetalEngine {
         // CPU may seed the hidden directly.
         let dst = bx.f32(c.nEmbd)
         for i in 0..<c.nEmbd { dst[i] = embedding[i] }
-        gatherPLE(c.padTokenId,
-                  into: bPle.f32(c.nLayer * c.perLayerDim).baseAddress!)
-        let cb = ctx.queue.makeCommandBuffer()!
-        let e = cb.makeComputeCommandEncoder()!
-        let f = MetalEnc(ctx: ctx, e: e)
-        buildPLE(f)
-        layers(f, pos: pos)
-        e.endEncoding()
-        commit(cb, "soft forward pos=\(pos)")
+        if c.hasPerLayerInputs {
+            gatherPLE(c.padTokenId,
+                      into: bPle.f32(c.nLayer * c.perLayerDim).baseAddress!)
+        }
+    }
+
+    // The per-layer readback the offline bisection gate reads, with the same
+    // tap names Gemma4Engine emits so ONE gate can drive either engine.
+    //
+    // DEBUG ONLY. It commits a command buffer per LAYER where the shipping
+    // path commits one per token, so it is far slower and must never sit on a
+    // hot path -- it exists because a hidden state between two layers cannot
+    // be read out of a buffer that has not been committed yet.
+
+    public func forward(token: Int, pos: Int,
+                        tap: (String, Int, [Float]) -> Void) {
+        seedToken(token)
+        tapped(pos: pos, tap: tap)
+    }
+
+    public func forward(embedding: [Float], pos: Int,
+                        tap: (String, Int, [Float]) -> Void) {
+        seedEmbedding(embedding)
+        tapped(pos: pos, tap: tap)
+    }
+
+    private func tapped(pos: Int, tap: (String, Int, [Float]) -> Void) {
+        let c = cfg
+        tap("embed", -1, Array(bx.f32(c.nEmbd)))
+        if c.hasPerLayerInputs { encode("tap ple") { f in buildPLE(f) } }
+        for il in 0..<c.nLayer {
+            encode("tap attn \(il)") { f in layerAttn(f, il, pos: pos) }
+            tap("attn", il, Array(bContrib.f32(c.nEmbd)))
+            encode("tap ffn \(il)") { f in layerFfn(f, il) }
+            tap("mlp", il, Array(bContrib.f32(c.nEmbd)))
+            encode("tap tail \(il)") { f in layerTail(f, il) }
+            tap("l_out", il, Array(bx.f32(c.nEmbd)))
+        }
+        encode("tap final") { f in
+            f.rmsnormBF16(x: bx, weightOff: outputNormOff, out: bNormed,
+                          n: c.nEmbd, eps: c.eps)
+        }
+        tap("final", -1, hidden())
     }
 
 
@@ -395,7 +532,8 @@ public final class Gemma4MetalEngine {
     // `soft` maps a row in this chunk to a tower feature. Those rows take the
     // feature UNSCALED as their hidden and gather the PAD row of the per-layer
     // table, exactly as forward(embedding:pos:) does one at a time.
-    private func forwardChunk(_ ids: [Int32], _ soft: [Int: [Float]]) {
+    private func forwardChunk(_ ids: [Int32], _ soft: [Int: [Float]],
+                              _ block: (Int, Int) = (0, 0)) {
         let c = cfg
         let n = ids.count
         // The last line of defence: every kernel below indexes by row, so an
@@ -417,9 +555,9 @@ public final class Gemma4MetalEngine {
         // kernels run: appendBatch allocates the pages and refreshes the
         // bindless table the batched append and attention both read through.
         embedChunk(ids, soft, n)
-        gatherPLEChunk(ids, soft, n)
+        if c.hasPerLayerInputs { gatherPLEChunk(ids, soft, n) }
         for (_, pool) in kv { pool.appendBatch(n) }
-        encodeChunk(basePos: basePos, n: n)
+        encodeChunk(basePos: basePos, n: n, block: block)
         // logits() reads bNormed, so hand it the LAST row -- the only one a
         // prefill needs a prediction from.
         let src = bNormedN.f32(n * c.nEmbd)
@@ -459,13 +597,13 @@ public final class Gemma4MetalEngine {
         // The only unquantized weight in the forward, so the only one with
         // no batched kernel; a row loop still shares the chunk's command
         // buffer.
-        f.gemmRows(model.perLayerModelProj, X: bXN, out: bPleProjN,
-                   off: off(model.perLayerModelProj), N: n)
+        f.gemmRows(model.perLayerModelProj!, X: bXN, out: bPleProjN,
+                   off: off(model.perLayerModelProj!), N: n)
         f.scaleInPlace(x: bPleProjN, n: n * width,
                        s: 1 / Float(c.nEmbd).squareRoot())
         f.rmsnormRowsBF16(x: bPleProjN, xoff: 0, d: c.perLayerDim,
                           rows: n * c.nLayer,
-                          weightOff: perLayerProjNormOff, eps: c.eps)
+                          weightOff: perLayerProjNormOff!, eps: c.eps)
         f.addScaled(a: bPleN, b: bPleProjN, n: n * width,
                     s: 1 / Float(2).squareRoot())
     }
@@ -477,7 +615,7 @@ public final class Gemma4MetalEngine {
     // construction and only the last has to be waited on. An error is read off
     // every buffer, since a fault in an earlier group leaves the last one
     // reporting success.
-    private func encodeChunk(basePos: Int, n: Int) {
+    private func encodeChunk(basePos: Int, n: Int, block: (Int, Int)) {
         let c = cfg
         let per = min(Gemma4MetalEngine.prefillLayers, c.nLayer)
         BackgroundGate.shared.waitForForeground()
@@ -488,8 +626,9 @@ public final class Gemma4MetalEngine {
             let cb = ctx.queue.makeCommandBuffer()!
             let e = cb.makeComputeCommandEncoder()!
             let f = MetalEnc(ctx: ctx, e: e)
-            if il == 0 { buildPLEChunk(f, n) }
-            layersChunk(f, basePos: basePos, n: n, layers: il..<end)
+            if il == 0 && c.hasPerLayerInputs { buildPLEChunk(f, n) }
+            layersChunk(f, basePos: basePos, n: n, layers: il..<end,
+                        block: block)
             if end == c.nLayer {
                 f.rmsnormBatchBF16(x: bXN, weightOff: outputNormOff,
                                    y: bNormedN, n: c.nEmbd, rows: n,
@@ -498,6 +637,13 @@ public final class Gemma4MetalEngine {
             e.endEncoding()
             cb.commit()
             queued.append(cb)
+            if let onLayer {
+                cb.waitUntilCompleted()
+                emit(onLayer, end - 1, bXN, basePos: basePos, n: n)
+                if end == c.nLayer {
+                    emit(onLayer, c.nLayer, bNormedN, basePos: basePos, n: n)
+                }
+            }
             il = end
         }
         queued[queued.count - 1].waitUntilCompleted()
@@ -505,11 +651,31 @@ public final class Gemma4MetalEngine {
         if let fault {
             fatalError("metal prefill chunk n=\(n) pos=\(basePos): \(fault)")
         }
+        if Gemma4MetalEngine.timing {
+            // Summed across the group, since the buffers run back to back on
+            // one queue and only the last was waited on.
+            let gpu = queued.reduce(0.0) { total, cb in
+                total + (cb.gpuEndTime - cb.gpuStartTime) * 1000
+            }
+            FileHandle.standardError.write(Data(
+                "chunk n=\(n) pos=\(basePos) gpu=\(Int(gpu))ms\n".utf8))
+        }
         Diag.memory?("prefill chunk n=\(n) pos=\(basePos)")
     }
 
+    // The probed rows of one chunk buffer, for whoever set `onLayer`.
+    private func emit(_ tap: (Int, Int, [Float]) -> Void, _ il: Int,
+                      _ buffer: MTLBuffer, basePos: Int, n: Int) {
+        let c = cfg
+        let rows = buffer.f32(n * c.nEmbd)
+        for j in 0..<n where probe.contains(basePos + j) {
+            let lo = j * c.nEmbd
+            tap(il, basePos + j, Array(rows[lo..<(lo + c.nEmbd)]))
+        }
+    }
+
     private func layersChunk(_ f: MetalEnc, basePos: Int, n: Int,
-                             layers: Range<Int>) {
+                             layers: Range<Int>, block: (Int, Int)) {
         let c = cfg
         let width = c.nLayer * c.perLayerDim
         for il in layers {
@@ -517,48 +683,54 @@ public final class Gemma4MetalEngine {
             let nm = norms[il]
             f.rmsnormBatchBF16(x: bXN, weightOff: nm.attn, y: bNormedN,
                                n: c.nEmbd, rows: n, eps: c.eps)
-            attentionChunk(f, L, il, basePos: basePos, n: n)
+            attentionChunk(f, L, il, basePos: basePos, n: n, block: block)
             f.rmsnormBatchBF16(x: bContribN, weightOff: nm.postAttn,
                                y: bNormedN, n: c.nEmbd, rows: n, eps: c.eps)
             f.add(x: bXN, y: bNormedN, n: n * c.nEmbd)
 
             f.rmsnormBatchBF16(x: bXN, weightOff: nm.ffn, y: bNormedN,
                                n: c.nEmbd, rows: n, eps: c.eps)
-            f.linear(L.ffnGate, X: bNormedN, out: bFfnGateN,
-                     off: off(L.ffnGate), N: n, srq: srq(L.ffnGate),
-                     scratch: bClampN)
-            f.linear(L.ffnUp, X: bNormedN, out: bFfnUpN, off: off(L.ffnUp),
-                     N: n, srq: srq(L.ffnUp), scratch: bClampN)
-            f.activateMul(c.activation, a: bFfnGateN, b: bFfnUpN,
-                          n: n * L.nFF)
-            f.linear(L.ffnDown, X: bFfnGateN, out: bContribN,
-                     off: off(L.ffnDown), N: n, srq: srq(L.ffnDown),
-                     scratch: bClampN)
+            if !Gemma4MetalEngine.skip.contains("ffn") {
+                f.linear(L.ffnGate, X: bNormedN, out: bFfnGateN,
+                         off: off(L.ffnGate), N: n, srq: srq(L.ffnGate),
+                         scratch: bClampN)
+                f.linear(L.ffnUp, X: bNormedN, out: bFfnUpN, off: off(L.ffnUp),
+                         N: n, srq: srq(L.ffnUp), scratch: bClampN)
+                f.activateMul(c.activation, a: bFfnGateN, b: bFfnUpN,
+                              n: n * L.nFF)
+                f.linear(L.ffnDown, X: bFfnGateN, out: bContribN,
+                         off: off(L.ffnDown), N: n, srq: srq(L.ffnDown),
+                         scratch: bClampN)
+            }
             f.rmsnormBatchBF16(x: bContribN, weightOff: nm.postFfn,
                                y: bNormedN, n: c.nEmbd, rows: n, eps: c.eps)
             f.add(x: bXN, y: bNormedN, n: n * c.nEmbd)
 
-            f.linear(L.perLayerGate, X: bXN, out: bPleGateN,
-                     off: off(L.perLayerGate), N: n,
-                     srq: srq(L.perLayerGate), scratch: bClampN)
-            // Each row multiplies its OWN table row at this layer's offset,
-            // so the two operands have different strides.
-            f.activateMulRows(c.activation, a: bPleGateN, b: bPleN,
-                              n: c.perLayerDim, rows: n,
-                              aStride: c.perLayerDim, bStride: width,
-                              bOff: il * c.perLayerDim)
-            f.linear(L.perLayerProj, X: bPleGateN, out: bContribN,
-                     off: off(L.perLayerProj), N: n,
-                     srq: srq(L.perLayerProj), scratch: bClampN)
-            f.rmsnormBatchBF16(x: bContribN, weightOff: nm.perLayerPost,
-                               y: bNormedN, n: c.nEmbd, rows: n, eps: c.eps)
-            f.add(x: bXN, y: bNormedN, n: n * c.nEmbd)
+            if c.hasPerLayerInputs {
+                f.linear(L.perLayerGate!, X: bXN, out: bPleGateN,
+                         off: off(L.perLayerGate!), N: n,
+                         srq: srq(L.perLayerGate!), scratch: bClampN)
+                // Each row multiplies its OWN table row at this layer's
+                // offset, so the two operands have different strides.
+                f.activateMulRows(c.activation, a: bPleGateN, b: bPleN,
+                                  n: c.perLayerDim, rows: n,
+                                  aStride: c.perLayerDim, bStride: width,
+                                  bOff: il * c.perLayerDim)
+                f.linear(L.perLayerProj!, X: bPleGateN, out: bContribN,
+                         off: off(L.perLayerProj!), N: n,
+                         srq: srq(L.perLayerProj!), scratch: bClampN)
+                f.rmsnormBatchBF16(x: bContribN, weightOff: nm.perLayerPost!,
+                                   y: bNormedN, n: c.nEmbd, rows: n,
+                                   eps: c.eps)
+                f.add(x: bXN, y: bNormedN, n: n * c.nEmbd)
+            }
             f.scaleInPlace(x: bXN, n: n * c.nEmbd, s: L.layerScalar)
         }
     }
 
     private func attentionChunk(_ f: MetalEnc, _ L: Gemma4Layer, _ il: Int,
-                                basePos: Int, n: Int) {
+                                basePos: Int, n: Int,
+                                block: (Int, Int)) {
         let c = cfg
         let hd = c.headDim(il)
         let full = c.isFull(il)
@@ -570,78 +742,127 @@ public final class Gemma4MetalEngine {
                           weightOff: norms[il].qNorm, eps: c.eps)
         f.ropeGemmaBatch(x: bQN, headDim: hd, nHead: c.nHead, rotated: rot,
                          base: base, basePos: basePos, N: n)
+        let nKV = L.nHeadKV
         let pool = kv[c.isShared(il) ? c.sharedSource(il) : il]!
         if !c.isShared(il) {
             f.linear(L.wk!, X: bNormedN, out: bKN, off: off(L.wk!), N: n,
                      srq: srq(L.wk!), scratch: bClampN)
-            f.rmsnormRowsBF16(x: bKN, xoff: 0, d: hd, rows: n * c.nHeadKV,
+            f.rmsnormRowsBF16(x: bKN, xoff: 0, d: hd, rows: n * nKV,
                               weightOff: norms[il].kNorm!, eps: c.eps)
-            f.ropeGemmaBatch(x: bKN, headDim: hd, nHead: c.nHeadKV,
+            f.ropeGemmaBatch(x: bKN, headDim: hd, nHead: nKV,
                              rotated: rot, base: base, basePos: basePos, N: n)
-            f.linear(L.wv!, X: bNormedN, out: bVN, off: off(L.wv!), N: n,
-                     srq: srq(L.wv!), scratch: bClampN)
+            // A layer with no value projection takes the key's, which is why
+            // this reads bNormedN again rather than bKN: by now that holds a
+            // normed and rotated key, and the value wants neither.
+            let wv = L.wv ?? L.wk!
+            f.linear(wv, X: bNormedN, out: bVN, off: off(wv), N: n,
+                     srq: srq(wv), scratch: bClampN)
             f.rmsnormRowsNoWeight(x: bVN, xoff: 0, d: hd,
-                                  rows: n * c.nHeadKV, eps: c.eps)
+                                  rows: n * nKV, eps: c.eps)
             // The pages were reserved before the encoder opened, so this
             // writes absolute positions basePos..basePos+n-1.
             f.kvAppendBatch(kCurN: bKN, vCurN: bVN, kAddr: pool.kAddr,
                             vAddr: pool.vAddr, pages: pool.residentPages,
-                            kvDim: hd * c.nHeadKV, basePos: basePos,
+                            kvDim: hd * nKV, basePos: basePos,
                             P: pool.P, N: n)
         }
         // scaling 1.0 -- q_norm is the query's only normalization. The window
         // is per ROW inside the kernel, since each query in the chunk sits at
         // its own absolute position.
-        f.attnBatch(qN: bQN, kAddr: pool.kAddr, vAddr: pool.vAddr,
-                    pages: pool.residentPages, gateN: bGateNullN,
-                    outN: bAttnOutN, hd: hd, nH: c.nHead, nKV: c.nHeadKV,
-                    kvDim: hd * c.nHeadKV, P: pool.P, scale: 1,
-                    basePos: basePos, N: n, gated: 0,
-                    window: full ? 0 : c.slidingWindow)
+        if !Gemma4MetalEngine.skip.contains("attn") {
+            f.attnBatch(qN: bQN, kAddr: pool.kAddr, vAddr: pool.vAddr,
+                        pages: pool.residentPages, gateN: bGateNullN,
+                        outN: bAttnOutN, hd: hd, nH: c.nHead, nKV: nKV,
+                        kvDim: hd * nKV, P: pool.P, scale: 1,
+                        basePos: basePos, N: n, gated: 0,
+                        window: full ? 0 : c.slidingWindow,
+                        // BOTH layer types carry the block. The docstring on
+                        // create_masks_for_vision_model says the global ones
+                        // are causal only, and that function is not the one
+                        // the forward runs: it puts block_sequence_ids into
+                        // mask_kwargs and lets create_masks_for_generate
+                        // build both masks from it. Gated, not guessed --
+                        // sliding-only leaves layer 5 at 0.95 where both
+                        // reach six nines. [vision-block]
+                        block: block)
+        }
         f.linear(L.wo, X: bAttnOutN, out: bContribN, off: off(L.wo), N: n,
                  srq: srq(L.wo), scratch: bClampN)
     }
 
     private func layers(_ f: MetalEnc, pos: Int) {
         let c = cfg
-        for il in 0..<c.nLayer {
-            let L = model.layers[il]
-            let nm = norms[il]
-            f.rmsnormBF16(x: bx, weightOff: nm.attn, out: bNormed,
-                          n: c.nEmbd, eps: c.eps)
-            attention(f, L, il, pos: pos)
-            f.rmsnormBF16(x: bContrib, weightOff: nm.postAttn,
-                          out: bNormed, n: c.nEmbd, eps: c.eps)
-            f.add(x: bx, y: bNormed, n: c.nEmbd)
+        for il in 0..<c.nLayer { layer(f, il, pos: pos) }
+        f.rmsnormBF16(x: bx, weightOff: outputNormOff, out: bNormed,
+                      n: c.nEmbd, eps: c.eps)
+    }
 
-            f.rmsnormBF16(x: bx, weightOff: nm.ffn, out: bNormed,
-                          n: c.nEmbd, eps: c.eps)
-            f.linear(L.ffnGate, x: bNormed, out: bFfnGate, off: off(L.ffnGate),
-                     srq: srq(L.ffnGate), scratch: bClamp)
+    // One decoder layer, leaving its output in bx. Split out because a
+    // per-layer tap has to commit between layers to read the residual, where
+    // the shipping path encodes all of them onto one command buffer.
+    private func layer(_ f: MetalEnc, _ il: Int, pos: Int) {
+        layerAttn(f, il, pos: pos)
+        layerFfn(f, il)
+        layerTail(f, il)
+    }
+
+    // The layer in the three pieces a bisection can score against HF's own
+    // modules: self_attn's output, mlp's output, and what the layer leaves
+    // behind. Cut here rather than inside the tap so the shipping path runs
+    // the identical sequence either way. Each leaves its result in bContrib
+    // except the last, which leaves the layer's output in bx.
+    private func layerAttn(_ f: MetalEnc, _ il: Int, pos: Int) {
+        let c = cfg
+        f.rmsnormBF16(x: bx, weightOff: norms[il].attn, out: bNormed,
+                      n: c.nEmbd, eps: c.eps)
+        attention(f, model.layers[il], il, pos: pos)
+    }
+
+    private func layerFfn(_ f: MetalEnc, _ il: Int) {
+        let c = cfg
+        let L = model.layers[il]
+        let nm = norms[il]
+        f.rmsnormBF16(x: bContrib, weightOff: nm.postAttn,
+                      out: bNormed, n: c.nEmbd, eps: c.eps)
+        f.add(x: bx, y: bNormed, n: c.nEmbd)
+
+        f.rmsnormBF16(x: bx, weightOff: nm.ffn, out: bNormed,
+                      n: c.nEmbd, eps: c.eps)
+        if !Gemma4MetalEngine.skip.contains("ffn") {
+            f.linear(L.ffnGate, x: bNormed, out: bFfnGate,
+                     off: off(L.ffnGate), srq: srq(L.ffnGate),
+                     scratch: bClamp)
             f.linear(L.ffnUp, x: bNormed, out: bFfnUp, off: off(L.ffnUp),
                      srq: srq(L.ffnUp), scratch: bClamp)
             f.activateMul(c.activation, a: bFfnGate, b: bFfnUp, n: L.nFF)
-            f.linear(L.ffnDown, x: bFfnGate, out: bContrib, off: off(L.ffnDown),
-                     srq: srq(L.ffnDown), scratch: bClamp)
-            f.rmsnormBF16(x: bContrib, weightOff: nm.postFfn,
-                          out: bNormed, n: c.nEmbd, eps: c.eps)
-            f.add(x: bx, y: bNormed, n: c.nEmbd)
+            f.linear(L.ffnDown, x: bFfnGate, out: bContrib,
+                     off: off(L.ffnDown), srq: srq(L.ffnDown),
+                     scratch: bClamp)
+        }
+    }
 
-            f.linear(L.perLayerGate, x: bx, out: bPleGate,
-                     off: off(L.perLayerGate),
-                     srq: srq(L.perLayerGate), scratch: bClamp)
+    private func layerTail(_ f: MetalEnc, _ il: Int) {
+        let c = cfg
+        let L = model.layers[il]
+        let nm = norms[il]
+        f.rmsnormBF16(x: bContrib, weightOff: nm.postFfn,
+                      out: bNormed, n: c.nEmbd, eps: c.eps)
+        f.add(x: bx, y: bNormed, n: c.nEmbd)
+
+        if c.hasPerLayerInputs {
+            f.linear(L.perLayerGate!, x: bx, out: bPleGate,
+                     off: off(L.perLayerGate!),
+                     srq: srq(L.perLayerGate!), scratch: bClamp)
             f.activateMul(c.activation, a: bPleGate, b: bPle,
                           n: c.perLayerDim, bOff: il * c.perLayerDim)
-            f.linear(L.perLayerProj, x: bPleGate, out: bContrib,
-                     off: off(L.perLayerProj),
-                     srq: srq(L.perLayerProj), scratch: bClamp)
-            f.rmsnormBF16(x: bContrib, weightOff: nm.perLayerPost,
+            f.linear(L.perLayerProj!, x: bPleGate, out: bContrib,
+                     off: off(L.perLayerProj!),
+                     srq: srq(L.perLayerProj!), scratch: bClamp)
+            f.rmsnormBF16(x: bContrib, weightOff: nm.perLayerPost!,
                           out: bNormed, n: c.nEmbd, eps: c.eps)
             f.add(x: bx, y: bNormed, n: c.nEmbd)
-            f.scaleInPlace(x: bx, n: c.nEmbd, s: L.layerScalar)
         }
-        f.rmsnormBF16(x: bx, weightOff: outputNormOff, out: bNormed,
-                      n: c.nEmbd, eps: c.eps)
+        f.scaleInPlace(x: bx, n: c.nEmbd, s: L.layerScalar)
     }
 
     // The CONTEXT half of the per-layer input, and the average. bPle already
@@ -652,13 +873,13 @@ public final class Gemma4MetalEngine {
     private func buildPLE(_ f: MetalEnc) {
         let c = cfg
         let n = c.nLayer * c.perLayerDim
-        f.gemv(model.perLayerModelProj, x: bx, out: bPleProj,
-               off: off(model.perLayerModelProj))
+        f.gemv(model.perLayerModelProj!, x: bx, out: bPleProj,
+               off: off(model.perLayerModelProj!))
         f.scaleInPlace(x: bPleProj, n: n,
                        s: 1 / Float(c.nEmbd).squareRoot())
         f.rmsnormRowsBF16(x: bPleProj, xoff: 0, d: c.perLayerDim,
                           rows: c.nLayer,
-                          weightOff: perLayerProjNormOff, eps: c.eps)
+                          weightOff: perLayerProjNormOff!, eps: c.eps)
         f.addScaled(a: bPle, b: bPleProj, n: n,
                     s: 1 / Float(2).squareRoot())
     }
@@ -676,21 +897,23 @@ public final class Gemma4MetalEngine {
                           weightOff: norms[il].qNorm, eps: c.eps)
         f.ropeGemma(x: bQ, headDim: hd, nHead: c.nHead, rotated: rot,
                     base: base, pos: pos)
+        let nKV = L.nHeadKV
         let pool = kv[c.isShared(il) ? c.sharedSource(il) : il]!
         if !c.isShared(il) {
             f.linear(L.wk!, x: bNormed, out: bK, off: off(L.wk!),
                      srq: srq(L.wk!), scratch: bClamp)
-            f.rmsnormRowsBF16(x: bK, xoff: 0, d: hd, rows: c.nHeadKV,
+            f.rmsnormRowsBF16(x: bK, xoff: 0, d: hd, rows: nKV,
                               weightOff: norms[il].kNorm!, eps: c.eps)
-            f.ropeGemma(x: bK, headDim: hd, nHead: c.nHeadKV, rotated: rot,
+            f.ropeGemma(x: bK, headDim: hd, nHead: nKV, rotated: rot,
                         base: base, pos: pos)
-            f.linear(L.wv!, x: bNormed, out: bV, off: off(L.wv!),
-                     srq: srq(L.wv!), scratch: bClamp)
-            f.rmsnormRowsNoWeight(x: bV, xoff: 0, d: hd, rows: c.nHeadKV,
+            let wv = L.wv ?? L.wk!
+            f.linear(wv, x: bNormed, out: bV, off: off(wv),
+                     srq: srq(wv), scratch: bClamp)
+            f.rmsnormRowsNoWeight(x: bV, xoff: 0, d: hd, rows: nKV,
                                   eps: c.eps)
             let tail = pool.tailForAppend()
             f.kvAppend(kCur: bK, vCur: bV, K: tail.k, V: tail.v,
-                       kvDim: hd * c.nHeadKV, pos: tail.slot)
+                       kvDim: hd * nKV, pos: tail.slot)
             pool.commitAppend()
             pool.refreshTable()
         }
@@ -698,11 +921,13 @@ public final class Gemma4MetalEngine {
         // attended range is the same either way.
         let lo = full ? 0 : max(0, pos - c.slidingWindow + 1)
         // self.scaling = 1.0 -- q_norm is the query's only normalization.
-        f.attnPaged(q: bQ, kAddr: pool.kAddr, vAddr: pool.vAddr,
-                    pages: pool.residentPages, gate: bGateNull, out: bAttnOut,
-                    hd: hd, nH: c.nHead, nKV: c.nHeadKV, T: pos + 1,
-                    kvDim: hd * c.nHeadKV, P: pool.P, scale: 1, gated: 0,
-                    lo: lo)
+        if !Gemma4MetalEngine.skip.contains("attn") {
+            f.attnPaged(q: bQ, kAddr: pool.kAddr, vAddr: pool.vAddr,
+                        pages: pool.residentPages, gate: bGateNull,
+                        out: bAttnOut, hd: hd, nH: c.nHead, nKV: nKV,
+                        T: pos + 1, kvDim: hd * nKV, P: pool.P, scale: 1,
+                        gated: 0, lo: lo)
+        }
         f.linear(L.wo, x: bAttnOut, out: bContrib, off: off(L.wo),
                  srq: srq(L.wo), scratch: bClamp)
     }
@@ -759,9 +984,16 @@ public final class Gemma4MetalEngine {
     // peak actually lands and no sampler tick is guaranteed to catch it.
     private func commit(_ cb: MTLCommandBuffer, _ tag: String) {
         BackgroundGate.shared.waitForForeground()
+        let t0 = Date()
         cb.commit()
         cb.waitUntilCompleted()
         if let err = cb.error { fatalError("metal \(tag): \(err)") }
+        if Gemma4MetalEngine.timing {
+            let wall = Date().timeIntervalSince(t0) * 1000
+            let gpu = (cb.gpuEndTime - cb.gpuStartTime) * 1000
+            FileHandle.standardError.write(Data(
+                "\(tag) gpu=\(Int(gpu))ms wall=\(Int(wall))ms\n".utf8))
+        }
     }
 }
 
@@ -799,16 +1031,27 @@ public final class Gemma4MetalBackend: AgentBackend, @unchecked Sendable {
 
     public func useSampler(_ s: Sampler?) async { engine.sampler = s }
 
+    // A prefill-phase Stop leaves the chunk loop early; surface it as
+    // EngineError.stopped so ChatSession rolls the turn back, which is the
+    // parity MetalBackend already has. Without it a Stop during a long gemma
+    // prefill was silently ignored and the turn ran to completion.
     public func extend(_ ids: [Int32]) async throws -> Int32 {
-        engine.extend(ids)
+        let out = engine.extend(ids)
+        if engine.shouldStop() { throw EngineError.stopped }
+        return out
     }
+
+    public func requestStop() { engine.requestStop() }
+    public func shouldStop() -> Bool { engine.shouldStop() }
 
     public func supportsSoftTokens() async -> Bool { true }
 
     public func extendSoft(_ ids: [Int32],
                            spans: [SoftSpan]) async throws -> Int32 {
         let feed = SoftFeed(spans)
-        return engine.extend(ids, softAt: { id in feed.row(id) })
+        let out = engine.extend(ids, softAt: { id in feed.row(id) })
+        if engine.shouldStop() { throw EngineError.stopped }
+        return out
     }
 
     public func decode(_ token: Int32) async throws -> Int32 {

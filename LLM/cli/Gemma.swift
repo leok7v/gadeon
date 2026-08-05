@@ -28,8 +28,10 @@ private func gemmaTurns(_ args: [String], _ turns: [String]) -> [String] {
                  "--dump-proj", "--gemma-patch-gate", "--image",
                  "--gemma-image-say", "--with-audio",
                  "--gemma-video-say", "--clip", "--film", "--attach-turn",
+                 "--dump-frames",
                  "--image-budget", "--system", "--gemma-batch-gate",
-                 "--gemma-mic", "--gate"]
+                 "--gemma-mic", "--gate", "--gemma-unified-gate",
+                 "--gemma-image-gate"]
     let eaten = Set(flags.compactMap { flag in valueAfter(args, flag) })
     return turns.filter { turn in !eaten.contains(turn) }
 }
@@ -75,10 +77,44 @@ enum GemmaCLIError: Error, CustomStringConvertible {
         try gemmaAudioGate(chat, dir)
         exit(0)
     }
+    if let dir = valueAfter(args, "--gemma-image-gate") {
+        try gemmaImageGate(chat, dir, args.contains("--ref-embeds"),
+                           args.contains("--metal"))
+        exit(0)
+    }
+    if let dir = valueAfter(args, "--gemma-unified-gate") {
+        try gemmaUnifiedGate(chat, dir,
+                             valueAfter(args, "--image")
+                                 ?? "tests/vl/ad-rexall.jpg",
+                             valueAfter(args, "--clip") ?? "")
+        exit(0)
+    }
+    // A release build strips precondition text, so asking a file for a tower
+    // it does not have would abort on a missing tensor with nothing said.
+    // Name the reason before any of those paths is entered.
+    // Only the paths that genuinely need a TOWER. Image, video and audio
+    // turns all work on a unified checkpoint through its encoder-free
+    // embedder; what cannot work is a gate that scores a tower's own
+    // intermediates against a dump, since there are no intermediates.
+    let wantsVision = ["--gemma-patch-gate", "--gemma-vit-gate"]
+    let wantsAudio = ["--gemma-mel-gate", "--gemma-audio-gate"]
+    if !chat.model.hasVisionTower
+        && wantsVision.contains(where: { f in args.contains(f) }) {
+        err("this checkpoint carries no vision tower: it embeds images "
+            + "with no encoder behind them, which is not wired yet\n")
+        exit(2)
+    }
+    if !chat.model.hasAudioTower
+        && wantsAudio.contains(where: { f in args.contains(f) }) {
+        err("this checkpoint carries no audio tower: it embeds audio with "
+            + "no encoder behind it, which is not wired yet\n")
+        exit(2)
+    }
     if let file = valueAfter(args, "--gemma-video-say") {
         try await gemmaVideoSay(chat, file, turns.first, cap,
                                 metal: args.contains("--metal"),
-                                withAudio: args.contains("--with-audio"))
+                                withAudio: args.contains("--with-audio"),
+                                dumpFrames: valueAfter(args, "--dump-frames"))
         exit(0)
     }
     if let file = valueAfter(args, "--gemma-image-say") {
@@ -280,7 +316,8 @@ private struct GemmaAttachments {
         // parts itself, which replySoft now takes verbatim.
         let stream = i == attach.turn && !attach.spans.isEmpty
             ? session.replySoft(turn,
-                                parts: attach.parts + [.text(turn)],
+                                parts: Gemma4Media.ordered(
+                                    attach.parts, around: .text(turn)),
                                 spans: attach.spans,
                                 onReasoning: { r in err(r) })
             : session.reply(turn, onReasoning: { r in err(r) })
@@ -327,17 +364,29 @@ private struct GemmaAttachments {
         err(String(format: "\r  %d/%d", i + 1, ids.count))
     }
     err("\n")
-    // SRQ makes cosine the WRONG instrument here, and the bar is measured
-    // rather than chosen: `round()` turns any arithmetic-ordering difference
-    // (Metal's simdgroup reductions against vDSP's) into a discrete one-unit
-    // jump, and the reference cannot even reproduce ITSELF better than 0.9585
-    // across dtypes. Demanding 0.9999 would ask the two engines to agree more
-    // closely than the model agrees with itself. What stays meaningful is
-    // WHICH TOKEN each picks, so that is what decides the gate; the cosines
-    // are still printed, so a real regression still shows.
-    let pass = worstHidden >= 0.95 && worstLogits >= 0.95
+    // TWO MODES, because with the clamp on nothing here can make a structural
+    // assertion. `round()` turns any arithmetic-ordering difference (Metal's
+    // simdgroup reductions against vDSP's) into a discrete one-unit jump, and
+    // the reference cannot reproduce ITSELF better than 0.9585 across dtypes,
+    // so a tight bar would ask the two engines to agree more closely than the
+    // model agrees with itself -- and a loose one is wide enough to hide a
+    // wrong window start or a bad page slot. With LLM_SRQ=0 the clamp is the
+    // identity and the two f32 paths must agree to fp rounding, which is where
+    // an indexing defect has nowhere left to hide. Measured either way:
+    // per-token argmax 32/32 and cos 1.0 with SRQ off, 28-30/32 and cos 0.96
+    // with it on, on both E2B and E4B. So SRQ-on decides on the GENERATION
+    // POINT -- the one token the turn actually emits -- and the counts stay on
+    // screen as diagnostics. See gemmaBatchGate, which draws the same line.
+    let clamped = ProcessInfo.processInfo.environment["LLM_SRQ"] != "0"
+    let floor = clamped ? 0.95 : 0.999
+    let pass = worstHidden >= floor && worstLogits >= floor
         && lastCpu == lastGpu
-        && argmaxHits >= ids.count - ids.count / 10
+        && (clamped || argmaxHits == ids.count)
+    err(clamped
+        ? "[metal-gate] SRQ ON: accuracy mode, the generation point decides. "
+          + "Re-run with LLM_SRQ=0 for the structural assertion.\n"
+        : "[metal-gate] SRQ OFF: structural mode, the two engines must agree "
+          + "to fp rounding on every token.\n")
     print(String(format: "worst hidden cosine  %.6f", worstHidden))
     print(String(format: "worst logits cosine  %.6f", worstLogits))
     print("argmax agreement     \(argmaxHits)/\(ids.count)")
@@ -567,7 +616,16 @@ private struct GemmaAttachments {
     if metal { gpu = try Gemma4MetalEngine(chat.model) }
     let tower: ([Float], Int, Int) -> (tower: [Float], proj: [Float],
                                        count: Int)
-    if let gpu {
+    if !chat.model.hasAudioTower {
+        // No mel and no conformer: a frame of raw samples IS a token, so the
+        // "features" this is handed below are the samples themselves.
+        let um = try Gemma4UnifiedMedia(chat.model)
+        tower = { samples, _, _ in
+            let rows = um.audio(samples)
+            return (tower: [], proj: rows.flatMap { r in r },
+                    count: rows.count)
+        }
+    } else if let gpu {
         let gt = try Gemma4MetalAudio(chat.model, ctx: gpu.ctx)
         tower = { m, f, b in gt.forward(mel: m, frames: f, bins: b) }
     } else {
@@ -598,9 +656,14 @@ private struct GemmaAttachments {
     var spans: [SoftSpan] = []
     var parts: [ContentPart] = []
     for (i, chunk) in chunks.enumerated() {
-        let feats = mel.features(chunk.samples)
         let m0 = Date()
-        let got = tower(feats.values, feats.frames, mel.cfg.bins)
+        let got: (tower: [Float], proj: [Float], count: Int)
+        if chat.model.hasAudioTower {
+            let feats = mel.features(chunk.samples)
+            got = tower(feats.values, feats.frames, mel.cfg.bins)
+        } else {
+            got = tower(chunk.samples, 0, 0)
+        }
         err(String(format: "[say] %@ %d %.1f-%.1fs -> %d soft tokens "
                    + "(%.1fs)%@\n", gated ? "utterance" : "chunk", i + 1,
                    Double(chunk.range.lowerBound) / rate,
@@ -774,6 +837,25 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
 // attachment (`<|image|>`, `<|audio|>`, `<|video|>`) and the PROCESSOR
 // expands it -- so jinja decides where a modality sits in the turn, and only
 // the expansion lives here.
+// One clip to its soft tokens, whichever frontend this checkpoint has. A
+// tower reads a mel spectrogram; an encoder-free checkpoint reads the raw
+// frames, so the mel is not merely unnecessary there, it is the wrong input.
+@MainActor private func gemmaHear(_ chat: GemmaChat, _ pcm: [Float])
+    throws -> (proj: [Float], count: Int) {
+    let out: (proj: [Float], count: Int)
+    if chat.model.hasAudioTower {
+        let mel = Gemma4Mel(chat.melConfig)
+        let feats = mel.features(pcm)
+        let a = try Gemma4Audio(chat.model).forward(
+            mel: feats.values, frames: feats.frames, bins: mel.cfg.bins)
+        out = (a.proj, a.count)
+    } else {
+        let rows = try Gemma4UnifiedMedia(chat.model).audio(pcm)
+        out = (rows.flatMap { r in r }, rows.count)
+    }
+    return out
+}
+
 @MainActor private func softTurnIds(_ chat: GemmaChat, _ question: String,
                                     _ parts: [ContentPart],
                                     _ expand: [Int32: [Int32]])
@@ -781,7 +863,8 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
     let prompt = try renderPrompt(
         template: chat.chatTemplate,
         messages: [AgentMessage(role: "user", content: question,
-                                contentParts: parts + [.text(question)])],
+                                contentParts: Gemma4Media.ordered(
+                                    parts, around: .text(question)))],
         tools: [], addGenerationPrompt: true, enableThinking: false,
         bosToken: chat.bosToken)
     var ids: [Int32] = []
@@ -806,7 +889,8 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
     let prompt = try renderPrompt(
         template: chat.chatTemplate,
         messages: [AgentMessage(role: "user", content: question,
-                                contentParts: parts + [.text(question)])],
+                                contentParts: Gemma4Media.ordered(
+                                    parts, around: .text(question)))],
         tools: [], addGenerationPrompt: true, enableThinking: false,
         bosToken: chat.bosToken)
     return Continuation.expandSpans(chat.encode(prompt), spans)
@@ -822,7 +906,12 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
     let wire = try chat.visionWire()
     let patch = try Gemma4Patchify(chat.model)
     let data = try Data(contentsOf: URL(fileURLWithPath: file))
-    guard let cut = patch.patches(data) else {
+    // A unified checkpoint has no tower, so its cut is the MERGED one: the
+    // 48-pixel block is the soft token itself.
+    let cut = chat.model.hasVisionTower
+        ? patch.patches(data)
+        : patch.merged(data, softTokens: patch.maxSoftTokens)
+    guard let cut else {
         throw GemmaCLIError.msg("could not decode \(file)")
     }
     let real = cut.pos.filter { p in p.0 >= 0 }.count
@@ -833,7 +922,11 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
     if metal { gpu = try Gemma4MetalEngine(chat.model) }
     let t0 = Date()
     let got: (tower: [Float], proj: [Float], count: Int)
-    if let gpu {
+    if !chat.model.hasVisionTower {
+        let rows = try Gemma4UnifiedMedia(chat.model)
+            .image(pixels: cut.pixels, pos: cut.pos)
+        got = (tower: [], proj: rows.flatMap { r in r }, count: rows.count)
+    } else if let gpu {
         got = try Gemma4MetalViT(chat.model, ctx: gpu.ctx)
             .forward(pixels: cut.pixels, pos: cut.pos)
     } else {
@@ -855,9 +948,7 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
         let pcm = try await AudioFile.samples(
             url: URL(fileURLWithPath: clip),
             sampleRate: Double(mel.cfg.sampleRate), seconds: seconds)
-        let feats = mel.features(pcm)
-        let a = try Gemma4Audio(chat.model).forward(
-            mel: feats.values, frames: feats.frames, bins: mel.cfg.bins)
+        let a = try gemmaHear(chat, pcm)
         heard = a.proj
         heardCount = a.count
         err("[hear] \(clip) -> \(a.count) soft tokens\n")
@@ -914,8 +1005,8 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
 // begin/end pair, which is how the model is told when each frame happened.
 @MainActor private func gemmaVideoSay(_ chat: GemmaChat, _ file: String,
                                       _ ask: String?, _ cap: Int?,
-                                      metal: Bool,
-                                      withAudio: Bool) async throws {
+                                      metal: Bool, withAudio: Bool,
+                                      dumpFrames: String?) async throws {
     let g = chat.model
     let iw = try chat.visionWire()
     let film = try chat.videoWire()
@@ -935,19 +1026,37 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
     if metal { gpu = try Gemma4MetalEngine(g) }
     let vit: ([Float], [(Int, Int)])
         -> (tower: [Float], proj: [Float], count: Int)
-    if let gpu {
+    if !chat.model.hasVisionTower {
+        // Encoder-free: the merged block is the token, so the pixels handed
+        // in below are already 48-wide and there is no tower to forward.
+        let media = try Gemma4UnifiedMedia(chat.model)
+        vit = { pixels, pos in
+            let rows = media.image(pixels: pixels, pos: pos)
+            return (tower: [], proj: rows.flatMap { r in r },
+                    count: rows.count)
+        }
+    } else if let gpu {
         let tower = try Gemma4MetalViT(g, ctx: gpu.ctx)
         vit = { pixels, pos in tower.forward(pixels: pixels, pos: pos) }
     } else {
         let tower = try Gemma4ViT(g)
         vit = { pixels, pos in tower.forward(pixels: pixels, pos: pos) }
     }
+    // Debug: the frames as the model receives them, so a colour or sampling
+    // fault is looked at rather than inferred from an answer.
+    if let dir = dumpFrames {
+        try VideoFrames.write(shot.images, to: dir)
+        err("[film] wrote \(shot.images.count) frames to \(dir)\n")
+    }
     let t0 = Date()
     var feats: [Float] = []
     var perFrame = 0
     var block: [Int32] = []
     for (i, img) in shot.images.enumerated() {
-        guard let cut = patch.patches(img, budget: budget) else {
+        let frame = chat.model.hasVisionTower
+            ? patch.patches(img, budget: budget)
+            : patch.merged(img, softTokens: film.softTokensPerFrame)
+        guard let cut = frame else {
             throw GemmaCLIError.msg("frame \(i) would not patchify")
         }
         let out = vit(cut.pixels, cut.pos)
@@ -969,9 +1078,7 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
         let mel = Gemma4Mel(chat.melConfig)
         let pcm = try await AudioFile.samples(
             url: url, sampleRate: Double(mel.cfg.sampleRate))
-        let mf = mel.features(pcm)
-        let a = try Gemma4Audio(g).forward(mel: mf.values, frames: mf.frames,
-                                           bins: mel.cfg.bins)
+        let a = try gemmaHear(chat, pcm)
         heard = a.proj
         err("[film] audio track -> \(a.count) soft tokens\n")
         parts.append(.audio)
@@ -1043,20 +1150,26 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
         if got.pos[i].0 == wx && got.pos[i].1 == wy { posHits += 1 }
     }
     let cPx = cosine(wantPx.values, got.pixels)
+    let px = min(wantPx.values.count, got.pixels.count)
     var worst: Float = 0
-    for i in 0..<min(wantPx.values.count, got.pixels.count) {
-        worst = max(worst, abs(wantPx.values[i] - got.pixels[i]))
+    var total = 0.0
+    for i in 0..<px {
+        let d = abs(wantPx.values[i] - got.pixels[i])
+        worst = max(worst, d)
+        total += Double(d)
     }
     print("patches              \(got.pos.count) vs reference \(n)")
     print("real patches         \(got.pos.filter { q in q.0 >= 0 }.count) "
         + "vs \(realWant)")
     print("positions exact      \(posHits)/\(n)")
     print(String(format: "pixels cosine        %.6f", cPx))
-    print(String(format: "pixels max abs diff  %.4f", worst))
-    // The pixels are close but not identical (CoreGraphics' resampler is not
-    // torchvision's), so what matters is whether the TOWER agrees -- and
-    // above all whether the soft-token count, which drives the turn's token
-    // budget, comes out the same.
+    print(String(format: "pixels max abs diff  %.4f  mean %.6f", worst,
+                 total / Double(max(px, 1))))
+    // What remains in those pixels is the JPEG DECODER, not the resize:
+    // ImageIO and libjpeg disagree by up to 12 of 255 on this file before
+    // either resamples anything, and that accounts for essentially all of
+    // the max above. Read the MEAN -- a max over 1.9 M values reports one
+    // pixel and says nothing about what the tower sees.
     let wantTower = try npy(base.appendingPathComponent("vision.tower.npy"))
     let vit = try Gemma4ViT(chat.model)
     let ran = vit.forward(pixels: got.pixels, pos: got.pos)
@@ -1064,16 +1177,13 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
     let cTower = cosine(wantTower.values, ran.tower)
     print("soft tokens          \(ran.count) vs reference \(refCount)")
     print(String(format: "tower cosine         %.6f", cTower))
-    // DECIDED: the resampler difference is accepted. CoreGraphics' `.high`
-    // is not torchvision's bicubic-with-antialias, and `resample` is a
-    // preprocessing SUGGESTION from the checkpoint's config rather than part
-    // of the model's arithmetic -- resizing is lossy either way. So the
-    // structural checks stay EXACT (every position, the patch counts, the
-    // soft-token count, which is what drives a turn's budget) and the tower
-    // gets a band: 0.992 is what the dump's OWN pixels score against this
-    // same reference, and the model's bf16-vs-f32 runs differ by 0.9585.
-    print(posHits == n && cPx >= 0.999 && ran.count == refCount
-          && cTower >= 0.98 ? "GATE PASS" : "GATE FAIL")
+    // The structural checks are EXACT -- every position, both patch counts,
+    // and the soft-token count that drives a turn's budget. The tower gets a
+    // band because the decoder gap above survives into it: 0.992 is what the
+    // dump's OWN pixels score against this same reference, so that is the
+    // ceiling this comparison has rather than a number picked to pass.
+    print(posHits == n && cPx >= 0.9999 && ran.count == refCount
+          && cTower >= 0.99 ? "GATE PASS" : "GATE FAIL")
 }
 
 // The vision tower against the SRQ-off oracle. Pixels and positions come
@@ -1128,6 +1238,273 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
 
 // Minimal .npy reader: little-endian float32, C order -- the only shape the
 // reference dump writes (dump_reference.save casts everything to float32).
+// The encoder-free image and audio paths against HF's own arrays.
+//
+// Two questions, kept apart on purpose. STRUCTURE: do our patches and their
+// positions equal HF's, element for element? That is where a port of the
+// 3x3 patch merge goes wrong, and it is exact or it is broken. NUMERICS: fed
+// HF's OWN patches, does our little stack land where theirs does? Scored by
+// cosine, because ours runs in f32 where the reference runs in bf16.
+@MainActor private func gemmaUnifiedGate(_ chat: GemmaChat, _ dir: String,
+                                         _ image: String,
+                                         _ wav: String) throws {
+    let base = URL(fileURLWithPath: dir)
+    let media = try Gemma4UnifiedMedia(chat.model)
+    let cut = try Gemma4Patchify(chat.model)
+    var ok = true
+
+    let refPx = try npy(base.appendingPathComponent("vision.pixel_values.npy"))
+    let refPos = try npy(base.appendingPathComponent("vision.position_ids.npy"))
+    let refEmb = try npy(base.appendingPathComponent("vision.embed.npy"))
+    let dim = refPx.shape.count > 1 ? refPx.shape[1] : media.patchDim
+    let count = refPx.shape[0]
+    print("[unified] vision \(count) patches x \(dim)")
+
+    // HF pads to the whole budget with (-1, -1); we cut only real patches,
+    // because a unified checkpoint scatters exactly what it is handed. So the
+    // comparison is against the REAL ones.
+    var pos: [(Int, Int)] = []
+    for i in 0..<count {
+        pos.append((Int(refPos.values[i * 2]), Int(refPos.values[i * 2 + 1])))
+    }
+    var keep: [Int] = []
+    for i in 0..<count where pos[i].0 >= 0 { keep.append(i) }
+    let real = keep.count
+
+    let mine = cut.merged(try Data(contentsOf: URL(fileURLWithPath: image)),
+                          softTokens: cut.maxSoftTokens)
+    if let mine {
+        let sameCount = mine.pos.count == real
+        var posBad = 0
+        for i in 0..<min(mine.pos.count, real) {
+            let wantX = Int(refPos.values[i * 2])
+            let wantY = Int(refPos.values[i * 2 + 1])
+            if mine.pos[i].0 != wantX || mine.pos[i].1 != wantY { posBad += 1 }
+        }
+        var pixMax: Float = 0
+        for i in 0..<min(mine.pixels.count, refPx.values.count) {
+            pixMax = max(pixMax, abs(mine.pixels[i] - refPx.values[i]))
+        }
+        ok = ok && sameCount && posBad == 0
+        print("  patch count  \(mine.pos.count) vs \(real) real "
+            + "(\(count) padded)  " + (sameCount ? "MATCH" : "MISMATCH"))
+        print("  positions    \(posBad) wrong of \(real)  "
+            + (posBad == 0 ? "MATCH" : "MISMATCH"))
+        // The pixels are allowed to differ where the STRUCTURE above is not:
+        // this reads a JPEG through ImageIO where the reference read it
+        // through libjpeg, and the two decoders disagree before any resize.
+        print(String(format: "  pixels       max abs %.4f (decoder)",
+                     pixMax))
+    } else {
+        print("  patchify FAILED")
+        ok = false
+    }
+
+    let pixels = refPx.values
+    var packed = [Float](repeating: 0, count: keep.count * dim)
+    for (n, i) in keep.enumerated() {
+        for j in 0..<dim { packed[n * dim + j] = pixels[i * dim + j] }
+    }
+    let got = media.image(pixels: packed, pos: keep.map { i in pos[i] })
+    // The reference keeps a row per PADDED slot; gather the real ones so both
+    // sides are the same patches, or every score below is diluted by rows we
+    // deliberately never produce.
+    let wide = refEmb.values.count / max(count, 1)
+    var refRows = [Float](repeating: 0, count: keep.count * wide)
+    for (n, i) in keep.enumerated() {
+        for j in 0..<wide { refRows[n * wide + j] = refEmb.values[i * wide + j] }
+    }
+    let rows = got.flatMap { row in row }
+    let cosV = cosineOf(rows, refRows)
+    ok = ok && cosV >= 0.99
+    print(String(format: "  embed        %d tokens  cos %.6f  %@",
+                 got.count, cosV, cosV >= 0.99 ? "OK" : "FAIL"))
+    // A cosine cannot see MAGNITUDE, and these rows are scattered in beside
+    // text embeddings that carry embed_scale -- so a missing or doubled
+    // scalar leaves the direction perfect and the model blind. Gate the
+    // amplitude separately or that whole class of bug reads as a pass.
+    let scaleV = amplitude(rows) / amplitude(refRows)
+    ok = ok && abs(scaleV - 1) <= 0.01
+    print(String(format: "  embed scale  %.6f of reference  %@", scaleV,
+                 abs(scaleV - 1) <= 0.01 ? "OK" : "FAIL"))
+
+    let refFeat = try npy(base.appendingPathComponent(
+        "audio.input_features.npy"))
+    let refAud = try npy(base.appendingPathComponent("audio.embed.npy"))
+    let frames = refFeat.shape[0]
+    let tokens = media.audio(refFeat.values)
+    let cosA = cosineOf(tokens.flatMap { row in row }, refAud.values)
+    let scaleA = amplitude(tokens.flatMap { row in row })
+        / amplitude(refAud.values)
+    ok = ok && cosA >= 0.99 && abs(scaleA - 1) <= 0.01
+    print(String(format: "[unified] audio %d frames -> %d tokens  cos %.6f "
+        + " scale %.6f  %@", frames, tokens.count, cosA, scaleA,
+        cosA >= 0.99 && abs(scaleA - 1) <= 0.01 ? "OK" : "FAIL"))
+    _ = wav
+    print(ok ? "GATE PASS" : "GATE FAIL")
+}
+
+// The LM's own arithmetic on a whole IMAGE TURN, layer by layer.
+//
+// Every stage BEFORE this one is already scored and matches HF: the pixels,
+// the patch geometry, the embedder in direction and magnitude, and the turn's
+// ids. Yet HF answers "Yes" to the elephant where both our engines answer
+// "No". So the only place left is what the decoder stack does once the soft
+// rows are in front of it, and this is what scores it.
+//
+// --ref-embeds feeds the reference's OWN inputs_embeds at every position
+// instead of building them here. That separates the two halves completely: if
+// the answer is still wrong on the reference's embeddings, nothing upstream of
+// the decoder can be to blame.
+
+@MainActor private func gemmaImageGate(_ chat: GemmaChat, _ dir: String,
+                                       _ useRef: Bool,
+                                       _ metal: Bool) throws {
+    let base = URL(fileURLWithPath: dir)
+    let ids = try npy(base.appendingPathComponent("img.ids.npy"))
+        .values.map { v in Int32(v) }
+    let probe = try npy(base.appendingPathComponent("img.probe.npy"))
+        .values.map { v in Int(v) }
+    let embeds = try npy(base.appendingPathComponent("img.embeds.npy"))
+    let refLogits = try npy(base.appendingPathComponent("img.logits.npy"))
+    let raw = try Data(
+        contentsOf: base.appendingPathComponent("manifest.json"))
+    let man = try JSONSerialization.jsonObject(with: raw) as! [String: Any]
+    let turn = man["image_turn"] as? [String: Any] ?? [:]
+    let image = turn["image"] as? String ?? "tests/vl/elephant.jpeg"
+    let embd = chat.model.cfg.nEmbd
+    let nLayer = chat.model.cfg.nLayer
+    let wire = try chat.visionWire()
+    err("[image-gate] \(ids.count) ids, \(probe.count) probes, "
+        + (useRef ? "REFERENCE embeddings\n" : "our own embeddings\n"))
+
+    // Our own soft rows, unless the reference's are standing in for them.
+    var mine: [Float] = []
+    if !useRef {
+        let patch = try Gemma4Patchify(chat.model)
+        let data = try Data(contentsOf: URL(fileURLWithPath: image))
+        guard let cut = patch.merged(data, softTokens: patch.maxSoftTokens)
+        else { throw GemmaCLIError.msg("could not cut \(image)") }
+        mine = try Gemma4UnifiedMedia(chat.model)
+            .image(pixels: cut.pixels, pos: cut.pos).flatMap { r in r }
+    }
+
+    // taps[layer][probe index] -- only the probed positions are kept, which
+    // is what the reference stored.
+    let empty = [[Float]](repeating: [], count: probe.count)
+    var got = [[[Float]]](repeating: empty, count: nLayer + 1)
+    var attn = [[[Float]]](repeating: empty, count: nLayer)
+    var mlp = [[[Float]]](repeating: empty, count: nLayer)
+    let slot = Dictionary(uniqueKeysWithValues:
+        probe.enumerated().map { i, p in (p, i) })
+    // The BATCHED path, because it is the only one that can express a vision
+    // block: a per-token prefill has not appended the block's forward keys
+    // when it reaches a query inside it. `probe` + `onLayer` read the chunk
+    // buffers between layer groups, which prefillLayers=1 already separates.
+    let gpu = try Gemma4MetalEngine(chat.model)
+    gpu.reset()
+    gpu.probe = Set(probe)
+    gpu.onLayer = { il, p, v in
+        if let at = slot[p] {
+            if il < nLayer { got[il][at] = v } else { got[nLayer][at] = v }
+        }
+    }
+    // softAt is asked EXACTLY once per id and in order, so a plain cursor
+    // walks whichever array is standing in for the embeddings.
+    var soft = 0
+    var seen = 0
+    _ = gpu.extend(ids) { id in
+        var out: [Float]? = nil
+        if useRef {
+            out = Array(embeds.values[(seen * embd)..<((seen + 1) * embd)])
+        } else if id == wire.token {
+            out = Array(mine[(soft * embd)..<((soft + 1) * embd)])
+            soft += 1
+        }
+        seen += 1
+        return out
+    }
+    gpu.onLayer = nil
+
+    var first = -1
+    for il in 0...nLayer {
+        let want = try npy(base.appendingPathComponent(
+            String(format: "img.hidden.%02d.npy", il)))
+        var worst = 1.0
+        var at = -1
+        var best = 0.0
+        var row = ""
+        for (n, p) in probe.enumerated() where !got[il][n].isEmpty {
+            let ref = Array(want.values[(n * embd)..<((n + 1) * embd)])
+            let c = cosine(ref, got[il][n])
+            if c < worst { worst = c; at = p }
+            best = max(best, c)
+            row += String(format: "  %d:%.4f", p, c)
+        }
+        // The FIRST diverging layer in full: whether every soft position is
+        // wrong or only some of them is the difference between a path bug and
+        // a data-dependent one, and a min/max pair cannot tell them apart.
+        if worst < 0.99 && first < 0 {
+            first = il
+            print("   probes" + row)
+        }
+        // The two BRANCHES at that same worst position. Whichever is already
+        // wrong is where to look; a layer cosine alone cannot separate them.
+        var branch = ""
+        if il < nLayer, let n = probe.firstIndex(of: at) {
+            for (name, mine) in [("attn", attn[il]), ("mlp", mlp[il])]
+                where !mine[n].isEmpty {
+                let url = base.appendingPathComponent(
+                    String(format: "img.%@.%02d.npy", name, il))
+                if let ref = try? npy(url) {
+                    let want = Array(
+                        ref.values[(n * embd)..<((n + 1) * embd)])
+                    branch += String(format: "  %@ %.6f", name,
+                                     cosine(want, mine[n]))
+                }
+            }
+        }
+        if il % 4 == 0 || worst < 0.99 {
+            print(String(format:
+                "  layer %02d  worst %.6f at pos %d, best %.6f%@%@", il,
+                worst, at, best, branch,
+                worst < 0.99 ? "   <-- DIVERGED" : ""))
+        }
+    }
+    let mineTop = gpu.argmax(gpu.logits())
+    var refTop = 0
+    var best = -Float.greatestFiniteMagnitude
+    for v in 0..<refLogits.values.count where refLogits.values[v] > best {
+        best = refLogits.values[v]
+        refTop = v
+    }
+    print("generation point     ours \(mineTop) "
+        + chat.decode([Int32(mineTop)]).debugDescription
+        + " vs reference \(refTop) "
+        + chat.decode([Int32(refTop)]).debugDescription)
+    print(first < 0 ? "GATE PASS" : "GATE FAIL (first divergence at layer "
+          + "\(first))")
+}
+
+// Root mean square, the size a cosine deliberately divides away.
+private func amplitude(_ a: [Float]) -> Float {
+    var sum = 0.0
+    for v in a { sum += Double(v) * Double(v) }
+    return a.isEmpty ? 0 : Float((sum / Double(a.count)).squareRoot())
+}
+
+private func cosineOf(_ a: [Float], _ b: [Float]) -> Float {
+    let n = min(a.count, b.count)
+    var dot = 0.0, na = 0.0, nb = 0.0
+    for i in 0..<n {
+        dot += Double(a[i]) * Double(b[i])
+        na += Double(a[i]) * Double(a[i])
+        nb += Double(b[i]) * Double(b[i])
+    }
+    let d = (na * nb).squareRoot()
+    return d > 0 ? Float(dot / d) : 0
+}
+
 private func npy(_ url: URL) throws -> (values: [Float], shape: [Int]) {
     let d = try Data(contentsOf: url)
     let headerLen = Int(d[8]) | (Int(d[9]) << 8)

@@ -49,6 +49,16 @@ import Foundation
 
     private(set) var list: [Convo] = []
 
+    // Word counts per conversation, maintained beside `list` rather than
+    // stored in `Convo`: that type is Codable and one file per conversation,
+    // so a new property would rewrite the on-disk format of every chat ever
+    // saved. Kept here, the index costs nothing on disk and is rebuilt from
+    // the same two places the in-memory list is.
+    //
+    // It exists so the sidebar filter scores a small dictionary per keystroke
+    // instead of rescanning the full text of every conversation.
+    private(set) var words: [UUID: [String: Int]] = [:]
+
     private init() {
         reload()
     }
@@ -64,6 +74,8 @@ import Foundation
             }
         }
         list = convos.sorted { a, b in a.updated > b.updated }
+        words = [:]
+        for convo in list { words[convo.id] = Self.wordCounts(convo) }
     }
 
     func save(_ convo: Convo) {
@@ -76,6 +88,7 @@ import Foundation
     func delete(_ id: UUID) {
         try? FileManager.default.removeItem(at: fileURL(id))
         list.removeAll { convo in convo.id == id }
+        words[id] = nil
     }
 
     func deleteAll() {
@@ -83,6 +96,7 @@ import Foundation
             try? FileManager.default.removeItem(at: fileURL(convo.id))
         }
         list = []
+        words = [:]
     }
 
     func load(_ id: UUID) -> Convo? {
@@ -93,6 +107,28 @@ import Foundation
         var next = list.filter { existing in existing.id != convo.id }
         next.append(convo)
         list = next.sorted { a, b in a.updated > b.updated }
+        words[convo.id] = Self.wordCounts(convo)
+    }
+
+    // The title's words count for several, because the title is what the
+    // conversation is ABOUT: a word in it should outrank the same word said
+    // once in passing halfway down a transcript.
+    private static let titleWeight = 5
+
+    private static func wordCounts(_ convo: Convo) -> [String: Int] {
+        var counts: [String: Int] = [:]
+        add(convo.title, titleWeight, &counts)
+        for m in convo.messages { add(m.text, 1, &counts) }
+        return counts
+    }
+
+    private static func add(_ text: String, _ weight: Int,
+                            _ counts: inout [String: Int]) {
+        for token in text.lowercased().split(whereSeparator: { c in
+            !c.isLetter && !c.isNumber
+        }) {
+            counts[String(token), default: 0] += weight
+        }
     }
 
     private func decodeConvo(_ url: URL) -> Convo? {

@@ -1,4 +1,5 @@
-// The port of vendor/tts.cli/src/phonemizer.c starts here, in the C's own
+// The port of phonemizer.c from github.com/leok7v/tts.cli starts here, in
+// the C's own
 // declaration order: primitives and leaf helpers first, then the rule
 // engine (PhonemizerRules), the prosody pass (PhonemizerProsody), the IPA
 // renderer (PhonemizerIPA) and the stateful engine (Phonemizer).

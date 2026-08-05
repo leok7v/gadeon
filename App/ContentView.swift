@@ -87,7 +87,6 @@ struct ContentView: View {
     // iOS injects no back chevron and no grouped toolbar pill, and macOS keeps
     // its native title-bar toolbar.
     @State private var sidebarOpen = false
-    @State private var showSearch = false
     // Find in Chat: an inline bar over the transcript driving Find across the
     // per-message bubbles (each registers with this controller), so matches
     // scroll into view and highlight in the real transcript -- no separate view.
@@ -115,10 +114,6 @@ struct ContentView: View {
                 if Models.supported, model.eulaAccepted, model.accepted {
                     model.load(name: model.modelName)
                 }
-            }
-            .sheet(isPresented: $showSearch) {
-                SearchView(onOpen: openFromSearch,
-                           onClose: { showSearch = false })
             }
     }
 
@@ -211,10 +206,11 @@ struct ContentView: View {
                         Image(systemName: "chevron.right.2")
                     }
                     .help("Hide actions")
-                    TranscriptActions(document: model.transcriptDocument,
-                                      title: model.transcriptTitle,
-                                      renderMarkdown: $model.renderMarkdown,
-                                      onFind: openFind, onDebug: openDebug)
+                    TranscriptActions(
+                        document: model.transcriptDocument,
+                        title: model.transcriptTitle,
+                        renderMarkdown: $model.renderMarkdown,
+                        onFind: openFind, onDebug: debugAction)
                 } else {
                     Button { actionsExpanded = true } label: {
                         Image(systemName: "chevron.left.2")
@@ -231,6 +227,15 @@ struct ContentView: View {
         .onHover { inside in actionsHovering = inside }
         .animation(.easeInOut(duration: 0.2), value: actionsExpanded)
         .task(id: actionsIdle) { await collapseActionsAfterIdle() }
+    }
+
+    // The trace is offered only where the status line is: both are the
+    // diagnostic surface, so one switch decides whether the app shows its
+    // workings at all. nil hides the button.
+    private var debugAction: (() -> Void)? {
+        var out: (() -> Void)? = nil
+        if model.statusLine { out = openDebug }
+        return out
     }
 
     // Expanded and the pointer has left the cluster (macOS only -- iOS has no
@@ -257,7 +262,6 @@ struct ContentView: View {
             Sidebar(model: model, theme: $model.theme,
                     onClose: closeSidebar, onOpen: openConversation,
                     onNewChat: openNewChat,
-                    onSearch: { showSearch = true },
                     onSettings: openSettings)
                 .frame(width: 300)
                 .frame(maxHeight: .infinity)
@@ -283,7 +287,8 @@ struct ContentView: View {
                 // A model under a third-party licence asks for that first: the
                 // size question is ours to put, the licence is not.
                 if GemmaTerms.applies(to: name), !model.gemmaTermsAccepted {
-                    GemmaTermsView(onAgree: model.acceptGemmaTerms,
+                    GemmaTermsView(model: name,
+                                   onAgree: model.acceptGemmaTerms,
                                    onCancel: model.cancelDownload)
                 } else {
                     downloadConsent(name)
@@ -337,10 +342,14 @@ struct ContentView: View {
     // where the name earns its place; the moment the user has something to
     // decide, the control they might want is the one that belongs there --
     // and the picker carries the only route to the more-models invite.
+    //
+    // iOS ONLY. A Mac already shows the name in the menu bar and the window
+    // title, so swapping it in here says nothing twice over and costs the
+    // picker its place.
     @ViewBuilder
     private var centerBar: some View {
         if !actionsExpanded {
-            if model.inTurn {
+            if model.inTurn && isOS {
                 Text(ContentView.appName)
                     .font(.headline)
                     .lineLimit(1)
@@ -448,11 +457,6 @@ struct ContentView: View {
 
     private func closeSidebar() {
         withAnimation(.snappy) { sidebarOpen = false }
-    }
-
-    private func openFromSearch(_ id: UUID) {
-        showSearch = false
-        openConversation(id)
     }
 
     // Shown on a device with too little RAM for even the 0.8B (iOS <=3GB): a
@@ -663,8 +667,35 @@ struct ContentView: View {
         .frame(maxWidth: 420)
     }
 
+
+    // A DIAGNOSTIC, and it deliberately reintroduces the defect this app was
+    // freezing on. Off unless GADEON_STALL is set in the environment.
+    //
+    // It reuses `Shimmer` rather than rolling an animation, because the KIND
+    // of animation is the whole thing. `withAnimation(.repeatForever)` on a
+    // layer property -- opacity, scale -- is handed to the render server once
+    // and interpolated there, so it drives no per-frame work in the app at
+    // all. `TimelineView(.animation)` re-evaluates and REDRAWS its content
+    // every tick, which is what turns each display refresh into a view-graph
+    // update, a commit, and a synchronous round trip.
+    //
+    // Applied over the TRANSCRIPT so the redraw covers the tall single
+    // surface that is the suspected cost, which is the pairing the original
+    // freeze had: something committing per refresh, over something expensive
+    // to commit.
+    // Says so in the diagnostics, because two captures were taken against an
+    // app that turned out not to be running it and nothing on screen or in
+    // the log could settle which. An instrument that cannot prove it was
+    // armed is not an instrument.
+    static let stallProbeOn: Bool = {
+        let on = ProcessInfo.processInfo.environment["GADEON_STALL"] == "1"
+        Instrument.note("[stall] probe \(on ? "ARMED" : "off")")
+        return on
+    }()
+
     private var chat: some View {
         transcript
+            .modifier(Shimmer(active: ContentView.stallProbeOn))
             .overlay { if model.showSamples { samplePills } }
             // The composer rides as a bottom safe-area inset, so the transcript
             // insets its scrollable content beneath it -- the last bubble always
@@ -891,20 +922,14 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
-    // The numbers WIN over the working phrase whenever there are any: a
-    // second prompt is processed against a context that already has a size,
-    // and watching pp climb through the ingest says more than a quip. The
-    // phrase is for turn zero alone, where every number would read 0.
-    // Shimmer (driven by `prefilling`) is what says "working" from then on.
+    // Numbers whenever a turn has produced any, and what the model IS before
+    // that. No playful phrase: this line is where someone looks for facts,
+    // and a quip here competes with the transcript's own -- which is the
+    // surface written for it. Shimmer (driven by `prefilling`) is what says
+    // "working" from then on.
 
     private var statusText: String {
-        var result = model.status
-        if !model.statsLabel.isEmpty {
-            result = model.statsLabel
-        } else if model.prefilling {
-            result = model.barStatus + "…"
-        }
-        return result
+        model.statsLabel.isEmpty ? model.modelSummary : model.statsLabel
     }
 
     private var transcript: some View {
@@ -1154,7 +1179,7 @@ struct ContentView: View {
                 }
                 if !m.fromUser, !m.toolRounds.isEmpty {
                     ToolCallStrip(messageId: m.id, rounds: m.toolRounds,
-                                  peek: peek)
+                                  peek: peek, live: isLive(m))
                 }
                 if !m.fromUser, isPrefilling(m) {
                     prefillWhimsical
@@ -1225,6 +1250,13 @@ struct ContentView: View {
     // AND the doc has content (the doc trails the raw text by one ticker
     // beat, so plain text bridges the gap); user input is never Markdown.
 
+    // The sentence the voice is on, offered ONLY to the turn it came from:
+    // speech follows one answer, and a stale highlight left on an earlier
+    // bubble would point at the wrong conversation entirely.
+    private func spoken(_ m: ChatModel.Message) -> String? {
+        m.id == model.messages.last?.id ? model.speech.spokenText : nil
+    }
+
     private func answerBubble(_ m: ChatModel.Message,
                               _ answer: String) -> some View {
         Group {
@@ -1239,7 +1271,7 @@ struct ContentView: View {
                                  style: ContentView.scaled(
                                      ContentView.answerStyle, by: typeScale),
                                  find: findController, findId: m.id,
-                                 scrolls: false)
+                                 scrolls: false, speaking: spoken(m))
             } else if !m.fromUser {
                 // Plain-text mode (or the brief gap before the Markdown doc is
                 // ready): the raw text on the SAME findable single surface, so
@@ -1248,7 +1280,7 @@ struct ContentView: View {
                               style: ContentView.scaled(
                                   ContentView.answerStyle, by: typeScale),
                               find: findController, findId: m.id,
-                              scrolls: false)
+                              scrolls: false, speaking: spoken(m))
             } else {
                 Text(answer).textSelection(.enabled)
             }
@@ -1287,8 +1319,16 @@ struct ContentView: View {
     // plain turn (no tool rounds) keeps its quiet no-bubble behavior.
 
     private func isAnswerless(_ m: ChatModel.Message) -> Bool {
-        !m.fromUser && !m.toolRounds.isEmpty
-            && !(model.busy && m.id == model.messages.last?.id)
+        !m.fromUser && !m.toolRounds.isEmpty && !isLive(m)
+    }
+
+    // The turn being generated right now. Everything transient about a
+    // bubble hangs off this: a state that outlives its turn is either a stale
+    // label or, where it drives an animation, a commit on every display
+    // refresh for the rest of the conversation.
+
+    private func isLive(_ m: ChatModel.Message) -> Bool {
+        model.busy && m.id == model.messages.last?.id
     }
 
     private var noAnswerNote: some View {
@@ -1312,7 +1352,7 @@ struct ContentView: View {
     // stream (where the disclosure header, not the prefill line, is shown).
 
     private func isPrefilling(_ m: ChatModel.Message) -> Bool {
-        model.busy && m.id == model.messages.last?.id && model.prefilling
+        isLive(m) && model.prefilling
     }
 
     // True only for the message being generated right now, before its answer
@@ -1321,7 +1361,7 @@ struct ContentView: View {
     // turn keeps an empty answer, so "text empty" alone would never clear).
 
     private func isThinking(_ m: ChatModel.Message) -> Bool {
-        model.busy && m.id == model.messages.last?.id && m.text.isEmpty
+        isLive(m) && m.text.isEmpty
     }
 
 }
@@ -1511,6 +1551,13 @@ private struct ToolCallStrip: View {
     let messageId: UUID
     let rounds: [ChatModel.ToolRound]
     let peek: ToolPeek
+    // Whether this turn is still generating. A round's result is filled only
+    // by its completion event, so a turn that is stopped, cancelled or fails
+    // between the two leaves one nil for good -- and the shimmer keyed off it
+    // is an INDEFINITE animation, which drives a view-graph update and a
+    // synchronous render-server round trip on every display refresh for the
+    // rest of the conversation's life, in an app that looks idle.
+    let live: Bool
     // Where each row sits, so opening one knows what the callout points at.
     @State private var frames: [Int: CGRect] = [:]
 
@@ -1545,7 +1592,7 @@ private struct ToolCallStrip: View {
             }
         }
         .foregroundStyle(.secondary)
-        .modifier(Shimmer(active: round.result == nil))
+        .modifier(Shimmer(active: live && round.result == nil))
         .contentShape(Rectangle())
         .onGeometryChange(for: CGRect.self, of: { geo in
             geo.frame(in: .named(transcriptSpace))

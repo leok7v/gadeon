@@ -136,6 +136,7 @@ extension NativeText: NSViewRepresentable {
             v.invalidateIntrinsicContentSize()
             v.reapplyFind()
         }
+        v.setSpoken(speaking)
     }
 
     final class ResizingTextView: NSTextView, FindableTextView {
@@ -152,6 +153,8 @@ extension NativeText: NSViewRepresentable {
         private var activeIndex: Int? = nil
         private var findQuery = ""
         private var findCaseSensitive = false
+        private var spokenText: String?
+        private var spokenRange: NSRange?
 
         var liveFindCount: Int { findMatches.count }
 
@@ -178,6 +181,11 @@ extension NativeText: NSViewRepresentable {
         }
         private var activeTint: NSColor {
             NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 0.6)
+        }
+        // Cool against find's warm pair, so the two never read as the same
+        // thing when a search happens to be open while a reply is spoken.
+        private var spokenTint: NSColor {
+            NSColor(srgbRed: 0.25, green: 0.55, blue: 1.0, alpha: 0.28)
         }
 
         // Highlight EVERY match; the controller activates one later. No
@@ -211,10 +219,7 @@ extension NativeText: NSViewRepresentable {
             findQuery = ""
             findMatches = []
             activeIndex = nil
-            if let lm = layoutManager, let ts = textStorage {
-                lm.removeTemporaryAttribute(.backgroundColor,
-                    forCharacterRange: NSRange(location: 0, length: ts.length))
-            }
+            highlightAll()
         }
 
         func reapplyFind() {
@@ -225,18 +230,47 @@ extension NativeText: NSViewRepresentable {
                 if let a = activeIndex, a >= findMatches.count {
                     activeIndex = nil
                 }
+            }
+            locateSpoken()
+            highlightAll()
+        }
+
+        func setSpoken(_ text: String?) {
+            if text != spokenText {
+                spokenText = text
+                locateSpoken()
                 highlightAll()
             }
+        }
+
+        // A literal search, so a sentence the speech layer reshaped simply
+        // does not tint rather than tinting the wrong one.
+        private func locateSpoken() {
+            let ns = string as NSString
+            var found: NSRange? = nil
+            if let text = spokenText, !text.isEmpty {
+                let r = ns.range(of: text)
+                if r.location != NSNotFound { found = r }
+            }
+            spokenRange = found
         }
 
         // TEMPORARY attributes, not real .backgroundColor: they layer over the
         // text without mutating the storage, so code / table backgrounds
         // survive a find AND applyIncremental's attribute diff is undisturbed.
+        //
+        // The ONE writer of those attributes -- find tints and the spoken
+        // sentence both land here, because each starts by clearing the whole
+        // range and a second writer would erase the first.
         private func highlightAll() {
             if let lm = layoutManager, let ts = textStorage {
                 let full = NSRange(location: 0, length: ts.length)
                 lm.removeTemporaryAttribute(.backgroundColor,
                                             forCharacterRange: full)
+                if let r = spokenRange, NSMaxRange(r) <= ts.length {
+                    lm.setTemporaryAttributes([.backgroundColor: spokenTint],
+                                              forCharacterRange: r)
+                }
                 for (i, r) in findMatches.enumerated()
                 where NSMaxRange(r) <= ts.length {
                     lm.setTemporaryAttributes(

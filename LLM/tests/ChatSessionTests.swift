@@ -1012,6 +1012,34 @@ final class ChatSessionTests: XCTestCase {
         XCTAssertEqual(a3, "two", "conversation did not recover after rollback")
     }
 
+    // A turn that decodes to NOTHING (Stop after the prefill, before the first
+    // token; or an immediate EOS) must not leave an empty assistant message in
+    // history. The next delta would render it as a bare model turn, and a model
+    // asked to continue from a turn where it said nothing answers with token
+    // salad -- which enters history in its turn, so the conversation never
+    // recovers. It rolls back exactly as a prefill Stop does, and the turn
+    // after it continues the prior conversation.
+    func testEmptyAnswerRollsBackTurn() async throws {
+        let backend = MockBackend(
+            scripts: [[1], [], [2]],
+            vocab: vocab([(1, "one"), (2, "two")]))
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256)
+        let a1 = await drain(session.reply("first"))
+        XCTAssertEqual(a1, "one")
+        let empty = await drain(session.reply("second"))   // decodes nothing
+        XCTAssertTrue(empty.isEmpty, "empty turn emitted output")
+        let rolledBack = await session.turnRolledBack
+        XCTAssertTrue(rolledBack, "empty turn was not rolled back")
+        let before = backend.rewinds
+        let a3 = await drain(session.reply("third"))
+        XCTAssertGreaterThan(backend.rewinds, before,
+            "recovered turn did not rewind into the prior conversation")
+        XCTAssertEqual(a3, "two",
+                       "conversation did not recover after the empty turn")
+    }
+
     // Tool-name resolution: exact match, a close typo snaps to the real tool,
     // and a genuinely-different name stays UNKNOWN (nil) so it grounds rather
     // than steering onto a wrong tool.

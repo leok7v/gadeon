@@ -228,3 +228,40 @@ A PARTICULAR PURPOSE. See the GNU General Public License for more details.
   Jonathan Duddington and Copyright (C) 2016-2017 Reece H. Dunn, GPLv3+.
 
 Model weights are covered by their own upstream licences, not by this repo's.
+
+---
+
+### Footnote: how the gemma-4-12B repack scores
+
+The 12B GGUF this app downloads is a *recovery* of the quantization-aware
+training's own 4-bit codes, not a fresh quantization of the released weights.
+Google publishes a second 4-bit build of the same checkpoint, so the two can be
+scored against the bf16 they both come from.
+
+Relative weight error against that checkpoint:
+
+| tensor | [ours](https://huggingface.co/leok7v/gemma-4-12b-it-qat) | [w4a16-ct](https://huggingface.co/google/gemma-4-12B-it-qat-w4a16-ct) |
+|---|---|---|
+| `gate_proj` layer 0 | **1.03e-03** | 6.66e-02 |
+| `q_proj` layer 0 | **1.07e-03** | 6.67e-02 |
+| `down_proj` layer 30 | **1.10e-03** | 6.66e-02 |
+
+About 65x closer to the trained weights, in a file 6.35 GiB against 9.56 GiB.
+
+Not a better search: the int4 **codes agree 99.40%** between the two files, so
+both recover the same trained grid, and Google's build is an independent
+witness that the recovery is right. The **scales** differ, theirs a median
+1.0645x larger, because a min/max observer takes the block scale from the
+block's extreme where this repack refits it by least squares over the settled
+codes.
+
+Their build is better on one tensor: it leaves the embedding table in bf16 and
+therefore exact, at 1.88 GiB against 0.53 GiB here. Both leave the same modules
+unquantized -- the vision patch dense, both multimodal projections and the
+position table.
+
+The measurement is reproduced by the converter tooling in the development
+repo. Sources:
+[base checkpoint](https://huggingface.co/google/gemma-4-12B-it-qat-q4_0-unquantized),
+[Google's 4-bit build](https://huggingface.co/google/gemma-4-12B-it-qat-w4a16-ct),
+[this repack](https://huggingface.co/leok7v/gemma-4-12b-it-qat).

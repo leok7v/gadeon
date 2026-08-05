@@ -51,16 +51,26 @@ public final class Gemma4Backend: AgentBackend, @unchecked Sendable {
         engine.sampler = s
     }
 
+    // A prefill-phase Stop leaves the loop early; surface it as
+    // EngineError.stopped so ChatSession rolls the turn back, matching the
+    // ternary and CoreML backends.
     public func extend(_ ids: [Int32]) async throws -> Int32 {
-        engine.extend(ids)
+        let out = engine.extend(ids)
+        if engine.shouldStop() { throw EngineError.stopped }
+        return out
     }
+
+    public func requestStop() { engine.requestStop() }
+    public func shouldStop() -> Bool { engine.shouldStop() }
 
     public func supportsSoftTokens() async -> Bool { true }
 
     public func extendSoft(_ ids: [Int32],
                            spans: [SoftSpan]) async throws -> Int32 {
         let feed = SoftFeed(spans)
-        return engine.extend(ids, softAt: { id in feed.row(id) })
+        let out = engine.extend(ids, softAt: { id in feed.row(id) })
+        if engine.shouldStop() { throw EngineError.stopped }
+        return out
     }
 
     public func decode(_ token: Int32) async throws -> Int32 {

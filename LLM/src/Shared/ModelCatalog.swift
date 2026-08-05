@@ -82,14 +82,33 @@ public enum ModelCatalog {
         // as reads. Self-contained: the sampling matrix, the chat template and
         // BOTH towers (vision + audio) live in the single file, so unlike the
         // Bonsai sets it needs no sibling mmproj or generation_config.
-        //
-        // NOTE the licence differs from every other entry: gemma ships under
-        // Google's Gemma Terms of Use, not Apache-2.0.
         "gemma-4-E2B": Source(
             repo: "leok7v/gemma-4-e2b-it-qat",
             revision: "47c144d18e31fb4d6cdde6f593b0c3db986610e6",
             bytes: 2_665_414_656,
             files: ["gemma-4-e2b-it-qat.gguf"]),
+        // The same architecture one size up: 42 layers at 2560 wide against
+        // E2B's 35 at 1536, grouped-query attention rather than multi-query,
+        // and every MLP left at 4 bits where E2B drops its wide half to 2.
+        // The vision and audio towers are the same weights, so only the text
+        // tower and the two projections into it grow.
+        "gemma-4-E4B": Source(
+            repo: "leok7v/gemma-4-e4b-it-qat",
+            revision: "ac03211d7016197b97d1abc8f4f9f36632e1e974",
+            bytes: 3_794_550_784,
+            files: ["gemma-4-e4b-it-qat.gguf"]),
+        // gemma-4-12B, the UNIFIED architecture rather than a larger E4B: no
+        // per-layer embeddings, no shared KV, and multimodality with no tower
+        // at all -- an image is raw pixel patches and audio is raw waveform
+        // frames, each through one projection into the embedding space. Its
+        // full-attention layers keep a single 512-wide kv head whose key and
+        // value share one projection, so its KV per token is far below what
+        // 48 layers at 3840 would suggest.
+        "gemma-4-12B": Source(
+            repo: "leok7v/gemma-4-12b-it-qat",
+            revision: "b22113f7912356882273609f1a7802bfc1292f04",
+            bytes: 6_822_641_664,
+            files: ["gemma-4-12b-it-qat.gguf"]),
     ]
 
     public static func source(_ name: String) -> Source? { sources[name] }
@@ -100,6 +119,8 @@ public enum ModelCatalog {
         "Ternary-Bonsai-27B": "Ternary-Bonsai-27B-Q2_0.gguf",
         "Ternary-Bonsai-1.7B": "Ternary-Bonsai-1.7B-Q2_0.gguf",
         "gemma-4-E2B": "gemma-4-e2b-it-qat.gguf",
+        "gemma-4-E4B": "gemma-4-e4b-it-qat.gguf",
+        "gemma-4-12B": "gemma-4-12b-it-qat.gguf",
     ]
 
     public static func isGguf(_ name: String) -> Bool {

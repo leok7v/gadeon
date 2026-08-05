@@ -10,6 +10,7 @@
 // item, so a short clip simply yields fewer frames rather than being refused.
 import AVFoundation
 import CoreGraphics
+import ImageIO
 import Foundation
 
 public enum VideoFrames {
@@ -60,5 +61,22 @@ public enum VideoFrames {
     // mm:ss, the label gemma-4 puts before each frame's span.
     public static func stamp(_ seconds: Double) -> String {
         String(format: "%02d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+    }
+}
+
+public extension VideoFrames {
+    // The sampled frames as PNGs, for looking at what the tower was handed.
+    static func write(_ images: [CGImage], to dir: String) throws {
+        let base = URL(fileURLWithPath: dir)
+        try FileManager.default.createDirectory(
+            at: base, withIntermediateDirectories: true)
+        for (i, img) in images.enumerated() {
+            let url = base.appendingPathComponent(String(format: "%02d.png", i))
+            if let dst = CGImageDestinationCreateWithURL(
+                url as CFURL, "public.png" as CFString, 1, nil) {
+                CGImageDestinationAddImage(dst, img, nil)
+                CGImageDestinationFinalize(dst)
+            }
+        }
     }
 }

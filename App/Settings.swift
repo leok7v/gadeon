@@ -30,6 +30,7 @@ struct SettingsView: View {
         case vision = "Vision"
         case view = "View"
         case misc = "Misc"
+        case about = "About"
         var id: String { rawValue }
         var symbol: String {
             switch self {
@@ -39,6 +40,7 @@ struct SettingsView: View {
             case .vision: return "eye"
             case .view: return "paintbrush"
             case .misc: return "slider.horizontal.3"
+            case .about: return "info.circle"
             }
         }
     }
@@ -180,6 +182,59 @@ struct SettingsView: View {
         case .vision: visionPane
         case .view: viewPane
         case .misc: miscPane
+        case .about: aboutPane
+        }
+    }
+
+    // Credit, and the two licences a copy of which has to travel with what
+    // they cover. The texts are collapsed because nobody reads them by
+    // choice, and present in full because a link is not a copy and this app
+    // is meant to work with the network off.
+    private var aboutPane: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            title("About")
+            creditRow(Credits.app)
+            Divider().padding(.vertical, 4)
+            explain("Built on the work below. Each entry says who made it, "
+                + "the terms it arrives under, and what this app changed.")
+            ForEach(Credits.all) { item in creditRow(item) }
+            Divider().padding(.vertical, 4)
+            licence("Apache License 2.0", Licence.apache2)
+            licence("GNU General Public License v3", Licence.gpl3)
+        }
+    }
+
+    private func creditRow(_ item: Credit) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(item.name).bold()
+                Text(item.terms)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(item.author).font(.callout)
+            if let link = item.link {
+                Link(item.source, destination: link).font(.caption)
+            }
+            explain(item.changed)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 4)
+    }
+
+    // Bounded rather than free-flowing: 11k and 35k characters inline would
+    // bury everything above them in the pane's own scroll.
+    private func licence(_ name: String, _ text: String) -> some View {
+        DisclosureGroup(name) {
+            ScrollView {
+                Text(text)
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 6)
+            }
+            .frame(maxHeight: 260)
         }
     }
 

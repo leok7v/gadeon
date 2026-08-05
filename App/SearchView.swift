@@ -1,122 +1,111 @@
-import SwiftUI
+import Foundation
 
-// Full-text search over saved conversations (titles + message text). A hit
-// opens its conversation read-only.
+// Matching for the sidebar's conversation filter: does a saved conversation
+// answer this query, and if the answer is not visible in its title, what part
+// of it did. The sidebar owns the field and the list; this owns only the
+// question, so a filtered row stays the same row.
 
-struct SearchView: View {
+enum ConversationSearch {
 
-    let onOpen: (UUID) -> Void
-    let onClose: () -> Void
-    @State private var query = ""
+    // Shortest query worth filtering on. One character matches most of the
+    // history and reads as the list breaking rather than narrowing.
+    static let minimumQuery = 2
 
-    struct Hit: Identifiable {
-        let id: UUID
-        let title: String
-        let snippet: String
+    // Every word has to land somewhere, in any order -- the words a person
+    // remembers about a conversation are rarely adjacent in it, so matching
+    // the query as one literal string finds "dark matter" and misses "dark
+    // energy and matter".
+    //
+    // Split exactly as ConversationStore indexes, on anything that is not a
+    // letter or a digit. The two MUST agree: the index holds "matter", so a
+    // query tokenized any other way could type "matter," and match nothing.
+    static func words(_ query: String) -> [String] {
+        query.lowercased()
+            .split(whereSeparator: { c in !c.isLetter && !c.isNumber })
+            .map(String.init)
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            field
-            Divider()
-            content
+    static func active(_ query: String) -> Bool {
+        let all = words(query)
+        return !all.isEmpty
+            && all.reduce(0) { sum, word in sum + word.count }
+                >= minimumQuery
+    }
+
+    // The conversations a query answers, best first. Every query word has to
+    // land somewhere -- a filter that keeps rows matching ANY word barely
+    // narrows anything -- and what orders the survivors is how WELL they
+    // landed: a whole word beats a word that merely starts the same way,
+    // which beats one buried inside another, and a word said nine times
+    // beats one said once.
+    static func rank(_ list: [ConversationStore.Convo],
+                     _ index: [UUID: [String: Int]],
+                     _ query: String) -> [ConversationStore.Convo] {
+        let wanted = words(query).map { word in word.lowercased() }
+        var scored: [(convo: ConversationStore.Convo, score: Int)] = []
+        scored.reserveCapacity(list.count)
+        for convo in list {
+            let counts = index[convo.id] ?? [:]
+            var total = 0
+            var landed = 0
+            for want in wanted {
+                let gain = score(want, counts)
+                total += gain
+                if gain > 0 { landed += 1 }
+            }
+            if landed == wanted.count { scored.append((convo, total)) }
         }
+        // Recency is part of the comparator so it reports no ties, which
+        // makes the order a property of the key alone.
+        return scored
+            .sorted { a, b in
+                a.score == b.score
+                    ? a.convo.updated > b.convo.updated
+                    : a.score > b.score
+            }
+            .map { pair in pair.convo }
     }
 
-    private var header: some View {
-        HStack {
-            Text("Search").font(.headline)
-            Spacer()
-            Button("Done", action: onClose)
-                .keyboardShortcut(.defaultAction)
-            Button("", action: onClose)
-                .keyboardShortcut(.cancelAction)
-                .hidden()
-        }
-        .padding(12)
-    }
-
-    private var field: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-            TextField("Search conversations", text: $query)
-                .textFieldStyle(.plain)
-            if !query.isEmpty {
-                Button { query = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
+    private static func score(_ want: String,
+                              _ counts: [String: Int]) -> Int {
+        var total = 0
+        for (word, count) in counts {
+            if word == want {
+                total += 100 * count
+            } else if word.hasPrefix(want) {
+                total += 10 * count
+            } else if word.contains(want) {
+                total += count
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        return total
     }
 
-    @ViewBuilder
-    private var content: some View {
-        let hits = results
-        if query.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 {
-            hint("Type to search your conversations.")
-        } else if hits.isEmpty {
-            hint("No matches.")
-        } else {
-            List(hits) { hit in
-                Button { onOpen(hit.id) } label: { row(hit) }
-                    .buttonStyle(.plain)
-            }
-            .listStyle(.plain)
-        }
-    }
-
-    private func hint(_ text: String) -> some View {
-        VStack {
-            Spacer()
-            Text(text).foregroundStyle(.secondary)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func row(_ hit: Hit) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(hit.title).font(.headline).lineLimit(1)
-            Text(hit.snippet)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .padding(.vertical, 2)
-    }
-
-    private var results: [Hit] {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        var hits: [Hit] = []
-        if q.count >= 2 {
-            for convo in ConversationStore.shared.list {
-                if let snippet = SearchView.match(convo, q) {
-                    hits.append(Hit(id: convo.id, title: convo.title,
-                                    snippet: snippet))
-                }
-            }
-        }
-        return hits
-    }
-
-    // A short snippet around the first (case-insensitive) match, nil if none.
-    private static func match(_ convo: ConversationStore.Convo,
-                              _ q: String) -> String? {
+    // Where the match was found, for the row's second line -- but ONLY for a
+    // word the title does not already show. A row whose own title carries the
+    // query needs no explanation, and repeating it there costs the timestamp
+    // for nothing.
+    static func reason(_ convo: ConversationStore.Convo,
+                       _ query: String) -> String? {
         var result: String? = nil
-        var texts = [convo.title]
-        texts.append(contentsOf: convo.messages.map { m in m.text })
-        for text in texts where result == nil {
-            if let r = text.range(of: q, options: .caseInsensitive) {
-                result = snippet(text, r)
+        for word in words(query) where result == nil {
+            if convo.title.range(of: word,
+                                 options: .caseInsensitive) == nil {
+                result = found(word, in: convo)
+            }
+        }
+        return result
+    }
+
+    // The text around the first occurrence of `word` in the transcript. Only
+    // the messages: the caller asks this exactly when the title does NOT
+    // carry the word, which is what makes the answer worth a row.
+    private static func found(_ word: String,
+                              in convo: ConversationStore.Convo) -> String? {
+        var result: String? = nil
+        for m in convo.messages where result == nil {
+            if let r = m.text.range(of: word, options: .caseInsensitive) {
+                result = snippet(m.text, r)
             }
         }
         return result
@@ -124,7 +113,7 @@ struct SearchView: View {
 
     private static func snippet(_ text: String,
                                 _ range: Range<String.Index>) -> String {
-        let pad = 30
+        let pad = 24
         let lo = text.index(range.lowerBound, offsetBy: -pad,
                             limitedBy: text.startIndex) ?? text.startIndex
         let hi = text.index(range.upperBound, offsetBy: pad,

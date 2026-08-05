@@ -1745,10 +1745,21 @@ kernel void kv_append_batch(
 // Causal attention for N query tokens over the paged KV: token n (absolute
 // position basePos+n) attends to keys 0..basePos+n, one threadgroup per
 // (token, head). [flash-attn]
+// blockLo/blockHi are the one vision block this chunk carries, as absolute
+// positions, or 0/0 for none. A query inside it reads the WHOLE block, which
+// is the only place attention passes its own position. [vision-block]
 struct AttnBatchArgs {
     uint hd; uint nH; uint nKV; uint kvDim; uint P; float scale;
     uint basePos; uint N; uint gated; uint window;
+    uint blockLo; uint blockHi;
 };
+
+// The last key a query at absolute position q may read. Causal length T
+// normally; a query inside a vision block reads to the end of that block
+// instead, and the union stays CONTIGUOUS because the block contains q.
+inline uint attn_end(uint q, uint T, uint blockLo, uint blockHi) {
+    return (q >= blockLo && q < blockHi) ? max(T, blockHi) : T;
+}
 
 kernel void attn_batch(
         device const float   * qN    [[buffer(0)]],
@@ -1767,11 +1778,228 @@ kernel void attn_batch(
     // Sliding layers read a WINDOW rather than the whole history, and each
     // query row in the batch has its own start. window == 0 is unwindowed.
     const uint lo = a.window == 0 || T <= a.window ? 0 : T - a.window;
+    // attn_flash reads [lo, hi) with no further mask -- the RANGE is the mask
+    // -- so a vision block needs nothing but a longer bound. [vision-block]
+    const uint hi = attn_end(a.basePos + n, T, a.blockLo, a.blockHi);
     const uint group = a.nH / a.nKV;
     const uint off = n * a.nH * a.hd + h * a.hd;
     attn_flash(qN + off, kT, vT, gateN + off, outN + off,
-               a.hd, h / group, a.kvDim, a.P, a.scale, a.gated, lo, T,
+               a.hd, h / group, a.kvDim, a.P, a.scale, a.gated, lo, hi,
                shmem, sgitg, tiisg);
+}
+
+// The SAME causal attention on the 8x8 matrix units. [flash-attn-mm]
+//
+// FA_Q query rows and FA_K keys per iteration; the four simdgroups split the
+// KEY range for the scores and the HEAD DIM for the context, so neither
+// product is computed twice. Everything that is not a matmul -- the paged row
+// addressing, the online-softmax algebra, the causal and window masks -- is
+// the same arithmetic the scalar kernel performs, in the same order per query.
+#define FA_Q 8
+#define FA_K 32
+
+// One 8x8 block of scores: S[q][k] = sum_d Q[q][d] * K[k][d], accumulated over
+// the whole head dim. K is loaded TRANSPOSED, which is what turns a row-major
+// [key][dim] tile into the [dim][key] operand the product wants.
+inline simdgroup_float8x8 fa_scores(threadgroup const half * qs, uint hd,
+                                    device const half * kBase, uint kvDim) {
+    simdgroup_float8x8 s = make_filled_simdgroup_matrix<float, 8>(0.f);
+    for (uint d = 0; d < hd; d += 8) {
+        simdgroup_half8x8 qa, kb;
+        simdgroup_load(qa, qs + d, hd, ulong2(0, 0), false);
+        simdgroup_load(kb, kBase + d, kvDim, ulong2(0, 0), true);
+        simdgroup_multiply_accumulate(s, qa, kb, s);
+    }
+    return s;
+}
+
+// Rescale the running context by the online-softmax correction. A simdgroup
+// matrix carries no scalar multiply, so the correction rides a DIAGONAL matrix
+// -- one extra product per dim tile, against the sixteen the context itself
+// costs.
+inline void fa_rescale(thread simdgroup_float8x8 * o, ushort tiles,
+                       threadgroup const half * diag) {
+    simdgroup_half8x8 d;
+    simdgroup_load(d, diag, 8, ulong2(0, 0), false);
+    for (ushort i = 0; i < tiles; i++) {
+        simdgroup_float8x8 t = make_filled_simdgroup_matrix<float, 8>(0.f);
+        simdgroup_multiply_accumulate(t, d, o[i], t);
+        o[i] = t;
+    }
+}
+
+// Stage the tile's queries as half, zero-filling a short tail so the product
+// reads a whole 8-row block whatever the batch ends on.
+inline void fa_stage_q(threadgroup half * qs, device const float * qN,
+                       uint base, uint hd, uint row, ushort nq, ushort tiitg) {
+    for (uint i = tiitg; i < FA_Q * hd; i += 128) {
+        const uint q = i / hd;
+        qs[i] = q < nq ? (half) qN[base + q * row + i % hd] : 0.0h;
+    }
+}
+
+// Scale one tile of scores and MASK it per ROW: a key can be past one row's
+// causal end and below another's window start, so the bound is not the tile's.
+inline void fa_mask(threadgroup float * s, uint t0, uint T0, uint window,
+                    uint blockLo, uint blockHi,
+                    float scale, ushort nq, ushort tiitg) {
+    for (uint i = tiitg; i < FA_Q * FA_K; i += 128) {
+        const uint q = i / FA_K;
+        const uint t = t0 + i % FA_K;
+        const uint Tq = T0 + q;
+        const uint loQ = (window == 0 || Tq <= window) ? 0 : Tq - window;
+        const uint hiQ = attn_end(Tq - 1, Tq, blockLo, blockHi);
+        s[i] = (q < nq && t < hiQ && t >= loQ) ? s[i] * scale : -INFINITY;
+    }
+}
+
+// Fold one masked tile into the running softmax: P out as half for the next
+// product, the max and denominator advanced, the correction left on the
+// diagonal for fa_rescale.
+inline void fa_softmax(threadgroup float * s, threadgroup half * p,
+                       threadgroup float * mRow, threadgroup float * lRow,
+                       threadgroup half * cDiag, ushort tiitg) {
+    for (uint q = tiitg; q < FA_Q; q += 128) {
+        float mx = mRow[q];
+        for (ushort k = 0; k < FA_K; k++) {
+            mx = max(mx, s[q * FA_K + k]);
+        }
+        // A wholly masked tile leaves the row untouched; -INF minus -INF is a
+        // NaN that would poison the context for the rest of the sweep.
+        const float corr = mx > -INFINITY ? exp(mRow[q] - mx) : 1.0f;
+        float sum = 0.0f;
+        for (ushort k = 0; k < FA_K; k++) {
+            const float e =
+                s[q * FA_K + k] > -INFINITY ? exp(s[q * FA_K + k] - mx) : 0.0f;
+            p[q * FA_K + k] = (half) e;
+            sum += e;
+        }
+        mRow[q] = mx;
+        lRow[q] = lRow[q] * corr + sum;
+        cDiag[q * 8 + q] = (half) corr;
+    }
+}
+
+// O[q][d] += sum_k P[q][k] * V[k][d] over one tile, this simdgroup's dim slice.
+inline void fa_context(thread simdgroup_float8x8 * o, ushort oTiles,
+                       threadgroup const half * p,
+                       device const KVTable & vT, uint t0, uint tEnd,
+                       uint P, uint kvDim, uint kvh, uint hd, uint slice) {
+    for (ushort kb = 0; kb < FA_K / 8; kb++) {
+        const uint t = t0 + kb * 8;
+        if (t < tEnd) {
+            simdgroup_half8x8 pm;
+            simdgroup_load(pm, p + kb * 8, FA_K, ulong2(0, 0), false);
+            device const half * vb = kv_row(vT, t, P, kvDim, kvh, hd) + slice;
+            for (ushort i = 0; i < oTiles; i++) {
+                simdgroup_half8x8 vv;
+                simdgroup_load(vv, vb + i * 8, kvDim, ulong2(0, 0), false);
+                simdgroup_multiply_accumulate(o[i], pm, vv, o[i]);
+            }
+        }
+    }
+}
+
+// Normalize this simdgroup's slice and write it out. The accumulators go back
+// through threadgroup memory because only there is the [row][dim] layout the
+// output wants; each simdgroup lands in its OWN 64-float window, since all
+// four store at the same moment.
+inline void fa_store(thread simdgroup_float8x8 * o, ushort oTiles,
+                     threadgroup float * mine, threadgroup const float * lRow,
+                     device float * outN, device const float * gateN,
+                     uint base, uint row, uint hd, uint slice, uint gated,
+                     ushort nq, ushort tiisg) {
+    for (ushort i = 0; i < oTiles; i++) {
+        simdgroup_store(o[i], mine, 8, ulong2(0, 0), false);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        for (ushort j = tiisg; j < FA_Q * 8; j += 32) {
+            const uint q = j / 8;
+            if (q < nq) {
+                const uint at = base + q * row + slice + i * 8 + j % 8;
+                const float v = mine[j] / lRow[q];
+                outN[at] = gated ? v * sigmoidf(gateN[at]) : v;
+            }
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+kernel void attn_batch_mm(
+        device const float   * qN    [[buffer(0)]],
+        device const KVTable & kT    [[buffer(1)]],
+        device const KVTable & vT    [[buffer(2)]],
+        device const float   * gateN [[buffer(3)]],
+        device       float   * outN  [[buffer(4)]],
+        constant AttnBatchArgs & a   [[buffer(5)]],
+        threadgroup uchar    * shmem [[threadgroup(0)]],
+        uint   tgid  [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint hd = a.hd;
+    const uint slice = sgitg * (hd / 4);       // this simdgroup's dim slice
+    const ushort oTiles = (ushort) (hd / 4 / 8);
+    const uint n0 = (tgid / a.nH) * FA_Q;
+    const uint h = tgid % a.nH;
+    const ushort nq = (ushort) min((uint) FA_Q, a.N - n0);
+    const uint kvh = h / (a.nH / a.nKV);
+    const uint row = a.nH * hd;                // one token's q / out stride
+    const uint base = n0 * row + h * hd;
+    // shmem = qs[FA_Q*hd half] | s[FA_Q*FA_K float] | p[FA_Q*FA_K half]
+    //       | m[FA_Q] | l[FA_Q] | corr[64 half, a diagonal]
+    threadgroup half  * qs    = (threadgroup half *) shmem;
+    threadgroup float * sBuf  = (threadgroup float *) (qs + FA_Q * hd);
+    threadgroup half  * pBuf  = (threadgroup half *) (sBuf + FA_Q * FA_K);
+    threadgroup float * mRow  = (threadgroup float *) (pBuf + FA_Q * FA_K);
+    threadgroup float * lRow  = mRow + FA_Q;
+    threadgroup half  * cDiag = (threadgroup half *) (lRow + FA_Q);
+    fa_stage_q(qs, qN, base, hd, row, nq, tiitg);
+    for (uint i = tiitg; i < FA_Q; i += 128) {
+        mRow[i] = -INFINITY;
+        lRow[i] = 0.0f;
+    }
+    // The correction matrix is DIAGONAL, so its off-diagonal must be zero
+    // before the first tile reads it -- and stay zero, which is why each pass
+    // clears only the cell it wrote.
+    for (uint i = tiitg; i < FA_Q * 8; i += 128) { cDiag[i] = 0.0h; }
+    simdgroup_float8x8 o[16];
+    for (ushort i = 0; i < oTiles; i++) {
+        o[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
+    }
+    // The union of the rows' ranges, aligned DOWN to FA_K so a tile never
+    // straddles a page -- the host gates on a page holding a whole multiple
+    // of 8 positions, which makes each 8-key block a plain strided load.
+    // A tile holding any row of a vision block reads to that block's end, so
+    // the union is taken over the tile rather than per row; fa_mask still
+    // bounds each row on its own. [vision-block]
+    const uint tLast = a.basePos + n0 + nq;
+    const uint tEnd = (a.basePos + n0 < a.blockHi && tLast > a.blockLo)
+        ? max(tLast, a.blockHi) : tLast;
+    const uint T0 = a.basePos + n0 + 1;
+    const uint loF = (a.window == 0 || T0 <= a.window) ? 0 : T0 - a.window;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint t0 = loF / FA_K * FA_K; t0 < tEnd; t0 += FA_K) {
+        // Scores: simdgroup s owns keys t0 + 8s .. +8.
+        const uint kt = t0 + sgitg * 8;
+        const simdgroup_float8x8 sBlk = kt < tEnd
+            ? fa_scores(qs, hd, kv_row(kT, kt, a.P, a.kvDim, kvh, hd), a.kvDim)
+            : make_filled_simdgroup_matrix<float, 8>(0.f);
+        simdgroup_store(sBlk, sBuf + sgitg * 8, FA_K, ulong2(0, 0), false);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        fa_mask(sBuf, t0, T0, a.window, a.blockLo, a.blockHi,
+                a.scale, nq, tiitg);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        fa_softmax(sBuf, pBuf, mRow, lRow, cDiag, tiitg);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        fa_rescale(o, oTiles, cDiag);
+        fa_context(o, oTiles, pBuf, vT, t0, tEnd, a.P, a.kvDim, kvh, hd,
+                   slice);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i = tiitg; i < FA_Q * 8; i += 128) { cDiag[i] = 0.0h; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    fa_store(o, oTiles, sBuf + sgitg * 64, lRow, outN, gateN, base, row, hd,
+             slice, a.gated, nq, tiisg);
 }
 
 // ViT (Qwen3-VL vision tower) kernels. Each mirrors the CPU ViT
@@ -2387,6 +2615,34 @@ The helper returns shmem[0] rather than the register it just computed
 because only lane 0 of simdgroup 0 holds that value; every other thread has
 to read it from memory, which is what the second barrier makes safe.
 
+### [vision-block]  why a bidirectional block needs no mask term
+
+A gemma-4 checkpoint with `use_bidirectional_attention: vision` lets the
+tokens of ONE image attend to each other in both directions, on EVERY layer.
+HF builds the sliding one as `AND(sliding_window, OR(causal, blockwise))`.
+
+Do not trust `create_masks_for_vision_model`'s docstring here, which says the
+global layers stay causal: that function is not the one the forward runs. The
+forward puts `block_sequence_ids` into mask_kwargs and lets
+`create_masks_for_generate` build BOTH masks from it. Measured against the
+reference, sliding-only leaves layer 5 at 0.95 where both reach six nines.
+
+Written literally that is a per-key predicate. It does not have to be. The
+block always CONTAINS the query, so `[lo, T)` and `[blockLo, blockHi)` always
+overlap, and their union is the single contiguous range
+`[lo, max(T, blockHi))`. The window still bounds it from below, so an image
+longer than the window is cut by `lo` exactly as HF's AND cuts it.
+
+That is why `attn_end` returns a bound rather than a mask, and why
+`attn_batch` needed one changed argument instead of a third kernel. Only
+`fa_mask` tests it per row, because a matrix-unit tile carries eight queries
+whose ends differ.
+
+THE CONSTRAINT this puts on the host: the block's forward keys must already
+be in the pool when the query runs, so a whole vision block must ride ONE
+chunk. A per-token prefill cannot express this mask at all -- at query q only
+0..q have been appended.
+
 ### [rope-pairing]  why `rope_pair` takes indices and not a pairing rule
 
 Seven kernels rotate a pair, and they do NOT agree on which two elements
@@ -2483,6 +2739,68 @@ rather than dropping pages, so a shared layer windows its SOURCE's full
 history exactly as HF does and the pool stays append-only -- which is what
 makes index-based rollback possible. In the batched kernel every query row
 computes its own lo, since each sits at its own absolute position.
+
+### [flash-attn-mm]  the same attention on the matrix units, and why
+
+WHY A SECOND BODY AT ALL, when [flash-attn] exists to stop exactly that. The
+two are not variants of one algorithm: the scalar body is lane-per-key with a
+per-lane online softmax, the matrix body is tile-per-block with the softmax in
+threadgroup memory between two products. Merging them would mean a kernel
+carrying both decompositions behind a flag, which is worse than two honest
+bodies. What IS shared is everything that is not the product itself -- the
+paged row addressing (`kv_row`), the KV table, `AttnBatchArgs`, the causal and
+window masks, and the same per-row algebra in the same order. And the scalar
+body is not vestigial: it is the ONLY path on a GPU without matrix units.
+
+WHY IT IS FASTER, in one number. Per 32-key tile the scalar kernel issues 256
+float4 FMAs per lane and performs exactly the useful MACs -- it is already at
+~100% ALU efficiency, so there is no waste to reclaim. A
+`simdgroup_multiply_accumulate` does 8x8x8 = 512 MACs per issue against a
+float4 FMA's 32x4 = 128. Four times the MACs per instruction is the entire
+available win, and it lands on the term that grows with context.
+
+MEASURED, M3, gemma-4-12B, ctx 4096, one binary with LLM_ATTN_MM as the knob,
+ABBA with a cooldown before every run, scoring the warm-up prefill pass's GPU
+milliseconds:
+
+    rep   scalar            matrix            speedup
+      1   67830 ms  60.4    45155 ms  90.7    1.502
+      2   76666 ms  53.4    45577 ms  89.9    1.682
+      3   95725 ms  42.8    42861 ms  95.6    2.233
+
+Take 1.5x, not 2.2x: the scalar arm DEGRADES across the run (67830 -> 95725, a
+41% thermal loss over ~15 minutes) while the matrix arm is flat (45155 /
+45577 / 42861). The rising ratio is the baseline collapsing. Rep 1 is the
+coldest machine AND puts the matrix arm in the warmer slot, so 1.5x is a lower
+bound. That the matrix arm barely moves under sustained load is its own
+finding -- long sessions are where this model actually lives.
+
+Per chunk at pos 3968: 2028 -> 1518 ms. Against the measured attention-free
+base (~1040 ms, flat in context) that is attention 988 -> 478 ms, and the
+growth slope above the window 0.24 -> 0.106 ms/position.
+
+THE SHAPE. FA_Q=8 query rows and FA_K=32 keys per iteration; the four
+simdgroups split the KEY range for the scores and the HEAD DIM for the
+context, so neither product is computed twice. The correction rides a DIAGONAL
+matrix because a simdgroup matrix has no scalar multiply -- one extra product
+per dim tile against the sixteen the context costs.
+
+THREE THINGS THAT WOULD SHIP BROKEN. Every simdgroup storing to one scratch
+window in the final normalize (they need their own; FA_Q*FA_K is exactly
+NSG*64). The correction matrix's off-diagonal left uninitialized on the first
+tile. And the PAGE ALIGNMENT: an 8-key block is read as ONE strided
+`simdgroup_load`, which is contiguous only inside a single page, so the host
+gates on `P % 8 == 0`. The self-test's P=4 pool scored 0/12 before that term
+existed -- shipping pools are 512, and depending on that silently is how a
+kernel acquires an assumption nobody wrote down.
+
+PARITY. The ternary self-test passes whole, including `batched prefill 8/8`
+and `long-context 6/6` on exact token ids through this kernel; gemma is 15/15
+against the SIMD oracle. Both `attn_head` byte-goldens are UNCHANGED, so
+decode is untouched. The four `attn_batch` goldens move by 1.4e-4, which is
+the fp16-operand magnitude (Q is staged half, P is stored half) and sits
+inside fp16's own 4.9e-4 epsilon, as [gemm-tiles] already records for the
+shipping half-tile GEMM.
 
 WHAT `f16w_gemm_mm` SHARES, and what it does not. It was first judged
 unshareable because its A tile comes from a plain dequantized half array

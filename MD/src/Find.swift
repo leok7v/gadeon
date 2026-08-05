@@ -160,6 +160,17 @@ protocol FindableTextView: AnyObject {
     func findAll(_ query: String, caseSensitive: Bool) -> Int
     func setActive(_ localIndex: Int?)
     func clearFind()
+    // The sentence being READ ALOUD right now, tinted so a listener can see
+    // where the voice has got to in an answer that finished streaming long
+    // before the sound did. Matched literally, so a segment the speech layer
+    // reshaped (a numeral spoken as words) simply does not tint -- it never
+    // tints the wrong sentence. nil clears it.
+    //
+    // It goes through the SAME tint machinery as find on each platform, never
+    // a second independent writer: on iOS those tints are real background
+    // attributes with a saved-base stash, and a rival writer would both lose
+    // the stash and break applyIncremental's O(delta) diff.
+    func setSpoken(_ text: String?)
     // Current match count without recomputing, so the controller can re-total
     // after a view's matches change under streaming (reapplyFind).
     var liveFindCount: Int { get }

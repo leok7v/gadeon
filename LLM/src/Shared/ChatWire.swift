@@ -90,9 +90,21 @@ struct ChatWire: Sendable {
                                 reasoning: sReason)
         let a = render(t, [user, with], think: true)
         let b = render(t, [user, bare], think: true)
-        return span(a, b, sReason).map { pair in
-            (trimWhitespace(pair.open), trimWhitespace(pair.close))
-        }
+        // A marker that trims to NOTHING is a failed derivation wearing a
+        // success: the real Qwen3.5 template wraps reasoning in whitespace
+        // alone, so the subtraction yields "" for both ends -- and an empty
+        // pattern matches at every offset, so the leading-think probe fires on
+        // the first token of every answer and the close is "found" at zero.
+        // Measured: with reasoning OFF the decode loop believed it was inside
+        // the think region for a plain answer. Report it as underived so the
+        // default Qwen wire stands, which for this template is the right wire.
+        return span(a, b, sReason)
+            .map { pair in
+                (trimWhitespace(pair.open), trimWhitespace(pair.close))
+            }
+            .flatMap { pair in
+                pair.open.isEmpty || pair.close.isEmpty ? nil : pair
+            }
     }
 
     // Same subtraction over a tool call. The opener keeps only its tag (up to

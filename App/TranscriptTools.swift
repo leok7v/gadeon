@@ -30,7 +30,10 @@ struct TranscriptActions: View {
     let title: String
     @Binding var renderMarkdown: Bool
     let onFind: () -> Void
-    let onDebug: () -> Void
+    // nil hides the trace button entirely. It rides with the status line:
+    // both are the diagnostic surface, and offering the numbers is the same
+    // decision as offering what produced them.
+    let onDebug: (() -> Void)?
     @State private var pdfURL: URL?
     @State private var htmlURL: URL?
     // The Save panel (macOS): the picked format's bytes + type + suggested
@@ -82,10 +85,12 @@ struct TranscriptActions: View {
             // developer surface, and it belongs with the other things done TO
             // a transcript rather than beside Settings, which is where a user
             // goes to change how the app behaves.
-            Button(action: onDebug) {
-                Image(systemName: "ladybug")
+            if let onDebug {
+                Button(action: onDebug) {
+                    Image(systemName: "ladybug")
+                }
+                .help("For Nerds")
             }
-            .help("For Nerds")
         }
         .task(id: document) { await prepareExports() }
         .fileExporter(isPresented: $showExporter, document: exportFile,

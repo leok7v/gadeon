@@ -14,8 +14,11 @@ final class FindControllerTests: XCTestCase {
         let text: String
         private(set) var matches: [NSRange] = []
         private(set) var setActiveCalls: [Int?] = []
+        private(set) var spoken: String?
 
         init(_ text: String) { self.text = text }
+
+        func setSpoken(_ text: String?) { spoken = text }
 
         func findAll(_ query: String, caseSensitive: Bool) -> Int {
             matches = markdownFindRanges(in: text, query: query,

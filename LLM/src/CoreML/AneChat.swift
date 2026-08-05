@@ -8,6 +8,9 @@ public struct AneChat: Sendable {
     // The set's Jinja chat_template for ChatSession rendering; falls back to a
     // minimal empty-think ChatML when the set ships none.
     public let chatTemplate: String
+    // Measured off the compiled programs on disk and the config.json beside
+    // them, for a status line with no turn behind it yet.
+    public let shape: ModelShape
 
     // Minimal ChatML with the Qwen3.5 empty-think prefix, when a set ships no
     // chat_template.jinja (reasoning-effort none; the model answers directly).
@@ -30,6 +33,7 @@ public struct AneChat: Sendable {
         self.engine = try Engine(modelsDir: modelsDir, cpuOnly: cpuOnly,
                                  onCompiledLoC: onCompiledLoC)
         self.modelName = modelsDir.lastPathComponent
+        self.shape = ModelShape(coremlSet: modelsDir)
         let tmpl = modelsDir.appendingPathComponent("chat_template.jinja")
         self.chatTemplate = (try? String(contentsOf: tmpl, encoding: .utf8))
             ?? AneChat.fallbackChatML

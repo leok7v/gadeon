@@ -1009,6 +1009,24 @@ public actor ChatSession {
                                                 content: step.preamble))
                 }
             }
+            // A turn that committed NOTHING must not leave an EMPTY assistant
+            // message behind. The next delta renders it as a bare
+            // "<turn>model<turn|>", and a model asked to continue from a turn
+            // where it said nothing answers with token salad -- which then
+            // enters history itself, so every later turn inherits it and the
+            // conversation never recovers (only New Chat clears it). MEASURED:
+            // a Stop pressed after the prefill but before the first token, then
+            // 1936 tokens of multilingual noise on the following turn.
+            //
+            // Rolling back is what a turn that produced nothing IS, and it
+            // reuses the path a prefill Stop already takes -- including the
+            // flag the app reads to drop the two transcript bubbles. Decode
+            // Stops that DID produce text are untouched: they keep their
+            // partial answer.
+            let empty = history.last.map { last in
+                last.role == "assistant" && last.content.isEmpty
+            } ?? false
+            if empty { await rollbackTurn(saved) }
         }
     }
 
@@ -1816,7 +1834,7 @@ public actor ChatSession {
             let raw = toolAt.map { at in
                 String(decoding: bytes[..<at], as: UTF8.self)
             } ?? backend.text(ids)
-            var answer = answerText(raw)
+            var answer = answerText(raw, sawThink: inThinkRegion)
             // A released complete-but-unparseable block CAN be the entire
             // answer (EOS right after it, nothing streamed): committing
             // it would teach the model its own malformed wire on the next
@@ -2085,11 +2103,19 @@ public actor ChatSession {
 
     // The answer to keep in history: content AFTER </think>, or EMPTY when
     // Stop interrupted thinking before </think> closed (else the whole chain
-    // of thought would land as the answer and re-prefill huge next turn). With
-    // reasoning off there is no marker, so all of it is the answer.
-    private func answerText(_ decoded: String) -> String {
+    // of thought would land as the answer and re-prefill huge next turn).
+    //
+    // `sawThink` is what the decode loop OBSERVED, not the enableThinking
+    // flag, and the two disagree in both directions. Reasoning on with a model
+    // that answered without ever opening a channel found no close marker and
+    // committed the whole real answer as EMPTY -- which is the empty-assistant
+    // turn that poisons the next delta. Reasoning off with a model that opens
+    // one anyway (gemma-4 always does) took the else branch and committed the
+    // raw block, markup and all, into the next render. The decode loop already
+    // tracks the truth; this asks it rather than the flag.
+    private func answerText(_ decoded: String, sawThink: Bool) -> String {
         var body = ""
-        if enableThinking {
+        if sawThink {
             if let close = decoded.range(of: wire.reasoningClose) {
                 body = String(decoded[close.upperBound...])
             }

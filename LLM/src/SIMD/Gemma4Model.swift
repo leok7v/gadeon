@@ -23,6 +23,13 @@ public struct Gemma4Config {
     public let nLayer: Int           // 35
     let nHead: Int                   // 8
     let nHeadKV: Int                 // 1 (MQA)
+    // A full-attention layer may carry its own kv-head count as well as its
+    // own head width; neither follows from the sliding ones.
+    let nHeadKVFull: Int
+    // The full layers of a unified checkpoint have no value projection at
+    // all: the value is the key projection's output, taken BEFORE k_norm and
+    // rope, through the scale-free v_norm.
+    let kEqV: Bool
     let headDimSliding: Int          // 256
     let headDimFull: Int             // 512  (global_head_dim)
     let eps: Float                   // 1e-6
@@ -43,6 +50,15 @@ public struct Gemma4Config {
     let rotatedPairsSliding: Int     // 128 (all of them)
     // 0 = sliding_attention, 1 = full_attention, per layer.
     let layerFull: [Bool]
+    // The tokens of ONE image see each other in BOTH directions, and only on
+    // the SLIDING layers -- the global ones stay causal, which is where gemma
+    // 4 parts company with gemma 3. Off on the mobile checkpoints, and a
+    // model that wants it reads nothing but nonsense from an image without
+    // it: the receptive field is wrong on 40 of the 12B's 48 layers.
+    let blockwiseVision: Bool
+    // Which placeholders form such a block. Audio is deliberately NOT one:
+    // HF's block ids come from mm_token_type_ids 1 and 2, image and video.
+    let visionTokens: Set<Int32>
     let activation: GemmaActivation
     // Every multimodal position gathers THIS row of the per-layer table,
     // not the modality placeholder's.
@@ -62,12 +78,79 @@ public struct Gemma4Config {
     func headDim(_ il: Int) -> Int {
         isFull(il) ? headDimFull : headDimSliding
     }
+    func headCountKV(_ il: Int) -> Int {
+        isFull(il) ? nHeadKVFull : nHeadKV
+    }
     func isShared(_ il: Int) -> Bool { il >= firstShared }
+    // A checkpoint with no per-layer embeddings records the width as zero,
+    // which is the file saying it has none rather than being too old to say.
+    var hasPerLayerInputs: Bool { perLayerDim > 0 }
 
     // The layer whose K/V a shared layer reads: the LAST non-shared layer of
     // the same type. HF marks it with store_full_length_kv; for E2B that is
     // L13 (sliding) and L14 (full), and L13 must therefore keep an unwindowed
     // history even though it is a sliding layer (F9).
+    // The vision blocks in a turn's ids: each CONTIGUOUS run of image or
+    // video placeholders is one, given as the absolute [start, end) every
+    // position inside it attends across. A position outside every run gets an
+    // empty range, which reduces its attention to the plain causal one.
+    //
+    // Only the QUERY's own block matters, which is what keeps this out of the
+    // KV: a key in another block that is already behind the query is reached
+    // causally, and one ahead of it is not reachable at all.
+
+    func visionBlocks(_ ids: [Int32], from base: Int) -> [(Int, Int)] {
+        var out = [(Int, Int)](repeating: (0, 0), count: ids.count)
+        var i = 0
+        while i < ids.count {
+            var j = i
+            while j < ids.count && visionTokens.contains(ids[j]) { j += 1 }
+            if j > i {
+                for k in i..<j { out[k] = (base + i, base + j) }
+                i = j
+            } else {
+                i += 1
+            }
+        }
+        return out
+    }
+
+    // How many ids the next prefill chunk may take. A vision block reads
+    // FORWARD across itself, and a key in a later chunk has not been appended
+    // yet, so a block must ride ONE chunk: a chunk that starts inside one
+    // runs to its end, and one that would reach only part way into the next
+    // stops short of it. Without blockwise vision every range is empty and
+    // this is `want`. Both engines chunk through here.
+
+    func chunkLength(_ blocks: [(Int, Int)], at i: Int, want: Int) -> Int {
+        var out = want
+        let here = blocks[i]
+        if here.1 > here.0 {
+            // EXACTLY the block, never more. The engines carry the block as
+            // one pair of bounds for the whole chunk, so a chunk holds at
+            // most one -- and never a part of one, since the tokens of a
+            // block read across all of it.
+            out = here.1 - here.0
+        } else {
+            var j = i
+            while j < i + out && blocks[j].1 == blocks[j].0 { j += 1 }
+            if j < i + out { out = j - i }
+        }
+        return max(1, min(out, blocks.count - i))
+    }
+
+    private static func sourceBidirectional(_ g: GGUF) -> String? {
+        var out: String? = nil
+        if let raw = g.string("gemma4.source.config_json"),
+           let data = raw.data(using: .utf8),
+           let root = (try? JSONSerialization.jsonObject(with: data))
+               as? [String: Any],
+           let text = root["text_config"] as? [String: Any] {
+            out = text["use_bidirectional_attention"] as? String
+        }
+        return out
+    }
+
     func sharedSource(_ il: Int) -> Int {
         var src = -1
         var i = 0
@@ -85,6 +168,11 @@ public struct Gemma4Config {
         nLayer = i("block_count")
         nHead = i("attention.head_count")
         nHeadKV = i("attention.head_count_kv")
+        // Both are absent from the mobile checkpoints, where the full layers
+        // share the sliding kv-head count and every layer owns a value.
+        nHeadKVFull = g.int("gemma4.attention.global_head_count_kv")
+            ?? i("attention.head_count_kv")
+        kEqV = g.bool("gemma4.attention.k_eq_v") ?? false
         headDimSliding = i("attention.key_length")
         headDimFull = i("attention.global_key_length")
         eps = f("attention.layer_norm_rms_epsilon")
@@ -101,6 +189,14 @@ public struct Gemma4Config {
         rotatedPairsSliding = headDimSliding / 2
         layerFull = g.ints("gemma4.layer_types")!.map { t in t == 1 }
         activation = try GemmaActivation.read(g, "gemma4.activation")
+        // The dedicated key wins; a file emitted before it existed still
+        // carries its origin config.json verbatim and answers from there.
+        let mode = g.string("gemma4.attention.bidirectional")
+            ?? Gemma4Config.sourceBidirectional(g)
+        blockwiseVision = mode == "vision"
+        visionTokens = Set([g.int("gemma4.image_token_id"),
+                            g.int("gemma4.video_token_id")]
+            .compactMap { id in id.map { v in Int32(v) } })
         padTokenId = try requireInt(
             g, "tokenizer.ggml.padding_token_id",
             "a soft token has no per-layer row to gather without it")
@@ -124,41 +220,50 @@ struct Gemma4Layer {
     let wo: GGUFTensor
     let qNorm: [Float]
     // Absent on the shared layers (15-34): HF builds no k/v there, and the
-    // repack drops the checkpoint's dead copies (F7).
+    // repack drops the checkpoint's dead copies (F7). `wv` is additionally
+    // absent wherever K IS V, which is a property of the layer rather than of
+    // the model -- the same file mixes both.
     let wk: GGUFTensor?
     let wv: GGUFTensor?
     let kNorm: [Float]?
+    // How many kv heads this layer's history holds, off the projection it
+    // actually multiplies rather than off a config scalar.
+    let nHeadKV: Int
 
     let ffnGate: GGUFTensor
     let ffnUp: GGUFTensor
     let ffnDown: GGUFTensor
     let nFF: Int
 
-    let perLayerGate: GGUFTensor  // [nEmbd -> perLayerDim]
-    let perLayerProj: GGUFTensor  // [perLayerDim -> nEmbd]
+    let perLayerGate: GGUFTensor?  // [nEmbd -> perLayerDim]
+    let perLayerProj: GGUFTensor?  // [perLayerDim -> nEmbd]
 
     init(_ g: GGUF, _ il: Int, _ cfg: Gemma4Config) {
         func t(_ s: String) -> GGUFTensor { g.tensor("blk.\(il).\(s)") }
         func v(_ s: String) -> [Float] { Dense.floats(t(s)) }
+        func m(_ s: String) -> GGUFTensor? { g.maybe("blk.\(il).\(s)") }
         attnNorm = v("attn_norm.weight")
         postAttnNorm = v("post_attn_norm.weight")
         ffnNorm = v("ffn_norm.weight")
         postFfnNorm = v("post_ffn_norm.weight")
-        perLayerPostNorm = v("per_layer_post_norm.weight")
+        perLayerPostNorm = m("per_layer_post_norm.weight")
+            .map(Dense.floats) ?? []
         layerScalar = v("layer_scalar").first ?? 1
         wq = t("attn_q.weight")
         wo = t("attn_output.weight")
         qNorm = v("attn_q_norm.weight")
         let shared = cfg.isShared(il)
         wk = shared ? nil : t("attn_k.weight")
-        wv = shared ? nil : t("attn_v.weight")
+        wv = shared ? nil : m("attn_v.weight")
         kNorm = shared ? nil : v("attn_k_norm.weight")
+        nHeadKV = wk.map { w in w.dims[1] / cfg.headDim(il) }
+            ?? cfg.headCountKV(il)
         ffnGate = t("ffn_gate.weight")
         ffnUp = t("ffn_up.weight")
         ffnDown = t("ffn_down.weight")
         nFF = ffnGate.dims[1]
-        perLayerGate = t("per_layer_gate.weight")
-        perLayerProj = t("per_layer_proj.weight")
+        perLayerGate = m("per_layer_gate.weight")
+        perLayerProj = m("per_layer_proj.weight")
     }
 }
 
@@ -167,27 +272,41 @@ public final class Gemma4Model {
     public let cfg: Gemma4Config
     let layers: [Gemma4Layer]
     let tokEmbd: GGUFTensor        // [nEmbd, nVocab]
-    let perLayerEmbd: GGUFTensor   // [nLayer * perLayerDim, nVocab]
+    // The whole per-layer-embedding apparatus, absent on a checkpoint that
+    // has none (Gemma4Config.hasPerLayerInputs).
+    let perLayerEmbd: GGUFTensor?  // [nLayer * perLayerDim, nVocab]
     // The CONTEXT half of the per-layer input: a projection of the token
     // embedding, normalized per layer slice. The gathered table alone is only
     // the token-identity half -- see project_per_layer_inputs and F29.
-    let perLayerModelProj: GGUFTensor   // [nEmbd, nLayer * perLayerDim]
+    let perLayerModelProj: GGUFTensor?  // [nEmbd, nLayer * perLayerDim]
     let perLayerProjNorm: [Float]       // [perLayerDim]
     let outputNorm: [Float]
-    let output: GGUFTensor         // lm_head; untied on this checkpoint
+    // lm_head, which a tied checkpoint spells as the embedding table itself.
+    let output: GGUFTensor
 
     public init(path: String) throws {
         gguf = try GGUF(path: path)
         cfg = try Gemma4Config(gguf)
         tokEmbd = gguf.tensor("token_embd.weight")
-        perLayerEmbd = gguf.tensor("per_layer_token_embd.weight")
-        perLayerModelProj = gguf.tensor("per_layer_model_proj.weight")
-        perLayerProjNorm = Dense.floats(
-            gguf.tensor("per_layer_proj_norm.weight"))
+        perLayerEmbd = gguf.maybe("per_layer_token_embd.weight")
+        perLayerModelProj = gguf.maybe("per_layer_model_proj.weight")
+        perLayerProjNorm = gguf.maybe("per_layer_proj_norm.weight")
+            .map(Dense.floats) ?? []
         outputNorm = Dense.floats(gguf.tensor("output_norm.weight"))
         output = gguf.maybe("output.weight") ?? tokEmbd
         let g = gguf, c = cfg
         layers = (0..<c.nLayer).map { il in Gemma4Layer(g, il, c) }
+    }
+
+    // Whether this file carries a tower for a modality, by the block count it
+    // records for it. A UNIFIED checkpoint records zero and means it: its
+    // images and audio go through a projection with no encoder behind it, so
+    // "absent" here is the architecture rather than a truncated emit.
+    public var hasVisionTower: Bool {
+        (gguf.int("gemma4.vision.block_count") ?? 0) > 0
+    }
+    public var hasAudioTower: Bool {
+        (gguf.int("gemma4.audio.block_count") ?? 0) > 0
     }
 
     // Whether a GGUF at `path` is a gemma4 file, by its own architecture key
@@ -239,6 +358,9 @@ public struct GemmaChat {
     }
     public var eosIds: Set<Int32> { tokenizer.eosIds }
     public var vocabCount: Int { tokenizer.vocabCount }
+    // Both towers and both scalars live in the one file, so the shape is a
+    // read of what is already mapped.
+    public var shape: ModelShape { ModelShape(gguf: model.gguf) }
     // The template opens every conversation with `{{- bos_token -}}` and
     // renders nothing there unless the spelling is supplied.
     public var bosToken: String { tokenizer.bosToken }

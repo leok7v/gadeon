@@ -188,6 +188,45 @@ import UniformTypeIdentifiers
 
     private(set) var lastTurnSpoken = false
     var statsLabel = ""             // the status line's one line of numbers
+
+    // The loaded model's own shape, read from its files at build; nil until
+    // one is loaded.
+    private(set) var modelShape: ModelShape?
+
+    // What the status line says before a turn has run, where every number
+    // would read zero. The model's own shape is the interesting thing at that
+    // moment, and it is all fact rather than flavour.
+    var modelSummary: String {
+        var parts: [String] = []
+        if let shape = modelShape {
+            let towers = shape.towers
+            // One tower needs no label: "text 426 MB" only says "text" is
+            // the only thing there is.
+            parts.append("🐏 " + (towers.count == 1
+                ? ChatModel.weight(towers[0].bytes)
+                : towers.map { t in
+                    "\(t.name) \(ChatModel.weight(t.bytes))"
+                  }.joined(separator: " + ")))
+            if shape.trainedContext > 0 {
+                parts.append("⇄ \(shape.trainedContext.formatted(.number)) max")
+            }
+            if shape.embedding > 0 {
+                parts.append("embeddings: "
+                    + shape.embedding.formatted(.number))
+            }
+        }
+        return parts.joined(separator: "   ")
+    }
+
+    // Weights in the unit that carries the information. A tenth of a gigabyte
+    // is 100 MB of detail, and the projections a unified checkpoint uses
+    // INSTEAD of towers weigh single-digit megabytes -- both round to "0.0 GB".
+    private static func weight(_ bytes: Int) -> String {
+        let gb = Double(bytes) / 1_073_741_824
+        return gb >= 1 ? String(format: "%.1f GB", gb)
+                       : String(format: "%.0f MB",
+                                Double(bytes) / 1_048_576)
+    }
     // The speaking half of a voice conversation. Owns its own persisted
     // settings and its playback; the chat only tells it what arrived.
     let speech = VoiceSession()
@@ -212,13 +251,11 @@ import UniformTypeIdentifiers
     // "consulting" stage (library whimsy). Set by the session's onTool, cleared
     // when the answer begins to stream.
     var consulting = false
-    // Three distinct phrases, refreshed together while a reply runs, one per
+    // Two distinct phrases, refreshed together while a reply runs, one per
     // surface that can show a phrase at once: thinkStatus is the transcript's
-    // working line, thinkLabel the reasoning disclosure header, barStatus the
-    // status bar's prefill line.
+    // working line and thinkLabel the reasoning disclosure header.
     var thinkStatus = "Thinking"
     var thinkLabel = "Thinking"
-    var barStatus = "Thinking"
     // First-run onboarding, two persisted gates around an explicit
     // download-consent panel: the legal EULA, then -- once Download is tapped
     // on the consent panel -- the AI-mistakes disclaimer, which the download
@@ -732,7 +769,8 @@ import UniformTypeIdentifiers
         ggufBackend = nil
         Task.detached { [weak self] in
             var built: (backend: any AgentBackend, template: String,
-                        vocab: Int, presets: SamplingPresets)?
+                        vocab: Int, presets: SamplingPresets,
+                        shape: ModelShape)?
             var media: Gemma4Media? = nil
             // Bracket the load: the DELTA is what says whether a set fits a
             // device, and for an mmap'd GGUF most of it lands in file-backed
@@ -748,7 +786,7 @@ import UniformTypeIdentifiers
                     let c = try GemmaChat(ggufPath: path)
                     let gpu = try c.metalBackend()
                     built = (gpu, c.chatTemplate,
-                             c.vocabCount, c.samplingPresets)
+                             c.vocabCount, c.samplingPresets, c.shape)
                     // Held for the session so the vision and audio towers are
                     // built once rather than per attachment, and over the text
                     // engine's own mapping rather than a second one.
@@ -756,7 +794,8 @@ import UniformTypeIdentifiers
                 } else {
                     let c = try MetalChat(ggufPath: path)
                     built = (c.backend(), c.chatTemplate,
-                             c.tokenizer.vocabCount, c.samplingPresets)
+                             c.tokenizer.vocabCount, c.samplingPresets,
+                             c.shape)
                 }
             } catch {
                 // Say WHY. A swallowed reason here is the difference between
@@ -779,6 +818,7 @@ import UniformTypeIdentifiers
                     self?.activePresets = b.presets
                     self?.modelSupportsVision = vision
                     self?.modelSupportsSoftTokens = soft
+                    self?.modelShape = b.shape
                     self?.media = media
                     // A ~479 ms main-thread stall has been logged starting
                     // exactly here, right after "loaded <model>", and never
@@ -923,9 +963,10 @@ import UniformTypeIdentifiers
             let vision = await built?.engine.supportsVision() ?? false
             await MainActor.run {
                 self?.chat = built
-                if built != nil {
+                if let built {
                     self?.modelSupportsVision = vision
                     self?.modelSupportsSoftTokens = false
+                    self?.modelShape = built.shape
                     self?.media = nil
                     self?.makeSession()
                 } else {
@@ -1076,6 +1117,7 @@ import UniformTypeIdentifiers
         // may not have eyes at all. The capability re-probes after build.
         modelSupportsVision = false
         modelSupportsSoftTokens = false
+        modelShape = nil
         media = nil
         for img in attachedImages {
             input = AttachmentRefs.scrub(img.name, from: input)
@@ -1392,12 +1434,25 @@ import UniformTypeIdentifiers
         // above; the graph and debug view now belong to the fresh chat.
         traceEvents = []
         statsLabel = ""
-        // The outgoing session may still be cooking its prefix, and the fresh
-        // one resets the engine they SHARE -- so it has to be off the engine
-        // first. Held in genTask so `busy` covers the swap: Send stays
-        // disabled until the new session is the live one.
+        // The outgoing session may still be COOKING its prefix or running a
+        // TURN, and the fresh one resets the engine they SHARE -- so both have
+        // to be off it first. Held in genTask so `busy` covers the swap: Send
+        // stays disabled until the new session is the live one.
+        //
+        // A turn is not covered by endPriming, and assigning genTask does not
+        // end the one it replaces -- it abandons it, still running, on the
+        // engine the successor is about to reset. Cancelling alone does not
+        // land either: a Metal forward is synchronous and passes no
+        // cancellation point, so the stop FLAG is what reaches it and the
+        // await is what makes "off the engine" true rather than requested.
         let outgoing = session
+        let running = genTask
         genTask = Task { @MainActor in
+            if running != nil {
+                outgoing?.requestStop()
+                running?.cancel()
+                _ = await running?.value
+            }
             await outgoing?.endPriming()
             makeSession()
             primeSession(resetFirst: true)
@@ -2013,7 +2068,16 @@ import UniformTypeIdentifiers
             attachedDocs = []
             spokenTurn = false
             lastTurnSpoken = false
-            softTurn(display: display, typed: typed, previews: previews) {
+            let cue: SpokenCue.Kind
+            if clips.contains(where: { clip in clip.isVideo }) {
+                cue = .watching
+            } else if !images.isEmpty {
+                cue = .looking
+            } else {
+                cue = .reading
+            }
+            softTurn(display: display, typed: typed, previews: previews,
+                     cue: cue) {
                 try await ChatModel.encode(media, images: images,
                                            clips: clips)
             }
@@ -2050,7 +2114,7 @@ import UniformTypeIdentifiers
     // the bubbles to the rollback is the same afterwards.
     private func softTurn(
         display: String, typed: String, previews: [CGImage],
-        labelled: Bool = true,
+        labelled: Bool = true, cue: SpokenCue.Kind = .thinking,
         _ encode: @escaping @Sendable () async throws
             -> (parts: [ContentPart], spans: [SoftSpan], perImage: Int)
     ) {
@@ -2078,7 +2142,7 @@ import UniformTypeIdentifiers
             let onToolRound: @Sendable (ToolRoundEvent) -> Void = { event in
                 Task { @MainActor in self.applyToolRound(event, at: idx) }
             }
-            speech.beginTurn()
+            speech.beginTurn(cue: cue)
             genTask = Task {
                 let phrases = phraseCycler()
                 let ticker = statsTicker(session)
@@ -2464,7 +2528,7 @@ import UniformTypeIdentifiers
             let onToolRound: @Sendable (ToolRoundEvent) -> Void = { event in
                 Task { @MainActor in self.applyToolRound(event, at: idx) }
             }
-            speech.beginTurn()
+            speech.beginTurn(cue: .looking)
             genTask = Task {
                 let phrases = phraseCycler()
                 let ticker = statsTicker(session)
@@ -2664,7 +2728,7 @@ import UniformTypeIdentifiers
             let tokens = thinkingActive
                 ? "🤔 \(t.thinkTokens) 💬 \(t.contentTokens)"
                 : "💬 \(t.thinkTokens + t.contentTokens)"
-            statsLabel = "\(t.ctx): \(tokens) "
+            statsLabel = "⇄ \(t.ctx.formatted(.number))  \(tokens) "
                 + String(format: "🐏 %.1fGB t/s: %.1f/%.1f",
                          Self.footprintGiB(), t.pp, t.tg)
         }
@@ -2768,16 +2832,15 @@ import UniformTypeIdentifiers
         return out
     }
 
-    // Cycle the three playful phrases every ~5s while a reply runs (prefill
-    // and decode), each a different word, so the transcript quip, the
-    // reasoning label, and the status bar never show the same one.
+    // Cycle the two playful phrases every ~5s while a reply runs (prefill and
+    // decode), each a different word, so the transcript quip and the
+    // reasoning label never show the same one.
     private func phraseCycler() -> Task<Void, Never> {
         Task { @MainActor in
             while (busy || listening) && !Task.isCancelled {
-                let p = Whimsical.trio(whimsicalStage)
+                let p = Whimsical.pair(whimsicalStage)
                 thinkStatus = p.first
                 thinkLabel = p.second
-                barStatus = p.third
                 // Faster while listening: the phrase IS the feedback there,
                 // and a line that has not moved in five seconds reads as a
                 // frozen app rather than an attentive one.

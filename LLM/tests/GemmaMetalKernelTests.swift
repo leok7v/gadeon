@@ -123,10 +123,13 @@ struct GemmaMetalKernelTests {
         let path = try #require(gemmaGgufPath)
         let h = try MetalHarness(path)
         let c = h.model.cfg
+        // Only a checkpoint that HAS a per-layer table can be asked about its
+        // split, so the fixture's own is required rather than assumed.
+        let ple = try #require(h.model.perLayerEmbd)
         #expect(h.model.tokEmbd.type == .q2_0)
-        #expect(h.model.perLayerEmbd.type == .q4_0)
+        #expect(ple.type == .q4_0)
         let cases = [(h.model.tokEmbd, c.nEmbd, "token_embd"),
-                     (h.model.perLayerEmbd, c.nLayer * c.perLayerDim,
+                     (ple, c.nLayer * c.perLayerDim,
                       "per_layer_token_embd")]
         for (t, n, label) in cases {
             let row = 1234

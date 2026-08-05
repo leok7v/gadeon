@@ -57,6 +57,7 @@ extension NativeText: UIViewRepresentable {
         MarkdownDiag.timed("setText len=\(next.length)") {
             v.applyResolved(next)
         }
+        v.setSpoken(speaking)
     }
 
     // Height computed for the PROPOSED width, not left to the intrinsic-
@@ -92,6 +93,8 @@ extension NativeText: UIViewRepresentable {
         private var activeIndex: Int? = nil
         private var findQuery = ""
         private var findCaseSensitive = false
+        private var spokenText: String?
+        private var spokenRange: NSRange?
 
         var liveFindCount: Int { findMatches.count }
 
@@ -121,8 +124,11 @@ extension NativeText: UIViewRepresentable {
         // at ranges the splice has since shifted (smearing code/table tints).
         // Strip at valid pre-edit ranges, splice clean, then recompute and
         // re-tint from the new text.
+        // The spoken tint is a real background too, so it counts as "active"
+        // here for exactly the same reason a find tint does: left in place it
+        // would be read as a changed attribute and re-splice the whole tail.
         func applyResolved(_ next: NSAttributedString) {
-            let active = !findQuery.isEmpty
+            let active = !findQuery.isEmpty || spokenRange != nil
             if active { clearHighlights() }
             if !textStorage.isEqual(to: next) {
                 textStorage.beginEditing()
@@ -140,6 +146,11 @@ extension NativeText: UIViewRepresentable {
         }
         private var activeTint: UIColor {
             UIColor(red: 1.0, green: 0.6, blue: 0.0, alpha: 0.6)
+        }
+        // Cool against find's warm pair, so the two never read as the same
+        // thing when a search happens to be open while a reply is spoken.
+        private var spokenTint: UIColor {
+            UIColor(red: 0.25, green: 0.55, blue: 1.0, alpha: 0.28)
         }
 
         // Highlight EVERY match; the controller activates one later. No
@@ -170,7 +181,7 @@ extension NativeText: UIViewRepresentable {
             findQuery = ""
             findMatches = []
             activeIndex = nil
-            clearHighlights()
+            highlightAll()
         }
 
         func reapplyFind() {
@@ -181,8 +192,29 @@ extension NativeText: UIViewRepresentable {
                 if let a = activeIndex, a >= findMatches.count {
                     activeIndex = nil
                 }
+            }
+            locateSpoken()
+            highlightAll()
+        }
+
+        func setSpoken(_ text: String?) {
+            if text != spokenText {
+                spokenText = text
+                locateSpoken()
                 highlightAll()
             }
+        }
+
+        // A literal search, so a sentence the speech layer reshaped simply
+        // does not tint rather than tinting the wrong one.
+        private func locateSpoken() {
+            let ns = text as NSString
+            var found: NSRange? = nil
+            if let want = spokenText, !want.isEmpty {
+                let r = ns.range(of: want)
+                if r.location != NSNotFound { found = r }
+            }
+            spokenRange = found
         }
 
         // UIKit's NSLayoutManager has no temporary attributes, so find tints are
@@ -212,22 +244,35 @@ extension NativeText: UIViewRepresentable {
             }
         }
 
+        // The ONE writer of tinted backgrounds. The spoken sentence is painted
+        // first and find over it, so a search stays visible through a reply
+        // being read aloud; both go through the same base-colour stash, which
+        // is what lets clearHighlights put the code / table tints back.
         private func highlightAll() {
             clearHighlights()
             let len = textStorage.length
+            var tinted: [(range: NSRange, tint: UIColor)] = []
+            if let r = spokenRange, NSMaxRange(r) <= len {
+                tinted.append((r, spokenTint))
+            }
             for (i, r) in findMatches.enumerated() where NSMaxRange(r) <= len {
-                let tint = i == activeIndex ? activeTint : findTint
+                tinted.append((r, i == activeIndex ? activeTint : findTint))
+            }
+            for entry in tinted {
                 var bases: [(range: NSRange, base: Any)] = []
-                textStorage.enumerateAttribute(.backgroundColor, in: r,
+                textStorage.enumerateAttribute(.backgroundColor,
+                                               in: entry.range,
                                                options: []) { val, sub, _ in
                     bases.append((sub, val ?? NSNull()))
                 }
-                for b in bases {
+                for b in bases where
+                    textStorage.attribute(findBaseBgKey, at: b.range.location,
+                                          effectiveRange: nil) == nil {
                     textStorage.addAttribute(findBaseBgKey, value: b.base,
                                              range: b.range)
                 }
-                textStorage.addAttribute(.backgroundColor, value: tint,
-                                         range: r)
+                textStorage.addAttribute(.backgroundColor, value: entry.tint,
+                                         range: entry.range)
             }
         }
 

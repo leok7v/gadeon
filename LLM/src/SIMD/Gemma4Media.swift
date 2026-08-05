@@ -38,6 +38,22 @@ public final class Gemma4Media: @unchecked Sendable {
     private var vision: VisionTower?
     private var audio: AudioTower?
 
+    // Where each modality sits relative to the question. Gemma's own guidance
+    // is that image and video content comes BEFORE the text and audio AFTER
+    // it, and it is not cosmetic: audio placed first answers a different
+    // question than the one asked.
+    public static func ordered(_ parts: [ContentPart],
+                               around text: ContentPart) -> [ContentPart] {
+        var lead: [ContentPart] = []
+        var trail: [ContentPart] = []
+        for part in parts {
+            if case .audio = part { trail.append(part) } else {
+                lead.append(part)
+            }
+        }
+        return lead + [text] + trail
+    }
+
     public init(_ chat: GemmaChat, ctx: MetalContext? = nil) {
         model = chat.model
         tokenizer = chat.tokenizer
@@ -58,8 +74,21 @@ public final class Gemma4Media: @unchecked Sendable {
         var out: SoftSpan? = nil
         let budget = softTokens.map { n in patch.patchBudget(n) }
             ?? patch.maxPatches
-        if let img = VisionPreprocess.decodeCapped(data),
-           let cut = patch.patches(img, budget: budget) {
+        if !model.hasVisionTower {
+            // Encoder-free: the 48-pixel block IS the token, so there is no
+            // tower to run and no pooling to recover a count from -- the grid
+            // the image resized to decides it.
+            let media = try Gemma4UnifiedMedia(model)
+            let want = softTokens ?? patch.maxSoftTokens
+            if let img = VisionPreprocess.decodeCapped(data),
+               let cut = patch.merged(img, softTokens: want) {
+                let rows = media.image(pixels: cut.pixels, pos: cut.pos)
+                out = SoftSpan.bracketed(
+                    begin: wire.boi, placeholder: wire.token, end: wire.eoi,
+                    count: rows.count, features: rows.flatMap { r in r })
+            }
+        } else if let img = VisionPreprocess.decodeCapped(data),
+                  let cut = patch.patches(img, budget: budget) {
             let got = try tower(cut.pixels, cut.pos)
             out = SoftSpan.bracketed(begin: wire.boi, placeholder: wire.token,
                                      end: wire.eoi, count: got.count,
@@ -86,6 +115,22 @@ public final class Gemma4Media: @unchecked Sendable {
     // across the seam, and matches what the two pieces transcribe separately.
     public func audio(_ pcm: [Float]) throws -> [SoftSpan] {
         let wire = try Gemma4AudioWire(model.gguf)
+        if !model.hasAudioTower {
+            // Encoder-free: no mel, no conformer. A token is the next frame
+            // of raw samples, so the only frontend is the framing itself.
+            let media = try Gemma4UnifiedMedia(model)
+            let rate = Double(model.gguf.int("gemma4.audio.sample_rate")
+                              ?? 16000)
+            return AudioChunks.split(pcm, rate: rate,
+                                     maxSeconds: wire.maxSeconds)
+                .map { chunk in
+                    let rows = media.audio(Array(pcm[chunk.range]))
+                    return SoftSpan.bracketed(
+                        begin: wire.boa, placeholder: wire.token,
+                        end: wire.eoa, count: rows.count,
+                        features: rows.flatMap { r in r })
+                }
+        }
         let mel = Gemma4Mel(Gemma4MelConfig(model.gguf) ?? .processorDefault)
         let tower = try audioTower()
         return AudioChunks.split(pcm, rate: Double(mel.cfg.sampleRate),
@@ -109,15 +154,34 @@ public final class Gemma4Media: @unchecked Sendable {
         let film = try Gemma4VideoWire(model.gguf)
         let patch = try Gemma4Patchify(model)
         let budget = patch.patchBudget(film.softTokensPerFrame)
-        // Built ONCE: each tower construction prewarms a Metal context and a
-        // CPU twin, which per frame would dominate the encode.
-        let vit = try visionTower()
+        // Built ONCE, whichever arm: a tower construction prewarms a Metal
+        // context and a CPU twin, which per frame would dominate the encode.
+        // An encoder-free checkpoint embeds the merged 48-pixel block itself,
+        // so it has no tower to build and cuts at the frame's own budget.
+        let encode: (CGImage) -> (proj: [Float], count: Int)?
+        if model.hasVisionTower {
+            let vit = try visionTower()
+            encode = { frame in
+                patch.patches(frame, budget: budget).map { cut in
+                    let got = vit.run(cut.pixels, cut.pos)
+                    return (got.proj, got.count)
+                }
+            }
+        } else {
+            let media = try Gemma4UnifiedMedia(model)
+            encode = { frame in
+                patch.merged(frame, softTokens: film.softTokensPerFrame)
+                    .map { cut in
+                        let rows = media.image(pixels: cut.pixels,
+                                               pos: cut.pos)
+                        return (rows.flatMap { r in r }, rows.count)
+                    }
+            }
+        }
         var ids: [Int32] = []
         var feats: [Float] = []
         var i = 0
-        while i < frames.count,
-              let cut = patch.patches(frames[i], budget: budget) {
-            let got = vit.run(cut.pixels, cut.pos)
+        while i < frames.count, let got = encode(frames[i]) {
             feats.append(contentsOf: got.proj)
             ids.append(contentsOf: tokenizer.encode(
                 VideoFrames.stamp(seconds[i]) + " ", addSpecial: false))

@@ -136,6 +136,12 @@ struct MetalEnc {
     static let f16Tiles =
         ProcessInfo.processInfo.environment["LLM_F16_TILES"] != "0"
 
+    // LLM_ATTN_MM=0 takes the batched attention back to the scalar body, which
+    // is the A/B instrument: the two compute the same thing by different
+    // means, and only a measurement says which is faster on a given part.
+    static let attnMatrix =
+        ProcessInfo.processInfo.environment["LLM_ATTN_MM"] != "0"
+
     func gemm(_ w: GGUFTensor, X: MTLBuffer, out: MTLBuffer, off: WeightRef,
               N: Int) {
         let k = w.dims[0], m = w.dims[1]
@@ -938,28 +944,58 @@ struct MetalEnc {
                    pages: [MTLResource], gateN: MTLBuffer, outN: MTLBuffer,
                    hd: Int, nH: Int, nKV: Int, kvDim: Int, P: Int,
                    scale: Float,
-                   basePos: Int, N: Int, gated: Int, window: Int = 0) {
+                   basePos: Int, N: Int, gated: Int, window: Int = 0,
+                   block: (Int, Int) = (0, 0)) {
         precondition(hd % 4 == 0 && hd <= 512,
                      "attn_batch: half4 V slices need hd % 4 == 0, and the "
                      + "four-slice accumulator caps head dim at 512")
         var a = AttnBatchArgs(hd: UInt32(hd), nH: UInt32(nH), nKV: UInt32(nKV),
                               kvDim: UInt32(kvDim), P: UInt32(P), scale: scale,
                               basePos: UInt32(basePos), N: UInt32(N),
-                              gated: UInt32(gated), window: UInt32(window))
+                              gated: UInt32(gated), window: UInt32(window),
+                              blockLo: UInt32(block.0),
+                              blockHi: UInt32(block.1))
         e.memoryBarrier(scope: .buffers)
         e.useResources(pages, usage: .read)
-        // Flash attention: threadgroup memory is O(hd) (qs + redM/redL +
-        // redAcc), independent of the causal length -- so a long prefill chunk
-        // no longer risks blowing the threadgroup budget.
-        let tgmem = (5 * hd + 8) * MemoryLayout<Float>.stride
-        groups("attn_batch", N * nH, tpg: 128, tgmem: tgmem) { e in
-            e.setBuffer(qN, offset: 0, index: 0)
-            e.setBuffer(kAddr, offset: 0, index: 1)
-            e.setBuffer(vAddr, offset: 0, index: 2)
-            e.setBuffer(gateN, offset: 0, index: 3)
-            e.setBuffer(outN, offset: 0, index: 4)
-            e.setBytes(&a, length: MemoryLayout<AttnBatchArgs>.stride,
-                       index: 5)
+        // The matrix-unit kernel where the GPU and the geometry allow it: it
+        // needs the 8x8 units (absent below Apple7) and a head dim that splits
+        // into 8-wide tiles four ways, one slice per simdgroup.
+        //
+        // AND a page that holds a whole multiple of 8 positions. The kernel
+        // reads an 8-key block as ONE strided simdgroup_load, which is only
+        // contiguous inside a single page -- the self-test's P=4 pool proves
+        // it, and got 0/12 before this term was added. Every shipping pool is
+        // 512. Everything else takes the scalar body. [flash-attn-mm]
+        let mm = MetalEnc.attnMatrix && ctx.matrixUnits
+            && hd % 8 == 0 && (hd / 4) % 8 == 0 && P % 8 == 0
+        if mm {
+            // qs[8*hd half] | s[8*32 f32] | p[8*32 half] | m[8] | l[8]
+            // | corr[64 half]
+            let tgmem = 8 * hd * 2 + 256 * 4 + 256 * 2 + 8 * 4 + 8 * 4 + 64 * 2
+            let tiles = (N + 7) / 8
+            groups("attn_batch_mm", tiles * nH, tpg: 128, tgmem: tgmem) { e in
+                e.setBuffer(qN, offset: 0, index: 0)
+                e.setBuffer(kAddr, offset: 0, index: 1)
+                e.setBuffer(vAddr, offset: 0, index: 2)
+                e.setBuffer(gateN, offset: 0, index: 3)
+                e.setBuffer(outN, offset: 0, index: 4)
+                e.setBytes(&a, length: MemoryLayout<AttnBatchArgs>.stride,
+                           index: 5)
+            }
+        } else {
+            // Flash attention: threadgroup memory is O(hd) (qs + redM/redL +
+            // redAcc), independent of the causal length -- so a long prefill
+            // chunk no longer risks blowing the threadgroup budget.
+            let tgmem = (5 * hd + 8) * MemoryLayout<Float>.stride
+            groups("attn_batch", N * nH, tpg: 128, tgmem: tgmem) { e in
+                e.setBuffer(qN, offset: 0, index: 0)
+                e.setBuffer(kAddr, offset: 0, index: 1)
+                e.setBuffer(vAddr, offset: 0, index: 2)
+                e.setBuffer(gateN, offset: 0, index: 3)
+                e.setBuffer(outN, offset: 0, index: 4)
+                e.setBytes(&a, length: MemoryLayout<AttnBatchArgs>.stride,
+                           index: 5)
+            }
         }
     }
 }
@@ -1042,6 +1078,7 @@ struct AttnBatchArgs {
     var hd: UInt32; var nH: UInt32; var nKV: UInt32; var kvDim: UInt32
     var P: UInt32; var scale: Float; var basePos: UInt32; var N: UInt32
     var gated: UInt32; var window: UInt32
+    var blockLo: UInt32; var blockHi: UInt32
 }
 struct F16WArgs { var K: UInt32; var M: UInt32 }
 struct LNArgs { var n: UInt32; var eps: Float }

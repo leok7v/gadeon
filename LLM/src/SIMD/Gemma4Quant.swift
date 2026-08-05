@@ -106,6 +106,117 @@ enum GQ {
         }
     }
 
+    // Y[n][m] = sum_k X[n][k] * W[m][k], for N activation rows at once.
+    //
+    // The point is DEQUANT REUSE and not the parallelism, which the mat-vec
+    // already had: unpacking a 32-weight block costs a mask, a shift, an
+    // int-to-float and a subtract per weight, and a mat-vec throws that work
+    // away after ONE dot product. A 294-token prefill therefore unpacked
+    // every weight in the model 294 times. Here a block is unpacked once and
+    // serves all N rows, so the expensive half is divided by N.
+    static func matmul(_ w: GGUFTensor, X: [Float], N: Int,
+                       out: inout [Float]) {
+        let K = w.dims[0]
+        let M = w.dims[1]
+        switch w.type {
+        case .q4_0, .q8_0:
+            blockMatmul(w, X: X, N: N, K: K, M: M, out: &out)
+        case .bf16, .f16, .f32:
+            denseMatmul(w, X: X, N: N, K: K, M: M, out: &out)
+        default:
+            // A type with no batched twin (Q2_0) still answers correctly one
+            // row at a time; only the reuse is lost.
+            var row = [Float](repeating: 0, count: K)
+            var acc = [Float](repeating: 0, count: M)
+            for n in 0..<N {
+                for i in 0..<K { row[i] = X[n * K + i] }
+                matvec(w, x: row, out: &acc)
+                for m in 0..<M { out[n * M + m] = acc[m] }
+            }
+        }
+    }
+
+    private static func blockMatmul(_ w: GGUFTensor, X: [Float], N: Int,
+                                    K: Int, M: Int, out: inout [Float]) {
+        let q4 = w.type == .q4_0
+        let per = q4 ? Q4_0.qk : Q8_0.qk
+        let size = q4 ? Q4_0.blockBytes : Q8_0.blockBytes
+        let nblk = K / per
+        let stride = nblk * size
+        // X transposed to [K][N] so the innermost accumulate walks N
+        // CONTIGUOUSLY against a broadcast weight, which is the shape that
+        // vectorizes. Row-major X strides by K there and does not. The
+        // transpose is N*K work feeding N*K*M.
+        var XT = [Float](repeating: 0, count: N * K)
+        X.withUnsafeBufferPointer { xb in
+            XT.withUnsafeMutableBufferPointer { tb in
+                for n in 0..<N {
+                    for k in 0..<K { tb[k * N + n] = xb[n * K + k] }
+                }
+            }
+        }
+        XT.withUnsafeBufferPointer { xb in
+            out.withUnsafeMutableBufferPointer { ob in
+                nonisolated(unsafe) let base = w.base
+                nonisolated(unsafe) let xt = xb.baseAddress!
+                nonisolated(unsafe) let op = ob.baseAddress!
+                DispatchQueue.concurrentPerform(iterations: M) { m in
+                    // Stack scratch: one unpacked block and this row's N
+                    // accumulators. Allocating per m would cost more than the
+                    // arithmetic it holds.
+                    withUnsafeTemporaryAllocation(of: Float.self,
+                                                  capacity: per + N) { tmp in
+                        let blk = tmp.baseAddress!
+                        let acc = blk + per
+                        for n in 0..<N { acc[n] = 0 }
+                        var p = base + m * stride
+                        var k = 0
+                        for _ in 0..<nblk {
+                            if q4 {
+                                Q4_0.dequant(p, count: per, into: blk)
+                            } else {
+                                Q8_0.dequant(p, count: per, into: blk)
+                            }
+                            for j in 0..<per {
+                                let wj = blk[j]
+                                let col = xt + (k + j) * N
+                                for n in 0..<N { acc[n] += wj * col[n] }
+                            }
+                            p += size
+                            k += per
+                        }
+                        for n in 0..<N { op[n * M + m] = acc[n] }
+                    }
+                }
+            }
+        }
+    }
+
+    private static func denseMatmul(_ w: GGUFTensor, X: [Float], N: Int,
+                                    K: Int, M: Int, out: inout [Float]) {
+        let stride = rowBytes(w)
+        let ty = w.type
+        X.withUnsafeBufferPointer { xb in
+            out.withUnsafeMutableBufferPointer { ob in
+                nonisolated(unsafe) let base = w.base
+                nonisolated(unsafe) let xp = xb.baseAddress!
+                nonisolated(unsafe) let op = ob.baseAddress!
+                DispatchQueue.concurrentPerform(iterations: M) { m in
+                    let p = base + m * stride
+                    withUnsafeTemporaryAllocation(of: Float.self,
+                                                  capacity: N) { acc in
+                        for n in 0..<N { acc[n] = 0 }
+                        for i in 0..<K {
+                            let e = element(p, ty, i)
+                            for n in 0..<N { acc[n] += e * xp[n * K + i] }
+                        }
+                        for n in 0..<N { op[n * M + m] = acc[n] }
+                    }
+                }
+            }
+        }
+    }
+
     // One block-quantized mat-vec, `block` supplying a block's dot product
     // from its base pointer, the activation pointer, and the block's first
     // element index.

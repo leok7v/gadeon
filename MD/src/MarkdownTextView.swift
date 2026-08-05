@@ -17,29 +17,35 @@ public struct MarkdownTextView: View {
     // bubble the transcript scrolls, while keeping the single-surface's
     // cross-paragraph selection (drag snaps around whole tables / code).
     let scrolls: Bool
+    // The sentence being read aloud right now, tinted where it appears.
+    let speaking: String?
     @State private var images: [URL: PlatformImage] = [:]
 
     public init(_ document: Markdown.Document,
                 style: MarkdownStyle = .default,
                 find: MarkdownFindController? = nil,
                 findId: UUID? = nil,
-                scrolls: Bool = true) {
+                scrolls: Bool = true,
+                speaking: String? = nil) {
         self.document = document
         self.style = style
         self.find = find
         self.findId = findId
         self.scrolls = scrolls
+        self.speaking = speaking
     }
 
     public init(_ source: String, style: MarkdownStyle = .default,
                 find: MarkdownFindController? = nil,
                 findId: UUID? = nil,
-                scrolls: Bool = true) {
+                scrolls: Bool = true,
+                speaking: String? = nil) {
         self.document = Markdown.parse(source, math: style.renderMath)
         self.style = style
         self.find = find
         self.findId = findId
         self.scrolls = scrolls
+        self.speaking = speaking
     }
 
     public var body: some View {
@@ -48,7 +54,7 @@ public struct MarkdownTextView: View {
                                         images: images),
             font: FontRole.body(style.bodySize).platformFont,
             selectable: style.selectable, scrolls: scrolls, find: find,
-            findId: findId)
+            findId: findId, speaking: speaking)
             // Key the fetch on the image URLs, not the whole document: a
             // streaming answer changes `document` on every appended token, and
             // keying on it would cancel and restart the fetch each time (never
@@ -75,15 +81,17 @@ public struct PlainTextView: View {
     let find: MarkdownFindController?
     let findId: UUID?
     let scrolls: Bool
+    let speaking: String?
 
     public init(_ text: String, style: MarkdownStyle = .default,
                 find: MarkdownFindController? = nil, findId: UUID? = nil,
-                scrolls: Bool = false) {
+                scrolls: Bool = false, speaking: String? = nil) {
         self.text = text
         self.style = style
         self.find = find
         self.findId = findId
         self.scrolls = scrolls
+        self.speaking = speaking
     }
 
     public var body: some View {
@@ -93,6 +101,7 @@ public struct PlainTextView: View {
                 attributes: [.font: font,
                              .foregroundColor: platformDefaultTextColor]),
             font: font, selectable: style.selectable,
-            scrolls: scrolls, find: find, findId: findId)
+            scrolls: scrolls, find: find, findId: findId,
+            speaking: speaking)
     }
 }

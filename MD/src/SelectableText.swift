@@ -34,12 +34,14 @@ struct SelectableText: View {
     // The message id this surface registers under, so Find spans every bubble
     // of the transcript in order. nil = not a Find target.
     let findId: UUID?
+    // The sentence being read aloud right now, tinted where it appears.
+    let speaking: String?
 
     init(_ attributed: AttributedString, font: PlatformFont,
          nowrap: Bool = false, selectable: Bool = true,
          bold: Bool = false, secondary: Bool = false,
          scrolls: Bool = false, find: MarkdownFindController? = nil,
-         findId: UUID? = nil) {
+         findId: UUID? = nil, speaking: String? = nil) {
         self.attributed = attributed
         self.ns = nil
         self.font = font
@@ -50,13 +52,14 @@ struct SelectableText: View {
         self.scrolls = scrolls
         self.find = find
         self.findId = findId
+        self.speaking = speaking
     }
 
     init(ns: NSAttributedString, font: PlatformFont,
          nowrap: Bool = false, selectable: Bool = true,
          bold: Bool = false, secondary: Bool = false,
          scrolls: Bool = false, find: MarkdownFindController? = nil,
-         findId: UUID? = nil) {
+         findId: UUID? = nil, speaking: String? = nil) {
         self.attributed = nil
         self.ns = ns
         self.font = font
@@ -67,13 +70,15 @@ struct SelectableText: View {
         self.scrolls = scrolls
         self.find = find
         self.findId = findId
+        self.speaking = speaking
     }
 
     var body: some View {
         NativeText(attributed: attributed, ns: ns, font: font,
                    nowrap: nowrap, selectable: selectable,
                    bold: bold, secondary: secondary,
-                   scrolls: scrolls, find: find, findId: findId)
+                   scrolls: scrolls, find: find, findId: findId,
+                   speaking: speaking)
             .fixedSize(horizontal: nowrap, vertical: !scrolls)
     }
 }
@@ -93,6 +98,7 @@ struct NativeText {
     let scrolls: Bool
     let find: MarkdownFindController?
     let findId: UUID?
+    let speaking: String?
 
     func resolved() -> NSAttributedString {
         let m: NSMutableAttributedString

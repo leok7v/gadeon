@@ -195,6 +195,7 @@ public struct MetalChat {
     public let chatTemplate: String
     public let samplingPresets: SamplingPresets
     public let mmprojPath: String?
+    public let shape: ModelShape
 
     public init(ggufPath: String, pageP: Int = 512) throws {
         let m = try BonsaiModel(path: ggufPath)
@@ -203,7 +204,22 @@ public struct MetalChat {
         chatTemplate = m.gguf.string("tokenizer.chat_template")
             ?? BonsaiChat.fallbackTemplate
         samplingPresets = BonsaiChat.presets(ggufPath: ggufPath)
-        mmprojPath = MetalChat.mmprojBeside(ggufPath)
+        let mmproj = MetalChat.mmprojBeside(ggufPath)
+        mmprojPath = mmproj
+        shape = ModelShape(gguf: m.gguf, sidecars: MetalChat.eye(mmproj))
+    }
+
+    // The vision tower ships as its own file here, and everything in an
+    // mmproj serves the eye -- so the file's size IS the tower's weight.
+
+    static func eye(_ mmproj: String?) -> [ModelShape.Tower] {
+        var out: [ModelShape.Tower] = []
+        if let mmproj,
+           let size = (try? FileManager.default
+               .attributesOfItem(atPath: mmproj))?[.size] as? Int {
+            out.append(ModelShape.Tower(name: "vision", bytes: size))
+        }
+        return out
     }
 
     // A sibling "*mmproj*.gguf" in the weight's directory is the model's

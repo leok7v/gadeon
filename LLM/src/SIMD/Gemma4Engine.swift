@@ -65,6 +65,12 @@ public final class Gemma4Engine {
     var kv: [Int: GemmaKV] = [:]
     public private(set) var pos = 0
     var sampler: Sampler?
+    // The same lock-backed stop the GPU engine carries: this forward is
+    // synchronous too, so Task cancellation never reaches it and a Stop during
+    // a long prefill would otherwise be ignored entirely.
+    private let stopSignal = MetalStopSignal()
+    public func requestStop() { stopSignal.raise() }
+    public func shouldStop() -> Bool { stopSignal.raisedNow }
     // Reused scratch for the per-token PLE gather: one row of the
     // [nLayer*perLayerDim, nVocab] table covers every layer's input.
     private var pleRow: [Float]
@@ -100,6 +106,7 @@ public final class Gemma4Engine {
 
     public func reset() {
         pos = 0
+        stopSignal.clear()
         for (_, store) in kv { store.reset() }
     }
 
@@ -107,12 +114,20 @@ public final class Gemma4Engine {
     // id. Token by token: the sliding/full split and the shared histories make
     // a batched form a separate piece of work, and correctness comes first.
     public func extend(_ ids: [Int32]) -> Int32 {
+        stopSignal.clear()
         var hidden = [Float]()
-        for id in ids {
-            hidden = forward(token: Int(id), pos: pos)
+        var i = 0
+        // Stop as the loop predicate, so it lands on a token boundary and
+        // leaves `pos` and the KV consistent.
+        while i < ids.count && !stopSignal.raisedNow {
+            hidden = forward(token: Int(ids[i]), pos: pos)
             pos += 1
+            i += 1
         }
-        return pick(logits(hidden))
+        // A stop before the first token leaves no hidden state, and the
+        // lm_head cannot be run on an empty vector. The caller throws
+        // EngineError.stopped and discards this either way.
+        return hidden.isEmpty ? 0 : pick(logits(hidden))
     }
 
     public func decode(_ token: Int32) -> Int32 {
@@ -128,17 +143,52 @@ public final class Gemma4Engine {
     // engine's to advance.
     public func extend(_ ids: [Int32],
                        softAt: (Int32) -> [Float]?) -> Int32 {
+        stopSignal.clear()
+        let e = cfg.nEmbd
+        let blocks = cfg.blockwiseVision
+            ? cfg.visionBlocks(ids, from: pos)
+            : [(Int, Int)](repeating: (0, 0), count: ids.count)
+        // The per-layer-embedding checkpoints stay on the token path: their
+        // PLE is gathered and averaged per token, which the batched layers do
+        // not carry. They are also the ones the GPU already prefills fast.
+        let width = cfg.hasPerLayerInputs ? 1 : Gemma4Engine.batch
         var hidden = [Float]()
-        for id in ids {
-            if let feature = softAt(id) {
-                hidden = forward(embedding: feature, pos: pos)
+        var i = 0
+        while i < ids.count && !stopSignal.raisedNow {
+            let n = cfg.chunkLength(blocks, at: i,
+                                    want: min(width, ids.count - i))
+            if n == 1 {
+                if let feature = softAt(ids[i]) {
+                    hidden = forward(embedding: feature, pos: pos)
+                } else {
+                    hidden = forward(token: Int(ids[i]), pos: pos)
+                }
             } else {
-                hidden = forward(token: Int(id), pos: pos)
+                var x = [Float](repeating: 0, count: n * e)
+                for j in 0..<n {
+                    let id = ids[i + j]
+                    // A soft row enters UNSCALED; embed_scale is for text.
+                    let row = softAt(id) ?? embed(Int(id))
+                    for c in 0..<e { x[j * e + c] = row[c] }
+                }
+                layersBatch(&x, n: n, basePos: pos,
+                            Array(blocks[i..<(i + n)]))
+                hidden = GK.rmsnorm(
+                    Array(x[((n - 1) * e)..<(n * e)]),
+                    model.outputNorm, cfg.eps)
             }
-            pos += 1
+            pos += n
+            i += n
         }
-        return pick(logits(hidden))
+        return hidden.isEmpty ? 0 : pick(logits(hidden))
     }
+
+    // Tokens per prefill chunk on the CPU. The same lever the GPU engine
+    // reads, so one setting describes a run whichever engine drives it.
+    static let batch: Int = {
+        let raw = ProcessInfo.processInfo.environment["LLM_GEMMA_BATCH"]
+        return max(1, raw.flatMap { v in Int(v) } ?? 128)
+    }()
 
     func pick(_ logits: [Float]) -> Int32 {
         var out: Int32
@@ -210,13 +260,13 @@ public final class Gemma4Engine {
     // averages the two halves by 1/sqrt(2). Using the gather alone is close
     // enough to produce fluent-looking numbers and wrong everywhere (F29).
     private func buildPLE(_ token: Int, _ embed: [Float]) {
-        GQ.dequantSpan(model.perLayerEmbd, row: token, from: 0,
+        GQ.dequantSpan(model.perLayerEmbd!, row: token, from: 0,
                        count: pleRow.count, into: &pleRow)
         let s = cfg.perLayerEmbedScale
         for i in 0..<pleRow.count { pleRow[i] *= s }
 
         var proj = [Float](repeating: 0, count: pleRow.count)
-        GQ.matvec(model.perLayerModelProj, x: embed, out: &proj)
+        GQ.matvec(model.perLayerModelProj!, x: embed, out: &proj)
         let ps = 1 / Float(cfg.nEmbd).squareRoot()
         for i in 0..<proj.count { proj[i] *= ps }
         GK.rmsnormRows(&proj, d: cfg.perLayerDim, rows: cfg.nLayer,
@@ -243,20 +293,127 @@ public final class Gemma4Engine {
                           _ il: Int) -> [Float] {
         let d = cfg.perLayerDim
         var g = [Float](repeating: 0, count: d)
-        linear(L.perLayerGate, x, &g)
+        linear(L.perLayerGate!, x, &g)
         let off = il * d
         let act = cfg.activation
         for i in 0..<d { g[i] = act.apply(g[i]) * pleRow[off + i] }
         var out = [Float](repeating: 0, count: cfg.nEmbd)
-        linear(L.perLayerProj, g, &out)
+        linear(L.perLayerProj!, g, &out)
         return out
     }
 
-    private func attention(_ n: [Float], _ L: Gemma4Layer, _ il: Int,
-                           pos: Int) -> [Float] {
+    // ---- batched prefill ---------------------------------------------------
+    // WHY, and it is not only speed: a vision block's tokens read FORWARD
+    // across the block, so every one of its keys must be in the store before
+    // any of its queries runs. A per-token forward has appended only 0..q, so
+    // it cannot express that mask at all -- batching is what makes the 12B
+    // read an image correctly on the CPU, not just faster.
+    //
+    // The speed is the other half. A mat-VEC unpacks a 32-weight block for one
+    // dot product and discards it, so a 294-token prefill unpacked every
+    // weight in the model 294 times; GQ.matmul unpacks once for all N rows.
+
+    private func layersBatch(_ x: inout [Float], n: Int, basePos: Int,
+                             _ blocks: [(Int, Int)]) {
+        let e = cfg.nEmbd
+        for il in 0..<cfg.nLayer {
+            let L = model.layers[il]
+            var h = x
+            GK.rmsnormRows(&h, d: e, rows: n, w: L.attnNorm, eps: cfg.eps)
+            var attn = attentionBatch(h, L, il, basePos: basePos, n: n, blocks)
+            GK.rmsnormRows(&attn, d: e, rows: n, w: L.postAttnNorm,
+                           eps: cfg.eps)
+            for i in 0..<(n * e) { x[i] += attn[i] }
+
+            h = x
+            GK.rmsnormRows(&h, d: e, rows: n, w: L.ffnNorm, eps: cfg.eps)
+            var ff = mlpBatch(h, L, n)
+            GK.rmsnormRows(&ff, d: e, rows: n, w: L.postFfnNorm, eps: cfg.eps)
+            for i in 0..<(n * e) { x[i] += ff[i] }
+
+            let s = L.layerScalar
+            for i in 0..<(n * e) { x[i] *= s }
+        }
+    }
+
+    // One quantized linear over N rows, with the trained clamp on both sides.
+    // SRQ is elementwise, so a batch clamps exactly as N single rows would.
+    private func linearBatch(_ w: GGUFTensor, _ X: [Float], _ n: Int,
+                             _ outDim: Int) -> [Float] {
+        let s = srq[w.name] ?? SRQ.none
+        var h = X
+        SRQ.apply(&h, s.input)
+        var out = [Float](repeating: 0, count: n * outDim)
+        GQ.matmul(w, X: h, N: n, out: &out)
+        SRQ.apply(&out, s.output)
+        return out
+    }
+
+    private func mlpBatch(_ h: [Float], _ L: Gemma4Layer,
+                          _ n: Int) -> [Float] {
+        var gate = linearBatch(L.ffnGate, h, n, L.nFF)
+        let up = linearBatch(L.ffnUp, h, n, L.nFF)
+        let act = cfg.activation
+        for i in 0..<(n * L.nFF) { gate[i] = act.apply(gate[i]) * up[i] }
+        return linearBatch(L.ffnDown, gate, n, cfg.nEmbd)
+    }
+
+    // Every row's K/V is appended BEFORE any row attends, which is the whole
+    // point: a query inside a vision block reads keys that come after it.
+    private func attentionBatch(_ h: [Float], _ L: Gemma4Layer, _ il: Int,
+                                basePos: Int, n: Int,
+                                _ blocks: [(Int, Int)]) -> [Float] {
         let hd = cfg.headDim(il)
         let nH = cfg.nHead
-        let nKV = cfg.nHeadKV
+        let nKV = L.nHeadKV
+        let full = cfg.isFull(il)
+        let base = full ? cfg.ropeBaseFull : cfg.ropeBaseSliding
+        let rot = full ? cfg.rotatedPairsFull : cfg.rotatedPairsSliding
+        var q = linearBatch(L.wq, h, n, hd * nH)
+        GK.rmsnormRows(&q, d: hd, rows: n * nH, w: L.qNorm, eps: cfg.eps)
+        ropeRows(&q, hd, nH, rot, base, basePos, n)
+        let store = kv[cfg.isShared(il) ? cfg.sharedSource(il) : il]!
+        if !cfg.isShared(il) {
+            var k = linearBatch(L.wk!, h, n, hd * nKV)
+            var v = linearBatch(L.wv ?? L.wk!, h, n, hd * nKV)
+            GK.rmsnormRows(&k, d: hd, rows: n * nKV, w: L.kNorm!, eps: cfg.eps)
+            ropeRows(&k, hd, nKV, rot, base, basePos, n)
+            GK.rmsnormRowsNoWeight(&v, d: hd, rows: n * nKV, eps: cfg.eps)
+            let width = hd * nKV
+            for j in 0..<n {
+                store.append(Array(k[(j * width)..<((j + 1) * width)]),
+                             Array(v[(j * width)..<((j + 1) * width)]))
+            }
+        }
+        var ctx = [Float](repeating: 0, count: n * hd * nH)
+        for j in 0..<n {
+            let row = Array(q[(j * hd * nH)..<((j + 1) * hd * nH)])
+            let out = attend(row, store, il, pos: basePos + j,
+                             block: blocks[j], hd: hd,
+                             nH: nH, nKV: nKV)
+            for i in 0..<(hd * nH) { ctx[j * hd * nH + i] = out[i] }
+        }
+        return linearBatch(L.wo, ctx, n, cfg.nEmbd)
+    }
+
+    // gemma's rope over N rows, each at its own absolute position.
+    private func ropeRows(_ t: inout [Float], _ hd: Int, _ heads: Int,
+                          _ rot: Int, _ base: Float, _ basePos: Int,
+                          _ n: Int) {
+        let width = hd * heads
+        for j in 0..<n {
+            var row = Array(t[(j * width)..<((j + 1) * width)])
+            GK.rope(&row, headDim: hd, nHead: heads, rotated: rot,
+                    base: base, pos: basePos + j)
+            for i in 0..<width { t[j * width + i] = row[i] }
+        }
+    }
+
+    private func attention(_ n: [Float], _ L: Gemma4Layer, _ il: Int,
+                           pos: Int, block: (Int, Int) = (0, 0)) -> [Float] {
+        let hd = cfg.headDim(il)
+        let nH = cfg.nHead
+        let nKV = L.nHeadKV
         let full = cfg.isFull(il)
         let base = full ? cfg.ropeBaseFull : cfg.ropeBaseSliding
         let rot = full ? cfg.rotatedPairsFull : cfg.rotatedPairsSliding
@@ -273,11 +430,15 @@ public final class Gemma4Engine {
         if !cfg.isShared(il) {
             var k = [Float](repeating: 0, count: hd * nKV)
             linear(L.wk!, n, &k)
+            // A layer with no value projection takes the KEY projection as its
+            // value -- projected again from the same input rather than copied
+            // out of `k`, which is what keeps k_norm and rope below from
+            // reaching it.
+            var v = [Float](repeating: 0, count: hd * nKV)
+            linear(L.wv ?? L.wk!, n, &v)
             GK.rmsnormRows(&k, d: hd, rows: nKV, w: L.kNorm!, eps: cfg.eps)
             GK.rope(&k, headDim: hd, nHead: nKV, rotated: rot, base: base,
                     pos: pos)
-            var v = [Float](repeating: 0, count: hd * nKV)
-            linear(L.wv!, n, &v)
             // v_norm is Gemma4RMSNorm(with_scale=False): a real op that
             // leaves no tensor in the checkpoint, so a tensor scan cannot
             // see it (F6).
@@ -285,14 +446,28 @@ public final class Gemma4Engine {
             store.append(k, v)
         }
 
-        // Causal, plus the 512 window on a sliding layer -- applied at READ
-        // time against absolute positions, so a shared layer windows its
-        // source's full history exactly as HF does.
+        let attnOut = attend(q, store, il, pos: pos, block: block,
+                             hd: hd, nH: nH, nKV: nKV)
+        var out = [Float](repeating: 0, count: cfg.nEmbd)
+        linear(L.wo, attnOut, &out)
+        return out
+    }
+
+    // One query against a store. The RANGE is the mask and no per-key test is
+    // needed: a vision block always CONTAINS its query, so [lo, pos] and
+    // [block.0, block.1) overlap and their union is the contiguous
+    // [lo, max(pos + 1, block.1)). The window still bounds it from below, so
+    // an image longer than the window is cut exactly as HF's AND cuts it.
+    // An empty block reduces this to the plain causal range. [[vision-block]]
+    private func attend(_ q: [Float], _ store: GemmaKV, _ il: Int,
+                        pos: Int, block: (Int, Int), hd: Int, nH: Int,
+                        nKV: Int) -> [Float] {
+        let full = cfg.isFull(il)
         let lo = full ? store.first
                       : max(store.first, pos - cfg.slidingWindow + 1)
-        let hi = min(store.end, pos + 1)
+        let hi = min(store.end, max(pos + 1, block.1))
         let group = nH / nKV
-        var attnOut = [Float](repeating: 0, count: hd * nH)
+        var out = [Float](repeating: 0, count: hd * nH)
         var scores = [Float](repeating: 0, count: max(hi - lo, 1))
         for h in 0..<nH {
             let kvh = h / group
@@ -312,12 +487,10 @@ public final class Gemma4Engine {
             while t < hi {
                 let w = scores[t - lo]
                 let row = store.v[t - store.first]
-                for i in 0..<hd { attnOut[qh + i] += w * row[kvh * hd + i] }
+                for i in 0..<hd { out[qh + i] += w * row[kvh * hd + i] }
                 t += 1
             }
         }
-        var out = [Float](repeating: 0, count: cfg.nEmbd)
-        linear(L.wo, attnOut, &out)
         return out
     }
 
@@ -328,7 +501,7 @@ public final class Gemma4Engine {
                         tap: ((String, Int, [Float]) -> Void)? = nil)
         -> [Float] {
         let x = embed(token)
-        buildPLE(token, x)
+        if cfg.hasPerLayerInputs { buildPLE(token, x) }
         return layers(x, pos: pos, tap: tap)
     }
 
@@ -339,9 +512,11 @@ public final class Gemma4Engine {
     // while the CONTEXT half still projects the feature itself. And the
     // feature enters UNSCALED: embed_scale multiplies text embeddings only.
     @discardableResult
-    public func forward(embedding: [Float], pos: Int) -> [Float] {
-        buildPLE(cfg.padTokenId, embedding)
-        return layers(embedding, pos: pos, tap: nil)
+    public func forward(embedding: [Float], pos: Int,
+                        tap: ((String, Int, [Float]) -> Void)? = nil)
+        -> [Float] {
+        if cfg.hasPerLayerInputs { buildPLE(cfg.padTokenId, embedding) }
+        return layers(embedding, pos: pos, tap: tap)
     }
 
     private func layers(_ start: [Float], pos: Int,
@@ -353,24 +528,29 @@ public final class Gemma4Engine {
             var r = x
             var h = GK.rmsnorm(x, L.attnNorm, cfg.eps)
             h = attention(h, L, il, pos: pos)
+            tap?("attn", il, h)
             h = GK.rmsnorm(h, L.postAttnNorm, cfg.eps)
             for i in 0..<cfg.nEmbd { h[i] += r[i] }
 
             r = h
             var f = GK.rmsnorm(h, L.ffnNorm, cfg.eps)
             f = mlp(f, L)
+            tap?("mlp", il, f)
             f = GK.rmsnorm(f, L.postFfnNorm, cfg.eps)
             for i in 0..<cfg.nEmbd { f[i] += r[i] }
 
-            r = f
-            var p = perLayer(f, L, il)
-            p = GK.rmsnorm(p, L.perLayerPostNorm, cfg.eps)
-            for i in 0..<cfg.nEmbd { p[i] += r[i] }
+            if cfg.hasPerLayerInputs {
+                r = f
+                var p = perLayer(f, L, il)
+                p = GK.rmsnorm(p, L.perLayerPostNorm, cfg.eps)
+                for i in 0..<cfg.nEmbd { p[i] += r[i] }
+                f = p
+            }
 
             // The layer scalar multiplies the WHOLE layer output, last.
             let s = L.layerScalar
-            for i in 0..<cfg.nEmbd { p[i] *= s }
-            x = p
+            for i in 0..<cfg.nEmbd { f[i] *= s }
+            x = f
             tap?("l_out", il, x)
         }
         let out = GK.rmsnorm(x, model.outputNorm, cfg.eps)
