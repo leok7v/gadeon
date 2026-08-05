@@ -77,6 +77,10 @@ enum GemmaCLIError: Error, CustomStringConvertible {
         try gemmaAudioGate(chat, dir)
         exit(0)
     }
+    if args.contains("--gemma-park-gate") {
+        try await gemmaParkGate(chat, args.contains("--metal"))
+        exit(0)
+    }
     if let dir = valueAfter(args, "--gemma-image-gate") {
         try gemmaImageGate(chat, dir, args.contains("--ref-embeds"),
                            args.contains("--metal"))
@@ -1484,6 +1488,52 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
         + chat.decode([Int32(refTop)]).debugDescription)
     print(first < 0 ? "GATE PASS" : "GATE FAIL (first divergence at layer "
           + "\(first))")
+}
+
+// Park a conversation to bytes and bring it back. The ONE check that an
+// empty serializeState cannot pass: restore must reproduce the same next
+// token WITHOUT a forward pass, and must do it in disk-read time.
+// [[never-reprefill]]
+
+@MainActor private func gemmaParkGate(_ chat: GemmaChat,
+                                      _ metal: Bool) async throws {
+    let backend: any AgentBackend = metal ? try chat.metalBackend()
+                                          : chat.backend()
+    let ids = chat.encode(String(repeating: "The quarterly logistics review "
+        + "covered warehouse throughput and pallet rotation. ", count: 40))
+    let t0 = Date()
+    let want = try await backend.extend(ids)
+    let cooked = Date().timeIntervalSince(t0)
+    let state = try await backend.saveState()
+    let bytes = await backend.serializeState(state)
+    err(String(format: "[park] %d ids cooked in %.2fs -> %d KiB\n",
+               ids.count, cooked, bytes.count / 1024))
+    if bytes.isEmpty {
+        print("park bytes           EMPTY -- this backend re-prefills")
+        print("GATE FAIL")
+        exit(1)
+    }
+    await backend.reset()
+    let t1 = Date()
+    try await backend.loadState(try await backend.deserializeState(bytes))
+    let restored = Date().timeIntervalSince(t1)
+    // The engine predicts from the state alone, so the SAME token proves the
+    // whole KV came back, not merely the position counter.
+    let got = try await backend.decode(want)
+    let again = try await backend.decode(got)
+    await backend.reset()
+    _ = try await backend.extend(ids)
+    let ref = try await backend.decode(want)
+    let ref2 = try await backend.decode(ref)
+    print(String(format: "cook                 %.2fs", cooked))
+    print(String(format: "restore              %.3fs  (%.0fx faster)",
+                 restored, cooked / max(restored, 1e-6)))
+    print("next token           \(got) vs \(ref) "
+        + (got == ref ? "MATCH" : "DIFFER"))
+    print("and the one after    \(again) vs \(ref2) "
+        + (again == ref2 ? "MATCH" : "DIFFER"))
+    print(got == ref && again == ref2 && restored < cooked / 4
+          ? "GATE PASS" : "GATE FAIL")
 }
 
 // Root mean square, the size a cosine deliberately divides away.

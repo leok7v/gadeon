@@ -1745,13 +1745,16 @@ kernel void kv_append_batch(
 // Causal attention for N query tokens over the paged KV: token n (absolute
 // position basePos+n) attends to keys 0..basePos+n, one threadgroup per
 // (token, head). [flash-attn]
-// blockLo/blockHi are the one vision block this chunk carries, as absolute
-// positions, or 0/0 for none. A query inside it reads the WHOLE block, which
-// is the only place attention passes its own position. [vision-block]
+//
+// The `blk` buffer carries the vision block each chunk ROW belongs to, two
+// absolute uints (lo, hi) per row and 0/0 for none, so one chunk may hold
+// several blocks. A query inside one reads the WHOLE block, which is the only
+// place attention passes its own position. It is read up to FA_Q rows past N
+// (attn_batch_mm masks a partial tail tile rather than branching around it),
+// so the host sizes it past the batch. [vision-block]
 struct AttnBatchArgs {
     uint hd; uint nH; uint nKV; uint kvDim; uint P; float scale;
     uint basePos; uint N; uint gated; uint window;
-    uint blockLo; uint blockHi;
 };
 
 // The last key a query at absolute position q may read. Causal length T
@@ -1768,6 +1771,7 @@ kernel void attn_batch(
         device const float   * gateN [[buffer(3)]],
         device       float   * outN  [[buffer(4)]],
         constant AttnBatchArgs & a   [[buffer(5)]],
+        device const uint    * blk   [[buffer(6)]],
         threadgroup float    * shmem [[threadgroup(0)]],
         uint   tgid  [[threadgroup_position_in_grid]],
         ushort sgitg [[simdgroup_index_in_threadgroup]],
@@ -1780,7 +1784,7 @@ kernel void attn_batch(
     const uint lo = a.window == 0 || T <= a.window ? 0 : T - a.window;
     // attn_flash reads [lo, hi) with no further mask -- the RANGE is the mask
     // -- so a vision block needs nothing but a longer bound. [vision-block]
-    const uint hi = attn_end(a.basePos + n, T, a.blockLo, a.blockHi);
+    const uint hi = attn_end(a.basePos + n, T, blk[2 * n], blk[2 * n + 1]);
     const uint group = a.nH / a.nKV;
     const uint off = n * a.nH * a.hd + h * a.hd;
     attn_flash(qN + off, kT, vT, gateN + off, outN + off,
@@ -1839,16 +1843,20 @@ inline void fa_stage_q(threadgroup half * qs, device const float * qN,
 }
 
 // Scale one tile of scores and MASK it per ROW: a key can be past one row's
-// causal end and below another's window start, so the bound is not the tile's.
+// causal end and below another's window start, so the bound is not the tile's
+// -- and with a block per row, two rows of one tile can belong to DIFFERENT
+// vision blocks. Rows past nq are masked wholesale, but their `blk` pair is
+// still read, which is why the host sizes that buffer FA_Q rows past N.
 inline void fa_mask(threadgroup float * s, uint t0, uint T0, uint window,
-                    uint blockLo, uint blockHi,
+                    device const uint * blk, uint n0,
                     float scale, ushort nq, ushort tiitg) {
     for (uint i = tiitg; i < FA_Q * FA_K; i += 128) {
         const uint q = i / FA_K;
         const uint t = t0 + i % FA_K;
         const uint Tq = T0 + q;
         const uint loQ = (window == 0 || Tq <= window) ? 0 : Tq - window;
-        const uint hiQ = attn_end(Tq - 1, Tq, blockLo, blockHi);
+        const uint r = 2 * (n0 + q);
+        const uint hiQ = attn_end(Tq - 1, Tq, blk[r], blk[r + 1]);
         s[i] = (q < nq && t < hiQ && t >= loQ) ? s[i] * scale : -INFINITY;
     }
 }
@@ -1931,6 +1939,7 @@ kernel void attn_batch_mm(
         device const float   * gateN [[buffer(3)]],
         device       float   * outN  [[buffer(4)]],
         constant AttnBatchArgs & a   [[buffer(5)]],
+        device const uint    * blk   [[buffer(6)]],
         threadgroup uchar    * shmem [[threadgroup(0)]],
         uint   tgid  [[threadgroup_position_in_grid]],
         ushort tiitg [[thread_index_in_threadgroup]],
@@ -1966,15 +1975,18 @@ kernel void attn_batch_mm(
     for (ushort i = 0; i < oTiles; i++) {
         o[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
     }
-    // The union of the rows' ranges, aligned DOWN to FA_K so a tile never
-    // straddles a page -- the host gates on a page holding a whole multiple
-    // of 8 positions, which makes each 8-key block a plain strided load.
-    // A tile holding any row of a vision block reads to that block's end, so
-    // the union is taken over the tile rather than per row; fa_mask still
-    // bounds each row on its own. [vision-block]
+    // The union of the LIVE rows' ranges, which is what the key sweep below
+    // has to cover; fa_mask still bounds each row on its own, so a key past
+    // one row's end contributes nothing to it. Rows past nq are excluded
+    // deliberately -- their `blk` pair is padding, and folding it in would
+    // sweep keys no live row can reach. [vision-block]
     const uint tLast = a.basePos + n0 + nq;
-    const uint tEnd = (a.basePos + n0 < a.blockHi && tLast > a.blockLo)
-        ? max(tLast, a.blockHi) : tLast;
+    uint tEnd = tLast;
+    for (ushort q = 0; q < nq; q++) {
+        const uint r = 2 * (n0 + q);
+        const uint qp = a.basePos + n0 + q;
+        tEnd = max(tEnd, attn_end(qp, qp + 1, blk[r], blk[r + 1]));
+    }
     const uint T0 = a.basePos + n0 + 1;
     const uint loF = (a.window == 0 || T0 <= a.window) ? 0 : T0 - a.window;
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1986,8 +1998,7 @@ kernel void attn_batch_mm(
             : make_filled_simdgroup_matrix<float, 8>(0.f);
         simdgroup_store(sBlk, sBuf + sgitg * 8, FA_K, ulong2(0, 0), false);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        fa_mask(sBuf, t0, T0, a.window, a.blockLo, a.blockHi,
-                a.scale, nq, tiitg);
+        fa_mask(sBuf, t0, T0, a.window, blk, n0, a.scale, nq, tiitg);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         fa_softmax(sBuf, pBuf, mRow, lRow, cDiag, tiitg);
         threadgroup_barrier(mem_flags::mem_threadgroup);

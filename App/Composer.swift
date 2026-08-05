@@ -87,12 +87,34 @@ struct Composer: View {
             controls
         }
         .padding(10)
-        .background(.quinary,
-                    in: RoundedRectangle(cornerRadius: 12))
+        // The film strip rides BETWEEN the card's fill and its content: above
+        // the fill so it is visible, below the controls so they stay legible
+        // over it. It fills the card, and all four of its edges are feathered,
+        // so it reads as the card's own backdrop rather than as a picture
+        // parked on one edge of it.
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12).fill(.quinary)
+                FilmStrip(model: model, quiet: !composing)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
         .overlay {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator, lineWidth: 0.5)
         }
+    }
+
+    // Whether the composer is in USE, which is what retires the film strip.
+    //
+    // The two platforms need different signals and neither one works for
+    // both. On iOS focus means the soft keyboard is up and has taken half
+    // the screen. On macOS the field is focused from launch and stays that
+    // way, so focus says nothing at all -- keying off it there would hide
+    // the strip permanently -- and what marks the composer as in use is
+    // whether anything has been typed into it.
+    private var composing: Bool {
+        isOS ? focused : !model.input.isEmpty
     }
 
     // Plain Return submits; Shift+Return inserts a caret-position line break

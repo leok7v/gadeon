@@ -13,14 +13,27 @@ import SwiftUI
     }
 }
 
-// View > Status Line, a checked item mirroring the Settings switch.
+// View > Show / Hide Status Line, mirroring the Settings switch.
 // macOS-only: iOS has no menu bar.
+//
+// A GROUP, never `CommandMenu("View")`: SwiftUI already builds a View menu
+// (Enter Full Screen lives there), and a CommandMenu of the same name ADDS A
+// SECOND ONE rather than merging into it. `after: .toolbar` is where the
+// system puts this kind of item -- Finder's own Hide Status Bar sits in that
+// section.
+//
+// A Show/Hide VERB rather than a checked noun, which is the platform's rule
+// for a visibility toggle and what every system app does: the item names the
+// action it will perform, so it reads correctly with no checkmark column.
 
 struct StatusBarCommands: Commands {
     @Bindable var model: ChatModel
     var body: some Commands {
-        CommandMenu("View") {
-            Toggle("Status Line", isOn: $model.statusLine)
+        CommandGroup(after: .toolbar) {
+            Button(model.statusLine ? "Hide Status Line"
+                                    : "Show Status Line") {
+                model.statusLine.toggle()
+            }
         }
     }
 }

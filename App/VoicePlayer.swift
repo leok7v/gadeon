@@ -34,17 +34,27 @@ final class VoicePlayer: @unchecked Sendable {
     // the inversion the Thread Performance Checker flags as a hang risk, on
     // the very path the Stop button takes.
     //
-    // Scheduling does NOT come through here. It already runs on synthQueue,
-    // so it never inverted anything, and it is ordered against a stop by the
-    // epoch test both take under `lock`: a stop that wins the lock leaves the
-    // schedule stale and it never reaches the node at all.
+    // Scheduling does NOT come through here, and that is a trade rather than a
+    // clean win: synthQueue is userInitiated, so `schedule`'s play() inverts
+    // the same way this queue exists to prevent. It stays there because the
+    // epoch test under `lock` is what orders a schedule against a stop -- a
+    // stop that wins the lock leaves the schedule stale so it never reaches
+    // the node -- and moving those calls here would put that ordering on a
+    // queue hop instead.
     //
     // Default QoS, deliberately, and NOT a higher class: `stop()` waits on an
     // audio helper thread that runs at default, so any queue above that only
     // moves the inversion one level down rather than removing it. Nothing is
     // drawing while this runs, and the decision it carries out was already
     // taken under the lock, so the work genuinely is not user-initiated.
-    private let nodeQueue = DispatchQueue(label: "gadeon.tts.node")
+    //
+    // The `qos:` argument is what makes that true and cannot be dropped: a
+    // queue built without one is UNSPECIFIED, not default, and an async block
+    // then inherits the SUBMITTER's class. Every caller here is @MainActor, so
+    // the bare queue ran node.stop() at user-initiated and re-created the very
+    // inversion this queue exists to remove.
+    private let nodeQueue = DispatchQueue(label: "gadeon.tts.node",
+                                          qos: .default)
     private var speech: Speech?
     // Each queued segment carries a TAG the player never interprets. The
     // caller uses it to say which piece of its own text this sound is, which
@@ -168,12 +178,17 @@ final class VoicePlayer: @unchecked Sendable {
         log("pause | \(counts())")
     }
 
+    // startEngine rides the SAME hop as the play it must precede: it starts
+    // the engine and the audio session, which are hardware calls, and this is
+    // a transport call off the main actor like the two above.
     func resume() {
         lock.lock()
         isPaused = false
         lock.unlock()
-        startEngine()
-        nodeQueue.async { [weak self] in self?.node.play() }
+        nodeQueue.async { [weak self] in
+            self?.startEngine()
+            self?.node.play()
+        }
         log("resume | \(counts())")
     }
 
@@ -278,6 +293,11 @@ final class VoicePlayer: @unchecked Sendable {
 
     // The engine keeps running between sentences on purpose: starting it per
     // sentence costs a hardware route change, which is audible as a click.
+    //
+    // The decision is taken here and the two hardware calls are handed to
+    // nodeQueue: this is reached from a @MainActor task, and deactivating an
+    // audio session on the main thread is the same blocking-call-on-a-drawing-
+    // thread the transport calls above avoid.
     func idle() {
         lock.lock()
         let quiet = inFlight == 0 && scheduled == 0 && pending.isEmpty
@@ -285,8 +305,10 @@ final class VoicePlayer: @unchecked Sendable {
         if quiet { running = false }
         lock.unlock()
         if quiet && wasRunning {
-            engine.pause()
-            AudioSession.endPlayback()
+            nodeQueue.async { [weak self] in
+                self?.engine.pause()
+                AudioSession.endPlayback()
+            }
         }
     }
 

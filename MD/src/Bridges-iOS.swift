@@ -12,7 +12,7 @@ private let findBaseBgKey = NSAttributedString.Key("MD.find.baseBg")
 extension NativeText: UIViewRepresentable {
 
     func makeUIView(context: Context) -> ResizingTextView {
-        let v = ResizingTextView(usingTextLayoutManager: false)
+        let v = ResizingTextView.textKit1()
         v.isEditable = false
         v.isSelectable = selectable
         // A whole-document surface scrolls internally (fills its frame, so Find
@@ -83,6 +83,34 @@ extension NativeText: UIViewRepresentable {
     }
 
     final class ResizingTextView: UITextView, FindableTextView {
+
+        // A TextKit 1 view, built through UITextView's DESIGNATED initializer.
+        //
+        // NOT `init(usingTextLayoutManager: false)`, which asks for the same
+        // TextKit 1 stack and looks equivalent. Constructing a Swift subclass
+        // through THAT one never runs the subclass's stored-property
+        // initializers: every property below keeps the zeroed memory ObjC
+        // calloc'd it with, so `findMatches` holds a NULL buffer where an
+        // empty Array must point at the shared empty singleton -- and reading
+        // its count faults at address 0x10, which is the crash this replaced.
+        //
+        // MEASURED on iOS 18, the two side by side: usingTextLayoutManager
+        // gives buffer 0x0 and activeIndex .some(0) where the declared
+        // defaults are [] and nil; frame:textContainer: gives both correctly.
+        // Both leave textLayoutManager nil and the container tracking width,
+        // so this is TextKit 1 either way and nothing about layout moves.
+        // AppKit's NSTextView does NOT share the defect, which is why the
+        // macOS twin never crashed and cannot stand in for a test of this.
+        static func textKit1() -> ResizingTextView {
+            let storage = NSTextStorage()
+            let layout = NSLayoutManager()
+            let container = NSTextContainer(
+                size: CGSize(width: 0,
+                             height: CGFloat.greatestFiniteMagnitude))
+            storage.addLayoutManager(layout)
+            layout.addTextContainer(container)
+            return ResizingTextView(frame: .zero, textContainer: container)
+        }
 
         var nowrap: Bool = false
         var scrolls: Bool = false
@@ -248,15 +276,31 @@ extension NativeText: UIViewRepresentable {
         // first and find over it, so a search stays visible through a reply
         // being read aloud; both go through the same base-colour stash, which
         // is what lets clearHighlights put the code / table tints back.
+        //
+        // RE-ENTRANCY, not threading, is the hazard -- everything here is
+        // @MainActor. Writing the storage invalidates layout, which can bring
+        // SwiftUI straight back through updateUIView -> applyResolved ->
+        // reapplyFind, and that REASSIGNS findMatches. A loop reading the
+        // property across those writes was then left holding a released
+        // buffer: the crash landed inside the iterator rather than the body.
+        //
+        // Two things stop it. The tint set is computed from LOCAL copies
+        // before anything is written, so no live enumeration spans a write;
+        // and the writes are grouped, so layout is invalidated once at
+        // endEditing rather than after every attribute.
         private func highlightAll() {
+            let matches = findMatches
+            let active = activeIndex
+            let spoken = spokenRange
+            textStorage.beginEditing()
             clearHighlights()
             let len = textStorage.length
             var tinted: [(range: NSRange, tint: UIColor)] = []
-            if let r = spokenRange, NSMaxRange(r) <= len {
+            if let r = spoken, NSMaxRange(r) <= len {
                 tinted.append((r, spokenTint))
             }
-            for (i, r) in findMatches.enumerated() where NSMaxRange(r) <= len {
-                tinted.append((r, i == activeIndex ? activeTint : findTint))
+            for (i, r) in matches.enumerated() where NSMaxRange(r) <= len {
+                tinted.append((r, i == active ? activeTint : findTint))
             }
             for entry in tinted {
                 var bases: [(range: NSRange, base: Any)] = []
@@ -274,6 +318,7 @@ extension NativeText: UIViewRepresentable {
                 textStorage.addAttribute(.backgroundColor, value: entry.tint,
                                          range: entry.range)
             }
+            textStorage.endEditing()
         }
 
         override var intrinsicContentSize: CGSize {

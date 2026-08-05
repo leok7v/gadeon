@@ -303,6 +303,29 @@ public final class MetalContext {
                               options: .storageModeShared)!
         }
     }
+
+    // A shared-storage u32 buffer of `count` elements, zeroed. Metal hands
+    // back whatever was in the page, so the clear is the caller's.
+    func makeU32(_ count: Int) -> MTLBuffer {
+        let b = device.makeBuffer(
+            length: max(count, 1) * MemoryLayout<UInt32>.stride,
+            options: .storageModeShared)!
+        memset(b.contents(), 0, b.length)
+        return b
+    }
+
+    // The all-empty block table, for every batched attention with no vision
+    // blocks: an empty range leaves attn_end at the plain causal bound, so a
+    // caller that has none binds this instead of branching in the kernel.
+    // Shared because it is read-only and always zero, and grown rather than
+    // sized up front because the batch width is the engine's to choose.
+    private var blank: MTLBuffer?
+
+    func noBlocks(_ rows: Int) -> MTLBuffer {
+        let need = rows * 2 * MemoryLayout<UInt32>.stride
+        if blank == nil || blank!.length < need { blank = makeU32(rows * 2) }
+        return blank!
+    }
 }
 
 enum MetalErr: Error, CustomStringConvertible {
@@ -330,5 +353,11 @@ extension MTLBuffer {
     func f32(_ count: Int) -> UnsafeMutableBufferPointer<Float> {
         UnsafeMutableBufferPointer(
             start: contents().assumingMemoryBound(to: Float.self), count: count)
+    }
+
+    func u32(_ count: Int) -> UnsafeMutableBufferPointer<UInt32> {
+        UnsafeMutableBufferPointer(
+            start: contents().assumingMemoryBound(to: UInt32.self),
+            count: count)
     }
 }

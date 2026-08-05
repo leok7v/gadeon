@@ -20,11 +20,35 @@ public enum VideoFrames {
 
     // `count` frames spread evenly over the clip, and the seconds at which
     // each was taken -- the caller needs those to label them.
+    //
+    // HOLDS THEM ALL. A frame arrives at the source resolution, decoded, so a
+    // 4K clip is ~33 MB each and thirty-two of them is a gigabyte -- next to a
+    // resident 12B on a phone. Prefer `stream` wherever the frames are
+    // consumed one at a time; this form is for the callers that genuinely
+    // need the set (the CLI's --dump-frames).
     public static func sample(url: URL, count: Int) async throws
         -> (images: [CGImage], seconds: [Double]) {
+        var images: [CGImage] = []
+        var seconds: [Double] = []
+        try await stream(url: url, count: count) { img, at in
+            images.append(img)
+            seconds.append(at)
+        }
+        return (images, seconds)
+    }
+
+    // Each frame handed over as it is decoded, so a caller that consumes one
+    // at a time never holds more than one. The sampling arithmetic lives HERE
+    // and `sample` is this with the frames collected, so the two cannot drift
+    // -- which matters because the frame INDEX decides what the model sees.
+    //
+    // A frame that will not decode is skipped rather than fatal: the caller
+    // gets fewer frames, which is the same contract `sample` always had.
+    public static func stream(url: URL, count: Int,
+                              _ each: (CGImage, Double) throws -> Void)
+        async throws {
         let asset = AVURLAsset(url: url)
         let tracks = try await asset.loadTracks(withMediaType: .video)
-        var out: ([CGImage], [Double]) = ([], [])
         if tracks.isEmpty {
             throw Failure.noVideoTrack(url.lastPathComponent)
         } else {
@@ -38,8 +62,6 @@ public enum VideoFrames {
             // keyframes, and snapping would sample the same picture repeatedly.
             gen.requestedTimeToleranceBefore = .zero
             gen.requestedTimeToleranceAfter = .zero
-            var images: [CGImage] = []
-            var seconds: [Double] = []
             for i in 0..<take {
                 // Frame indices spread endpoint to endpoint, matching a
                 // linspace over the clip rather than a fixed cadence.
@@ -49,13 +71,10 @@ public enum VideoFrames {
                 let at = Double(index) / Double(max(rate, 1))
                 let time = CMTime(seconds: at, preferredTimescale: 600)
                 if let img = try? await gen.image(at: time).image {
-                    images.append(img)
-                    seconds.append(at)
+                    try each(img, at)
                 }
             }
-            out = (images, seconds)
         }
-        return out
     }
 
     // mm:ss, the label gemma-4 puts before each frame's span.

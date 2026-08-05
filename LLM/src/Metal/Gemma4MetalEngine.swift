@@ -53,6 +53,10 @@ public final class Gemma4MetalEngine {
     private let bQN, bKN, bVN, bAttnOutN, bGateNullN: MTLBuffer
     private let bFfnGateN, bFfnUpN: MTLBuffer
     private let bPleN, bPleProjN, bPleGateN, bClampN: MTLBuffer
+    // The vision block each chunk ROW belongs to, two absolute uints per row.
+    // Sized 8 rows past the batch because the matrix attention masks a partial
+    // tail tile rather than branching around it. [vision-block]
+    private let bBlocks: MTLBuffer
 
     // Tokens per prefill chunk. ON by default: 7.6x prefill (pp512 58.0 ->
     // 441.7 t/s on an M4 Pro, decode untouched).
@@ -241,6 +245,7 @@ public final class Gemma4MetalEngine {
         bPleProjN = ctx.makeF32(B * pleWidth)
         bPleGateN = ctx.makeF32(B * pleDim)
         bClampN = ctx.makeF32(B * max(maxFF, max(pleWidth, c.nEmbd)))
+        bBlocks = ctx.makeU32(2 * (B + 8))
         for il in 0..<c.nLayer where !c.isShared(il) {
             kv[il] = MetalKVPool(
                 device: ctx.device, P: pageP,
@@ -331,7 +336,8 @@ public final class Gemma4MetalEngine {
                     forward(token: Int(ids[i]), pos: pos)
                 }
             } else {
-                forwardChunk(Array(ids[i ..< (i + n)]), soft, blocks[i])
+                forwardChunk(Array(ids[i ..< (i + n)]), soft,
+                             Array(blocks[i ..< (i + n)]))
             }
             pos += n
             i += n
@@ -340,15 +346,12 @@ public final class Gemma4MetalEngine {
         return pick(logits())
     }
 
-    // How many ids the next chunk takes. A vision block reads FORWARD across
-    // itself, and a key in a later chunk has not been appended yet, so a
-    // block must ride ONE chunk: a chunk that starts inside one runs to its
-    // end, and one that would only reach part way into the next stops short
-    // of it. Without blockwise vision every range is empty and this is
-    // `want`. [vision-block]
+    // How many ids the next chunk takes: whole vision blocks and text, packed
+    // greedily up to `want`. Without blockwise vision every range is empty and
+    // this is `want`. [vision-block]
 
     private func chunk(_ blocks: [(Int, Int)], at i: Int, want: Int) -> Int {
-        let out = cfg.chunkLength(blocks, at: i, want: want)
+        let out = Gemma4Config.chunkLength(blocks, at: i, want: want)
         precondition(out <= capacity,
                      "a \(out)-token vision block must ride one chunk and "
                      + "this engine allocated \(capacity); raise "
@@ -533,7 +536,7 @@ public final class Gemma4MetalEngine {
     // feature UNSCALED as their hidden and gather the PAD row of the per-layer
     // table, exactly as forward(embedding:pos:) does one at a time.
     private func forwardChunk(_ ids: [Int32], _ soft: [Int: [Float]],
-                              _ block: (Int, Int) = (0, 0)) {
+                              _ blocks: [(Int, Int)]) {
         let c = cfg
         let n = ids.count
         // The last line of defence: every kernel below indexes by row, so an
@@ -555,9 +558,10 @@ public final class Gemma4MetalEngine {
         // kernels run: appendBatch allocates the pages and refreshes the
         // bindless table the batched append and attention both read through.
         embedChunk(ids, soft, n)
+        blockChunk(blocks, n)
         if c.hasPerLayerInputs { gatherPLEChunk(ids, soft, n) }
         for (_, pool) in kv { pool.appendBatch(n) }
-        encodeChunk(basePos: basePos, n: n, block: block)
+        encodeChunk(basePos: basePos, n: n)
         // logits() reads bNormed, so hand it the LAST row -- the only one a
         // prefill needs a prediction from.
         let src = bNormedN.f32(n * c.nEmbd)
@@ -573,6 +577,21 @@ public final class Gemma4MetalEngine {
         let dst = bXN.f32(n * c.nEmbd).baseAddress!
         for j in 0..<n where soft[j] == nil {
             gatherEmbed(Int(ids[j]), into: dst + j * c.nEmbd)
+        }
+    }
+
+    // The chunk's block table. The padding rows the matrix attention reads
+    // past n are cleared to an empty range, so a tail tile's dead rows cannot
+    // widen the key sweep. [vision-block]
+    private func blockChunk(_ blocks: [(Int, Int)], _ n: Int) {
+        let dst = bBlocks.u32(2 * (n + 8))
+        for j in 0..<n {
+            dst[2 * j] = UInt32(blocks[j].0)
+            dst[2 * j + 1] = UInt32(blocks[j].1)
+        }
+        for j in n..<(n + 8) {
+            dst[2 * j] = 0
+            dst[2 * j + 1] = 0
         }
     }
 
@@ -615,7 +634,7 @@ public final class Gemma4MetalEngine {
     // construction and only the last has to be waited on. An error is read off
     // every buffer, since a fault in an earlier group leaves the last one
     // reporting success.
-    private func encodeChunk(basePos: Int, n: Int, block: (Int, Int)) {
+    private func encodeChunk(basePos: Int, n: Int) {
         let c = cfg
         let per = min(Gemma4MetalEngine.prefillLayers, c.nLayer)
         BackgroundGate.shared.waitForForeground()
@@ -627,8 +646,7 @@ public final class Gemma4MetalEngine {
             let e = cb.makeComputeCommandEncoder()!
             let f = MetalEnc(ctx: ctx, e: e)
             if il == 0 && c.hasPerLayerInputs { buildPLEChunk(f, n) }
-            layersChunk(f, basePos: basePos, n: n, layers: il..<end,
-                        block: block)
+            layersChunk(f, basePos: basePos, n: n, layers: il..<end)
             if end == c.nLayer {
                 f.rmsnormBatchBF16(x: bXN, weightOff: outputNormOff,
                                    y: bNormedN, n: c.nEmbd, rows: n,
@@ -675,7 +693,7 @@ public final class Gemma4MetalEngine {
     }
 
     private func layersChunk(_ f: MetalEnc, basePos: Int, n: Int,
-                             layers: Range<Int>, block: (Int, Int)) {
+                             layers: Range<Int>) {
         let c = cfg
         let width = c.nLayer * c.perLayerDim
         for il in layers {
@@ -683,7 +701,7 @@ public final class Gemma4MetalEngine {
             let nm = norms[il]
             f.rmsnormBatchBF16(x: bXN, weightOff: nm.attn, y: bNormedN,
                                n: c.nEmbd, rows: n, eps: c.eps)
-            attentionChunk(f, L, il, basePos: basePos, n: n, block: block)
+            attentionChunk(f, L, il, basePos: basePos, n: n)
             f.rmsnormBatchBF16(x: bContribN, weightOff: nm.postAttn,
                                y: bNormedN, n: c.nEmbd, rows: n, eps: c.eps)
             f.add(x: bXN, y: bNormedN, n: n * c.nEmbd)
@@ -729,8 +747,7 @@ public final class Gemma4MetalEngine {
     }
 
     private func attentionChunk(_ f: MetalEnc, _ L: Gemma4Layer, _ il: Int,
-                                basePos: Int, n: Int,
-                                block: (Int, Int)) {
+                                basePos: Int, n: Int) {
         let c = cfg
         let hd = c.headDim(il)
         let full = c.isFull(il)
@@ -776,7 +793,7 @@ public final class Gemma4MetalEngine {
                         kvDim: hd * nKV, P: pool.P, scale: 1,
                         basePos: basePos, N: n, gated: 0,
                         window: full ? 0 : c.slidingWindow,
-                        // BOTH layer types carry the block. The docstring on
+                        // BOTH layer types carry the blocks. The docstring on
                         // create_masks_for_vision_model says the global ones
                         // are causal only, and that function is not the one
                         // the forward runs: it puts block_sequence_ids into
@@ -784,7 +801,7 @@ public final class Gemma4MetalEngine {
                         // build both masks from it. Gated, not guessed --
                         // sliding-only leaves layer 5 at 0.95 where both
                         // reach six nines. [vision-block]
-                        block: block)
+                        blocks: bBlocks)
         }
         f.linear(L.wo, X: bAttnOutN, out: bContribN, off: off(L.wo), N: n,
                  srq: srq(L.wo), scratch: bClampN)
@@ -969,6 +986,90 @@ public final class Gemma4MetalEngine {
         for (il, n) in b.lens { kv[il]!.truncate(to: n) }
     }
 
+    // A parked conversation. The bookmark is INDEX-only on purpose (rollback
+    // must stay free at any context length), so the bytes come from the LIVE
+    // pools truncated to what it recorded -- which is exact, because a caller
+    // serializes the state it just took.
+
+    public func serialize(_ b: Bookmark) -> Data {
+        var out = Data()
+        StateBytes.putHeader(&out)
+        StateBytes.putInt(&out, b.pos)
+        StateBytes.putInt(&out, b.lens.count)
+        for il in b.lens.keys.sorted() {
+            let len = b.lens[il]!
+            let pool = kv[il]!
+            StateBytes.putInt(&out, il)
+            StateBytes.putInt(&out, len)
+            StateBytes.putFloats(&out, read(pool.kPages, len, pool))
+            StateBytes.putFloats(&out, read(pool.vPages, len, pool))
+        }
+        return out
+    }
+
+    // Pages are HALF; the file stays f32 so it means one thing whichever
+    // engine wrote it. One pass per park, never per token.
+    private func read(_ pages: [MTLBuffer], _ len: Int,
+                      _ pool: MetalKVPool) -> [Float] {
+        var out = [Float](repeating: 0, count: len * pool.kvDim)
+        for i in 0..<len {
+            let src = pages[i / pool.P].contents()
+                .assumingMemoryBound(to: Float16.self)
+                + (i % pool.P) * pool.kvDim
+            for c in 0..<pool.kvDim { out[i * pool.kvDim + c] = Float(src[c]) }
+        }
+        return out
+    }
+
+    // What deserialize hands back: whole pools rather than the lengths a
+    // rollback carries, since the engine it lands in holds nothing yet.
+    public struct Parked: @unchecked Sendable, BackendState {
+        let pos: Int
+        let kv: [Int: [(k: [Float], v: [Float])]]
+    }
+
+    public func deserialize(_ data: Data) -> Parked? {
+        let b = [UInt8](data)
+        var p = 0
+        guard StateBytes.readHeader(b, &p) else { return nil }
+        let pos = StateBytes.getInt(b, &p)
+        var kv: [Int: [(k: [Float], v: [Float])]] = [:]
+        for _ in 0..<StateBytes.getInt(b, &p) {
+            let il = StateBytes.getInt(b, &p)
+            _ = StateBytes.getInt(b, &p)
+            let k = StateBytes.getFloats(b, &p)
+            let v = StateBytes.getFloats(b, &p)
+            kv[il] = [(k: k, v: v)]
+        }
+        return Parked(pos: pos, kv: kv)
+    }
+
+    // Install a parked conversation: refill the pools position by position
+    // through the ordinary append, so the page table is built the one way.
+    public func adopt(_ parked: Parked) {
+        reset()
+        for (il, blobs) in parked.kv {
+            guard let pool = kv[il], let blob = blobs.first else { continue }
+            let n = blob.k.count / pool.kvDim
+            for i in 0..<n {
+                let tail = pool.tailForAppend()
+                let kd = tail.k.contents()
+                    .assumingMemoryBound(to: Float16.self)
+                    + tail.slot * pool.kvDim
+                let vd = tail.v.contents()
+                    .assumingMemoryBound(to: Float16.self)
+                    + tail.slot * pool.kvDim
+                for c in 0..<pool.kvDim {
+                    kd[c] = Float16(blob.k[i * pool.kvDim + c])
+                    vd[c] = Float16(blob.v[i * pool.kvDim + c])
+                }
+                pool.commitAppend()
+            }
+            pool.refreshTable()
+        }
+        pos = parked.pos
+    }
+
     // The post-final-norm hidden, for the op-by-op gate against SIMD.
     public func hidden() -> [Float] { Array(bNormed.f32(cfg.nEmbd)) }
 
@@ -1073,7 +1174,29 @@ public final class Gemma4MetalBackend: AgentBackend, @unchecked Sendable {
     }
 
     public func loadState(_ state: any BackendState) async throws {
-        if let s = state as? State { engine.restore(s.bookmark) }
+        if let s = state as? State {
+            engine.restore(s.bookmark)
+        } else if let p = state as? Gemma4MetalEngine.Parked {
+            engine.adopt(p)
+        }
+    }
+
+    // A parked conversation restores from BYTES, never from a forward pass.
+    // The protocol default returns empty Data, which reads as a warm cache
+    // and is a cold one every time. [[never-reprefill]]
+
+    public func serializeState(_ state: any BackendState) async -> Data {
+        var out = Data()
+        if let s = state as? State { out = engine.serialize(s.bookmark) }
+        return out
+    }
+
+    public func deserializeState(_ data: Data) async throws
+        -> any BackendState {
+        guard let p = engine.deserialize(data) else {
+            throw GGUFErr.parse("parked state is not this build's format")
+        }
+        return p
     }
 
     struct Turn: BackendState {

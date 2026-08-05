@@ -155,8 +155,8 @@ public final class Gemma4Engine {
         var hidden = [Float]()
         var i = 0
         while i < ids.count && !stopSignal.raisedNow {
-            let n = cfg.chunkLength(blocks, at: i,
-                                    want: min(width, ids.count - i))
+            let n = Gemma4Config.chunkLength(
+                blocks, at: i, want: min(width, ids.count - i))
             if n == 1 {
                 if let feature = softAt(ids[i]) {
                     hidden = forward(embedding: feature, pos: pos)
@@ -208,6 +208,44 @@ public final class Gemma4Engine {
         var bv = -Float.greatestFiniteMagnitude
         for i in 0..<v.count where v[i] > bv { bv = v[i]; bi = i }
         return bi
+    }
+
+    // A parked conversation's bytes. The bookmark already holds the K/V it
+    // needs, so this is a pure format change -- no engine state is read here
+    // and rollback stays what it was.
+
+    public func serialize(_ b: Bookmark) -> Data {
+        var out = Data()
+        StateBytes.putHeader(&out)
+        StateBytes.putInt(&out, b.pos)
+        StateBytes.putInt(&out, b.kv.count)
+        for il in b.kv.keys.sorted() {
+            let s = b.kv[il]!
+            StateBytes.putInt(&out, il)
+            StateBytes.putInt(&out, s.first)
+            StateBytes.putInt(&out, s.k.count)
+            for row in s.k { StateBytes.putFloats(&out, row) }
+            for row in s.v { StateBytes.putFloats(&out, row) }
+        }
+        return out
+    }
+
+    public func deserialize(_ data: Data) -> Bookmark? {
+        let b = [UInt8](data)
+        var p = 0
+        guard StateBytes.readHeader(b, &p) else { return nil }
+        let pos = StateBytes.getInt(b, &p)
+        var kv: [Int: GemmaKV.Snapshot] = [:]
+        for _ in 0..<StateBytes.getInt(b, &p) {
+            let il = StateBytes.getInt(b, &p)
+            let first = StateBytes.getInt(b, &p)
+            let rows = StateBytes.getInt(b, &p)
+            var k: [[Float]] = [], v: [[Float]] = []
+            for _ in 0..<rows { k.append(StateBytes.getFloats(b, &p)) }
+            for _ in 0..<rows { v.append(StateBytes.getFloats(b, &p)) }
+            kv[il] = GemmaKV.Snapshot(k: k, v: v, first: first)
+        }
+        return Bookmark(pos: pos, kv: kv)
     }
 
     public struct Bookmark: @unchecked Sendable {

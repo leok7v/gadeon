@@ -940,21 +940,25 @@ struct MetalEnc {
     // history). Gemma windows 28 of its 35 layers at 512, and in a batch every
     // row has its own start, so the bound is computed per row in the kernel
     // rather than passed as one `lo`.
+    // `blocks` is the per-row vision-block table (two absolute uints per chunk
+    // row); nil means this caller has none and takes the shared empty one. The
+    // matrix kernel reads a whole FA_Q=8 tile of rows whatever N is, so the
+    // table has to answer 8 rows past the batch. [vision-block]
     func attnBatch(qN: MTLBuffer, kAddr: MTLBuffer, vAddr: MTLBuffer,
                    pages: [MTLResource], gateN: MTLBuffer, outN: MTLBuffer,
                    hd: Int, nH: Int, nKV: Int, kvDim: Int, P: Int,
                    scale: Float,
                    basePos: Int, N: Int, gated: Int, window: Int = 0,
-                   block: (Int, Int) = (0, 0)) {
+                   blocks: MTLBuffer? = nil,
+                   matrix: Bool = MetalEnc.attnMatrix) {
         precondition(hd % 4 == 0 && hd <= 512,
                      "attn_batch: half4 V slices need hd % 4 == 0, and the "
                      + "four-slice accumulator caps head dim at 512")
         var a = AttnBatchArgs(hd: UInt32(hd), nH: UInt32(nH), nKV: UInt32(nKV),
                               kvDim: UInt32(kvDim), P: UInt32(P), scale: scale,
                               basePos: UInt32(basePos), N: UInt32(N),
-                              gated: UInt32(gated), window: UInt32(window),
-                              blockLo: UInt32(block.0),
-                              blockHi: UInt32(block.1))
+                              gated: UInt32(gated), window: UInt32(window))
+        let blk = blocks ?? ctx.noBlocks(N + 8)
         e.memoryBarrier(scope: .buffers)
         e.useResources(pages, usage: .read)
         // The matrix-unit kernel where the GPU and the geometry allow it: it
@@ -966,7 +970,7 @@ struct MetalEnc {
         // contiguous inside a single page -- the self-test's P=4 pool proves
         // it, and got 0/12 before this term was added. Every shipping pool is
         // 512. Everything else takes the scalar body. [flash-attn-mm]
-        let mm = MetalEnc.attnMatrix && ctx.matrixUnits
+        let mm = matrix && ctx.matrixUnits
             && hd % 8 == 0 && (hd / 4) % 8 == 0 && P % 8 == 0
         if mm {
             // qs[8*hd half] | s[8*32 f32] | p[8*32 half] | m[8] | l[8]
@@ -981,6 +985,7 @@ struct MetalEnc {
                 e.setBuffer(outN, offset: 0, index: 4)
                 e.setBytes(&a, length: MemoryLayout<AttnBatchArgs>.stride,
                            index: 5)
+                e.setBuffer(blk, offset: 0, index: 6)
             }
         } else {
             // Flash attention: threadgroup memory is O(hd) (qs + redM/redL +
@@ -995,6 +1000,7 @@ struct MetalEnc {
                 e.setBuffer(outN, offset: 0, index: 4)
                 e.setBytes(&a, length: MemoryLayout<AttnBatchArgs>.stride,
                            index: 5)
+                e.setBuffer(blk, offset: 0, index: 6)
             }
         }
     }
@@ -1078,7 +1084,6 @@ struct AttnBatchArgs {
     var hd: UInt32; var nH: UInt32; var nKV: UInt32; var kvDim: UInt32
     var P: UInt32; var scale: Float; var basePos: UInt32; var N: UInt32
     var gated: UInt32; var window: UInt32
-    var blockLo: UInt32; var blockHi: UInt32
 }
 struct F16WArgs { var K: UInt32; var M: UInt32 }
 struct LNArgs { var n: UInt32; var eps: Float }

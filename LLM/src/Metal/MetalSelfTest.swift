@@ -44,6 +44,7 @@ public enum MetalSelfTest {
             + "\(ctx.device.maxBufferLength / 1_048_576) MB")
         step(try checkGemv(model, ctx))
         step(try checkGemm(model, ctx))
+        step(try checkVisionBlocks(ctx))
         step(try checkDequant(model, ctx))
         step(try checkForward(model))
         step(try checkDecode(model))
@@ -234,6 +235,216 @@ public enum MetalSelfTest {
         let tag = match == n ? "PASS" : "FAIL"
         return "decode \(match)/\(n) greedy tokens match  \(tag)\n"
             + "  metal=\(mSeq)\n  simd =\(sSeq)"
+    }
+
+    // ---- the vision-block mask ------------------------------------------
+    // The batched attention's block mask, three ways: the scalar kernel, the
+    // matrix kernel, and a plain Swift oracle -- on a chunk carrying TWO
+    // blocks and text.
+    //
+    // WHY IT EXISTS, and this is the durable part. Every vision fixture this
+    // repo owns is a SINGLE block, and a chunk used to carry at most one, so
+    // both bugs the block mask has shipped -- a chunk that silently dropped
+    // the mask, and a matrix kernel that read the wrong rows' bounds -- sailed
+    // through every gate while the model answered nonsense about a video. A
+    // gate that cannot see two blocks cannot see that class of bug at all.
+    //
+    // The last assertion is the one that keeps it honest: run the SAME inputs
+    // with an empty block table and the answer must MOVE. Without it a kernel
+    // that ignored the table entirely would score a clean pass against an
+    // oracle that agreed with it.
+    private static func checkVisionBlocks(_ ctx: MetalContext) throws
+        -> String {
+        var lines: [String] = []
+        var failed = 0
+        for basePos in [0, 8] {
+            for window in [0, 12] {
+                let r = try visionCase(ctx, basePos: basePos, window: window)
+                lines.append("  " + r.0)
+                if !r.1 { failed += 1 }
+            }
+        }
+        return "vision blocks (2 blocks + text in one chunk)  "
+            + (failed == 0 ? "PASS" : "FAIL (\(failed))") + "\n"
+            + lines.joined(separator: "\n")
+    }
+
+    // One geometry. N=37 ends on a PARTIAL 8-row tile, so the matrix kernel's
+    // padding rows past N are exercised; the two runs straddle its tile
+    // boundaries at rows 8, 16 and 32.
+    private static func visionCase(_ ctx: MetalContext, basePos: Int,
+                                   window: Int) throws -> (String, Bool) {
+        let hd = 256, nH = 2, nKV = 1, P = 8, N = 37
+        let scale: Float = 0.125
+        let T = basePos + N
+        let fix = kvFixture(ctx, hd: hd, nH: nH, nKV: nKV, P: P, T: T, N: N)
+        let rows = blockRows(N, basePos, [(2, 14), (15, 31)])
+        let table = ctx.makeU32(2 * (N + 8))
+        let cells = table.u32(2 * (N + 8))
+        for j in 0..<N {
+            cells[2 * j] = UInt32(rows[j].0)
+            cells[2 * j + 1] = UInt32(rows[j].1)
+        }
+        let want = attendRef(fix.q, fix.k, fix.v, rows, basePos: basePos,
+                             N: N, nH: nH, hd: hd, window: window,
+                             scale: scale)
+        func run(_ blocks: MTLBuffer?, _ matrix: Bool) -> [Float] {
+            attn(ctx, fix, hd: hd, nH: nH, nKV: nKV, P: P, N: N,
+                 basePos: basePos, window: window, scale: scale,
+                 blocks: blocks, matrix: matrix)
+        }
+        let scalar = relDiff(run(table, false), want)
+        // Below Apple7 there are no matrix units and no attn_batch_mm to
+        // build, so the scalar arm is the whole kernel there.
+        let mm = ctx.matrixUnits ? relDiff(run(table, true), want) : 0
+        let blind = ctx.matrixUnits ? relDiff(run(nil, true), want)
+                                    : relDiff(run(nil, false), want)
+        let ok = scalar < 1e-4 && mm < 1e-2 && blind > 0.1
+        return (String(format:
+            "p%-2d w%-2d  scalar %.2e  matrix %.2e  no-table %.2e  %@",
+            basePos, window, scalar, mm, blind, ok ? "PASS" : "FAIL"), ok)
+    }
+
+    // The vision block each chunk row belongs to, as the absolute [lo, hi)
+    // every position inside it attends across; (0, 0) for text.
+    private static func blockRows(_ N: Int, _ basePos: Int,
+                                  _ runs: [(Int, Int)]) -> [(Int, Int)] {
+        var out = [(Int, Int)](repeating: (0, 0), count: N)
+        for r in runs {
+            for j in r.0..<r.1 { out[j] = (basePos + r.0, basePos + r.1) }
+        }
+        return out
+    }
+
+    // A filled KV pool plus the f32 values it actually holds: the pages are
+    // half, so the oracle has to score against the ROUNDED values or it
+    // measures the storage format instead of the mask.
+    private struct KVFixture {
+        let pool: MetalKVPool
+        let qBuf: MTLBuffer
+        let gate: MTLBuffer
+        let out: MTLBuffer
+        let q: [Float]
+        let k: [Float]
+        let v: [Float]
+    }
+
+    private static func kvFixture(_ ctx: MetalContext, hd: Int, nH: Int,
+                                  nKV: Int, P: Int, T: Int,
+                                  N: Int) -> KVFixture {
+        precondition(nKV == 1, "the k/v below are indexed as one kv head")
+        let pool = MetalKVPool(device: ctx.device, P: P, kvDim: hd * nKV)
+        pool.appendBatch(T)
+        let src = fill(2 * T * hd, seed: 60)
+        var k = [Float](repeating: 0, count: T * hd)
+        var v = [Float](repeating: 0, count: T * hd)
+        for t in 0..<T {
+            let kp = pool.kPages[t / P].contents()
+                .assumingMemoryBound(to: Float16.self) + (t % P) * hd
+            let vp = pool.vPages[t / P].contents()
+                .assumingMemoryBound(to: Float16.self) + (t % P) * hd
+            for i in 0..<hd {
+                kp[i] = Float16(src[t * hd + i])
+                vp[i] = Float16(src[(T + t) * hd + i])
+                k[t * hd + i] = Float(kp[i])
+                v[t * hd + i] = Float(vp[i])
+            }
+        }
+        pool.refreshTable()
+        let q = fill(N * nH * hd, seed: 61)
+        return KVFixture(pool: pool, qBuf: ctx.makeF32(q),
+                         gate: ctx.makeF32(N * nH * hd),
+                         out: ctx.makeF32(N * nH * hd), q: q, k: k, v: v)
+    }
+
+    // One batched-attention dispatch, on whichever arm `matrix` selects.
+    private static func attn(_ ctx: MetalContext, _ fix: KVFixture, hd: Int,
+                             nH: Int, nKV: Int, P: Int, N: Int, basePos: Int,
+                             window: Int, scale: Float, blocks: MTLBuffer?,
+                             matrix: Bool) -> [Float] {
+        let pool = fix.pool
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        MetalEnc(ctx: ctx, e: e).attnBatch(
+            qN: fix.qBuf, kAddr: pool.kAddr, vAddr: pool.vAddr,
+            pages: pool.residentPages, gateN: fix.gate, outN: fix.out,
+            hd: hd, nH: nH, nKV: nKV, kvDim: hd * nKV, P: P, scale: scale,
+            basePos: basePos, N: N, gated: 0, window: window,
+            blocks: blocks, matrix: matrix)
+        e.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        precondition(cb.error == nil, "attn_batch: \(cb.error!)")
+        return Array(fix.out.f32(N * nH * hd))
+    }
+
+    // The oracle. Each row's range is [lo, hi): the window bounds it from
+    // below, and a row inside a vision block reads to that block's end --
+    // which stays CONTIGUOUS because the block contains the row.
+    private static func attendRef(_ q: [Float], _ k: [Float], _ v: [Float],
+                                  _ blocks: [(Int, Int)], basePos: Int,
+                                  N: Int, nH: Int, hd: Int, window: Int,
+                                  scale: Float) -> [Float] {
+        var out = [Float](repeating: 0, count: N * nH * hd)
+        for n in 0..<N {
+            let p = basePos + n
+            let t = p + 1
+            let lo = window == 0 || t <= window ? 0 : t - window
+            let b = blocks[n]
+            let hi = p >= b.0 && p < b.1 ? max(t, b.1) : t
+            for h in 0..<nH {
+                let row = attendOne(q, (n * nH + h) * hd, k, v, hd, lo, hi,
+                                    scale)
+                for i in 0..<hd { out[(n * nH + h) * hd + i] = row[i] }
+            }
+        }
+        return out
+    }
+
+    // One query row over [lo, hi): scores, softmax, weighted V -- the
+    // arithmetic attn_flash performs, in the same order.
+    private static func attendOne(_ q: [Float], _ qo: Int, _ k: [Float],
+                                  _ v: [Float], _ hd: Int, _ lo: Int,
+                                  _ hi: Int, _ scale: Float) -> [Float] {
+        var s = [Float](repeating: 0, count: hi - lo)
+        var top = -Float.greatestFiniteMagnitude
+        for t in lo..<hi {
+            s[t - lo] = dot(q, qo, k, t * hd, hd) * scale
+            top = max(top, s[t - lo])
+        }
+        var sum: Float = 0
+        for i in 0..<s.count {
+            s[i] = expf(s[i] - top)
+            sum += s[i]
+        }
+        var out = [Float](repeating: 0, count: hd)
+        for t in lo..<hi { axpy(s[t - lo] / sum, v, t * hd, &out, hd) }
+        return out
+    }
+
+    private static func dot(_ a: [Float], _ ao: Int, _ b: [Float], _ bo: Int,
+                            _ n: Int) -> Float {
+        var s: Float = 0
+        for i in 0..<n { s += a[ao + i] * b[bo + i] }
+        return s
+    }
+
+    private static func axpy(_ w: Float, _ src: [Float], _ so: Int,
+                             _ dst: inout [Float], _ n: Int) {
+        for i in 0..<n { dst[i] += w * src[so + i] }
+    }
+
+    // Worst absolute difference against the reference's own scale. An
+    // absolute bound says nothing here: the output is an average of V rows,
+    // so its magnitude follows the fixture rather than the kernel.
+    private static func relDiff(_ a: [Float], _ b: [Float]) -> Float {
+        var d: Float = 0
+        var mag: Float = 0
+        for i in 0..<min(a.count, b.count) {
+            d = max(d, abs(a[i] - b[i]))
+            mag = max(mag, abs(b[i]))
+        }
+        return mag > 0 ? d / mag : d
     }
 
     // Q2_0 batched GEMM vs per-column Q2_0.matvec on layer-0 ffn_gate (a Q2_0

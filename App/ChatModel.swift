@@ -42,11 +42,23 @@ import UniformTypeIdentifiers
         // dropping a movie means picture AND sound, and a clip whose speech
         // never reaches the model produces exactly the answer it gave for
         // the zoo video -- "I only have a series of still images".
-        func spans(_ media: Gemma4Media) async throws
-            -> [(ContentPart, SoftSpan)] {
+        func spans(_ media: Gemma4Media,
+                   onFrame: (@Sendable (VideoPeek) -> Void)? = nil)
+            async throws -> [(ContentPart, SoftSpan)] {
             var out: [(ContentPart, SoftSpan)] = []
             if isVideo {
-                out.append((.video, try await media.video(url: url)))
+                // Scaled HERE, on the thread that decoded it: the frame the
+                // encoder hands over is a source-resolution bitmap and is
+                // released the moment this returns.
+                var seen = 0
+                out.append((.video, try await media.video(url: url) {
+                    img, _ in
+                    if let onFrame,
+                       let peek = VideoPeek(index: seen, full: img) {
+                        onFrame(peek)
+                    }
+                    seen += 1
+                }))
                 // A silent clip is ordinary, and a soundtrack past the
                 // model's ceiling should cost the SOUND rather than the
                 // whole attachment.
@@ -170,6 +182,21 @@ import UniformTypeIdentifiers
     // The in-flight generation IS the busy state; no parallel flag to keep
     // in sync with it.
     var busy: Bool { genTask != nil }
+
+    // The video frame the model is looking at right now, already scaled to
+    // composer size on the thread that decoded it. ONLY FilmStrip reads it,
+    // so a new frame re-evaluates that one view and leaves the transcript
+    // alone -- which is the whole reason it lives here rather than being
+    // pushed into the composer's own state.
+    var lookingAt: VideoPeek?
+    // Whether frames are still coming. It goes false when the encode ends,
+    // which is where the ~30s prefill begins -- the strip fades the last
+    // frame out from there rather than holding it for the rest of the wait.
+    //
+    // A SIGNAL rather than the view noticing frames stopped: "nothing has
+    // arrived recently" needs a timer whose deadline races the next arrival,
+    // and the encoder already knows exactly when it is done.
+    var watching = false
     // Anything the user is WAITING THROUGH: the prompt being ingested, tokens
     // arriving, a reply still being read, the microphone open. Wider than
     // `busy`, which ends with the last token while the voice reads on.
@@ -346,7 +373,12 @@ import UniformTypeIdentifiers
         modelSupportsVision || modelSupportsSoftTokens
     }
     var canAttachAudio: Bool { modelSupportsSoftTokens }
-    var canAttachVideo: Bool { modelSupportsSoftTokens }
+    // One video per turn, so the picker stops offering them once there is
+    // one rather than accepting a file it will silently drop.
+    var canAttachVideo: Bool {
+        modelSupportsSoftTokens
+            && !attachedClips.contains { c in c.isVideo }
+    }
 
     // What the open panel accepts, so the picker offers exactly what the
     // model can take rather than letting a user choose a file that will be
@@ -1541,7 +1573,14 @@ import UniformTypeIdentifiers
     func attachClip(_ url: URL, isVideo: Bool, at offset: Int) {
         let allowed = isVideo ? canAttachVideo : canAttachAudio
         let dup = attachedClips.contains { c in c.url == url }
-        if allowed, attachedClips.count < Self.maxClips, !dup {
+        // ONE video per turn, where the general clip cap is two. A video is
+        // 32 frames through the tower and the largest single thing a turn can
+        // carry -- two of them is a minute of encoding before a token, and
+        // the composer can only show one of them being looked at anyway.
+        // Sound is unaffected: a clip plus its own soundtrack still fits.
+        let seenVideo = isVideo
+            && attachedClips.contains { c in c.isVideo }
+        if allowed, attachedClips.count < Self.maxClips, !dup, !seenVideo {
             let unique = uniqueName(url.lastPathComponent)
             attachedClips.append(ClipAttachment(
                 name: unique, url: url, isVideo: isVideo,
@@ -2077,9 +2116,16 @@ import UniformTypeIdentifiers
                 cue = .reading
             }
             softTurn(display: display, typed: typed, previews: previews,
-                     cue: cue) {
-                try await ChatModel.encode(media, images: images,
-                                           clips: clips)
+                     cue: cue) { [weak self] in
+                let out = try await ChatModel.encode(
+                    media, images: images, clips: clips) { peek in
+                        Task { @MainActor in
+                            self?.lookingAt = peek
+                            self?.watching = true
+                        }
+                    }
+                await MainActor.run { self?.watching = false }
+                return out
             }
         }
     }
@@ -2188,6 +2234,10 @@ import UniformTypeIdentifiers
                 ticker.cancel()
                 genTask = nil
                 prefilling = false
+                // The last frame holds through the prefill that follows the
+                // encode and goes when the turn does, so the composer is
+                // clear again the moment there is an answer to read.
+                lookingAt = nil
             }
         }
     }
@@ -2197,7 +2247,8 @@ import UniformTypeIdentifiers
     // then clips, matching the composer's own chip order.
     private static func encode(
         _ media: Gemma4Media, images: [ImageAttachment],
-        clips: [ClipAttachment]
+        clips: [ClipAttachment],
+        onFrame: (@Sendable (VideoPeek) -> Void)? = nil
     ) async throws -> (parts: [ContentPart], spans: [SoftSpan],
                        perImage: Int) {
         try await Task.detached(priority: .userInitiated) {
@@ -2214,7 +2265,8 @@ import UniformTypeIdentifiers
             }
             for clip in clips {
                 let t0 = Date()
-                for (part, span) in try await clip.spans(media) {
+                for (part, span) in try await clip.spans(media,
+                                                         onFrame: onFrame) {
                     parts.append(part)
                     spans.append(span)
                     ChatModel.note(part.noun, clip.name, span.rows, t0)

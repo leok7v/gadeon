@@ -262,19 +262,29 @@ extension NativeText: NSViewRepresentable {
         // The ONE writer of those attributes -- find tints and the spoken
         // sentence both land here, because each starts by clearing the whole
         // range and a second writer would erase the first.
+        // The matches are copied out before the first write for the reason the
+        // iOS twin records at length: a write here invalidates display, which
+        // can re-enter through updateNSView -> reapplyFind, and that reassigns
+        // findMatches under any live enumeration. Temporary attributes make it
+        // far less likely to reach here than the real backgrounds iOS must
+        // use, which is why the crash landed there -- not a reason to leave
+        // the same shape standing.
         private func highlightAll() {
+            let matches = findMatches
+            let active = activeIndex
+            let spoken = spokenRange
             if let lm = layoutManager, let ts = textStorage {
                 let full = NSRange(location: 0, length: ts.length)
                 lm.removeTemporaryAttribute(.backgroundColor,
                                             forCharacterRange: full)
-                if let r = spokenRange, NSMaxRange(r) <= ts.length {
+                if let r = spoken, NSMaxRange(r) <= ts.length {
                     lm.setTemporaryAttributes([.backgroundColor: spokenTint],
                                               forCharacterRange: r)
                 }
-                for (i, r) in findMatches.enumerated()
+                for (i, r) in matches.enumerated()
                 where NSMaxRange(r) <= ts.length {
                     lm.setTemporaryAttributes(
-                        [.backgroundColor: i == activeIndex
+                        [.backgroundColor: i == active
                             ? activeTint : findTint],
                         forCharacterRange: r)
                 }

@@ -115,28 +115,34 @@ public struct Gemma4Config {
         return out
     }
 
+    // One step of the walk below: a vision block is indivisible, text advances
+    // by one id.
+
+    private static func span(_ blocks: [(Int, Int)], at i: Int) -> Int {
+        let here = blocks[i]
+        return here.1 > here.0 ? here.1 - here.0 : 1
+    }
+
     // How many ids the next prefill chunk may take. A vision block reads
     // FORWARD across itself, and a key in a later chunk has not been appended
-    // yet, so a block must ride ONE chunk: a chunk that starts inside one
-    // runs to its end, and one that would reach only part way into the next
-    // stops short of it. Without blockwise vision every range is empty and
-    // this is `want`. Both engines chunk through here.
+    // yet, so a block must ride ONE chunk WHOLE. Beyond that the walk is
+    // greedy: whole blocks and single text ids until the next step would pass
+    // `want`, so a video's 32 blocks of 63 ride 128-token chunks rather than
+    // forcing one chunk per frame. The FIRST step is taken unconditionally --
+    // a block wider than `want` still goes alone, since a partial one cannot
+    // be attended at all, and the engine's capacity precondition is what says
+    // so. Without blockwise vision every range is empty and this is `want`.
+    // Both engines chunk through here. STATIC because it reads nothing but
+    // its arguments, which is what lets a test drive it without a checkpoint.
 
-    func chunkLength(_ blocks: [(Int, Int)], at i: Int, want: Int) -> Int {
-        var out = want
-        let here = blocks[i]
-        if here.1 > here.0 {
-            // EXACTLY the block, never more. The engines carry the block as
-            // one pair of bounds for the whole chunk, so a chunk holds at
-            // most one -- and never a part of one, since the tokens of a
-            // block read across all of it.
-            out = here.1 - here.0
-        } else {
-            var j = i
-            while j < i + out && blocks[j].1 == blocks[j].0 { j += 1 }
-            if j < i + out { out = j - i }
+    static func chunkLength(_ blocks: [(Int, Int)], at i: Int,
+                            want: Int) -> Int {
+        let limit = min(want, blocks.count - i)
+        var out = span(blocks, at: i)
+        while out < limit && out + span(blocks, at: i + out) <= limit {
+            out += span(blocks, at: i + out)
         }
-        return max(1, min(out, blocks.count - i))
+        return out
     }
 
     private static func sourceBidirectional(_ g: GGUF) -> String? {
@@ -173,6 +179,27 @@ public struct Gemma4Config {
         nHeadKVFull = g.int("gemma4.attention.global_head_count_kv")
             ?? i("attention.head_count_kv")
         kEqV = g.bool("gemma4.attention.k_eq_v") ?? false
+        // NOT READABLE BY UPSTREAM llama.cpp, and these two lines are most
+        // of why. Deliberate, not an oversight -- we do not publish these
+        // files to it. What it would take, recorded so a future reader does
+        // not have to re-derive it:
+        //
+        //   * `attention.key_length` means the GLOBAL head width upstream and
+        //     the SLIDING one here. A file cannot satisfy both readings, so
+        //     the emit would write the global width there and the sliding one
+        //     as `attention.key_length_swa`; a reader takes
+        //     `key_length_swa ?? key_length` and stays right for old files.
+        //   * `attention.sliding_window_pattern` is what upstream expects in
+        //     place of our `gemma4.layer_types` array, and it is what its
+        //     loader trips on first.
+        //   * Tensor NAMES are ours (`v.patch_embd`, `mm.vision`, the
+        //     `per_layer_*` set); upstream's gemma path expects its own
+        //     spelling, and an encoder-free vision block has no counterpart
+        //     there at all.
+        //
+        // The block TYPES are already standard (Q4_0 / Q8_0 / BF16), unlike
+        // the ternary Q2_0 lineage -- so this is a metadata and naming job,
+        // not a format one, and it costs no re-quantization.
         headDimSliding = i("attention.key_length")
         headDimFull = i("attention.global_key_length")
         eps = f("attention.layer_norm_rms_epsilon")

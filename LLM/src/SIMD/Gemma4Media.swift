@@ -150,14 +150,30 @@ public final class Gemma4Media: @unchecked Sendable {
     // frame carries its own mm:ss stamp and its own begin/end pair, which is
     // how the model is told when it happened.
     public func video(frames: [CGImage], seconds: [Double]) throws -> SoftSpan {
-        let iw = try Gemma4VisionWire(model.gguf)
         let film = try Gemma4VideoWire(model.gguf)
+        let encode = try frameEncoder(film)
+        var strip = VideoStrip(try Gemma4VisionWire(model.gguf), film,
+                               tokenizer)
+        var i = 0
+        while i < frames.count, let got = encode(frames[i]) {
+            strip.add(got, at: seconds[i])
+            i += 1
+        }
+        if i < frames.count {
+            throw Gemma4MediaError(description:
+                "Frame \(i) of that video could not be read.")
+        }
+        return strip.span()
+    }
+
+    // One frame to its soft rows, with the tower built ONCE: a construction
+    // prewarms a Metal context and a CPU twin, which per frame would dominate
+    // the encode. An encoder-free checkpoint embeds the merged 48-pixel block
+    // itself, so it has no tower to build and cuts at the frame's own budget.
+    private func frameEncoder(_ film: Gemma4VideoWire)
+        throws -> (CGImage) -> (proj: [Float], count: Int)? {
         let patch = try Gemma4Patchify(model)
         let budget = patch.patchBudget(film.softTokensPerFrame)
-        // Built ONCE, whichever arm: a tower construction prewarms a Metal
-        // context and a CPU twin, which per frame would dominate the encode.
-        // An encoder-free checkpoint embeds the merged 48-pixel block itself,
-        // so it has no tower to build and cuts at the frame's own budget.
         let encode: (CGImage) -> (proj: [Float], count: Int)?
         if model.hasVisionTower {
             let vit = try visionTower()
@@ -178,23 +194,40 @@ public final class Gemma4Media: @unchecked Sendable {
                     }
             }
         }
+        return encode
+    }
+
+    // The turn a video becomes, accumulated frame by frame: each one carries
+    // its own mm:ss stamp and its own begin/end pair, which is how the model
+    // is told when it happened. Only the SOFT ROWS are kept, never the
+    // pixels, which is what lets the streaming form hold one frame at a time.
+    private struct VideoStrip {
+        let iw: Gemma4VisionWire
+        let film: Gemma4VideoWire
+        let tokenizer: GemmaTokenizer
         var ids: [Int32] = []
         var feats: [Float] = []
-        var i = 0
-        while i < frames.count, let got = encode(frames[i]) {
+
+        init(_ iw: Gemma4VisionWire, _ film: Gemma4VideoWire,
+             _ tokenizer: GemmaTokenizer) {
+            self.iw = iw
+            self.film = film
+            self.tokenizer = tokenizer
+        }
+
+        mutating func add(_ got: (proj: [Float], count: Int),
+                          at seconds: Double) {
             feats.append(contentsOf: got.proj)
             ids.append(contentsOf: tokenizer.encode(
-                VideoFrames.stamp(seconds[i]) + " ", addSpecial: false))
+                VideoFrames.stamp(seconds) + " ", addSpecial: false))
             ids.append(contentsOf: SoftSpan.bracket(
                 begin: iw.boi, placeholder: film.token, end: iw.eoi,
                 count: got.count))
-            i += 1
         }
-        if i < frames.count {
-            throw Gemma4MediaError(description:
-                "Frame \(i) of that video could not be read.")
+
+        func span() -> SoftSpan {
+            SoftSpan(placeholder: film.token, ids: ids, features: feats)
         }
-        return SoftSpan(placeholder: film.token, ids: ids, features: feats)
     }
 
     // ---- from a file ----------------------------------------------------
@@ -211,10 +244,35 @@ public final class Gemma4Media: @unchecked Sendable {
     // The audio track of a video is NOT included here: a caller that wants
     // both attaches both, which is also what lets it put them in its own
     // order.
-    public func video(url: URL) async throws -> SoftSpan {
+    // STREAMED, one frame at a time: a frame is decoded at the source
+    // resolution, so a 4K clip is ~33 MB each and holding all 32 is a
+    // gigabyte -- beside a resident 12B on a phone. Encoding as they arrive
+    // keeps ONE alive, and only the soft rows survive the loop.
+    //
+    // `onFrame` sees each frame at the moment it is handed to the model, so a
+    // caller can show what is being looked at. It is called on whatever
+    // context this runs on, never the main actor, and the frame it is given
+    // is released as soon as it returns -- a caller that wants to keep one
+    // takes its own scaled copy.
+    public func video(url: URL,
+                      onFrame: ((CGImage, Double) -> Void)? = nil)
+        async throws -> SoftSpan {
         let film = try Gemma4VideoWire(model.gguf)
-        let shot = try await VideoFrames.sample(url: url, count: film.frames)
-        return try video(frames: shot.images, seconds: shot.seconds)
+        let encode = try frameEncoder(film)
+        var strip = VideoStrip(try Gemma4VisionWire(model.gguf), film,
+                               tokenizer)
+        var read = 0
+        try await VideoFrames.stream(url: url, count: film.frames) { img, at in
+            if let got = encode(img) {
+                onFrame?(img, at)
+                strip.add(got, at: at)
+                read += 1
+            } else {
+                throw Gemma4MediaError(description:
+                    "Frame \(read) of that video could not be read.")
+            }
+        }
+        return strip.span()
     }
 
     // What a microphone must capture at for this model's frontend, so a
