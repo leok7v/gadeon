@@ -14,11 +14,26 @@ struct PromptEditor: UIViewRepresentable {
     var disabled: Bool
     var minLines: Int
     var maxLines: Int
+    // The app's text size, already carrying this device's Dynamic Type ratio.
+    // The base below is therefore the UNSCALED body size: preferredFont has
+    // the system's own category baked in, and multiplying that by a ratio
+    // derived from the same category would count it twice.
+    var scale: CGFloat = 1
     var onSubmit: () -> Void
     // Symbol parity with macOS (the shared Composer passes it). Unused on iOS:
     // the field refuses drops (willBecomeEditableForDrop -> .no) and iPad
     // in-field drag-drop is a won't-do; the chat handler owns [+]/Photos.
     var onDropFiles: ([URL]) -> Void = { _ in }
+
+    // The body point size at a given scale, shared with the SwiftUI
+    // placeholder drawn over the field so the two cannot drift apart.
+    static func points(_ scale: CGFloat) -> CGFloat {
+        UIFont.labelFontSize * scale
+    }
+
+    private var font: UIFont {
+        UIFont.systemFont(ofSize: PromptEditor.points(scale))
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -28,7 +43,7 @@ struct PromptEditor: UIViewRepresentable {
         // Refuse drops on the text view so the chat's drop handler owns them
         // (an @reference at the caret) rather than the field inserting content.
         tv.textDropDelegate = context.coordinator
-        tv.font = UIFont.preferredFont(forTextStyle: .body)
+        tv.font = font
         tv.backgroundColor = .clear
         tv.textContainerInset = UIEdgeInsets(
             top: 2, left: 0, bottom: 2, right: 0)
@@ -40,6 +55,7 @@ struct PromptEditor: UIViewRepresentable {
 
     func updateUIView(_ tv: UITextView, context: Context) {
         context.coordinator.parent = self
+        if tv.font != font { tv.font = font }
         // On an external change (send/clear, or a dropped reference) put the
         // caret where the model wants it; the compare keeps local typing from
         // resetting it each keystroke.
@@ -78,7 +94,7 @@ struct PromptEditor: UIViewRepresentable {
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView,
                       context: Context) -> CGSize? {
-        let font = uiView.font ?? UIFont.preferredFont(forTextStyle: .body)
+        let font = uiView.font ?? self.font
         let width = proposal.width ?? 300
         let inset = uiView.textContainerInset.top +
             uiView.textContainerInset.bottom

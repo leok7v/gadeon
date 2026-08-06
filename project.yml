@@ -168,5 +168,14 @@ schemes:
         - variable: ANE_CACHE_MODE
           value: disable
           isEnabled: false
+        - variable: GADEON_LOG_MEM
+          value: "1"
+          isEnabled: false
+        - variable: GADEON_LOG_BEAT
+          value: "1"
+          isEnabled: false
+        - variable: GADEON_LOG_NO_HANG
+          value: "1"
+          isEnabled: false
     archive:
       config: Release

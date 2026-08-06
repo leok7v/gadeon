@@ -678,7 +678,7 @@ public final class Gemma4MetalEngine {
             FileHandle.standardError.write(Data(
                 "chunk n=\(n) pos=\(basePos) gpu=\(Int(gpu))ms\n".utf8))
         }
-        Diag.memory?("prefill chunk n=\(n) pos=\(basePos)")
+        Diag.memoryDetail?("prefill chunk n=\(n) pos=\(basePos)")
     }
 
     // The probed rows of one chunk buffer, for whoever set `onLayer`.
@@ -1145,7 +1145,22 @@ public final class Gemma4MetalBackend: AgentBackend, @unchecked Sendable {
     public func requestStop() { engine.requestStop() }
     public func shouldStop() -> Bool { engine.shouldStop() }
 
-    public func supportsSoftTokens() async -> Bool { true }
+    // BOTH towers -- vision and audio -- reach the GPU through MetalEnc.gemm,
+    // which encodes simdgroup-matrix kernels. On a GPU without matrix units
+    // building one of those does not return an error, it takes the shader
+    // compiler service down (XPC_ERROR_CONNECTION_INTERRUPTED, four retries,
+    // then the pipeline build traps). So there is no attachment path at all
+    // there: report none, and the app offers neither image, nor video, nor
+    // the microphone. TEXT is unaffected -- a plain turn carries no soft
+    // tokens, so ChatModel.send falls to its text path.
+    //
+    // The axis is the GPU generation, not RAM. Apple7 is A14 / M1, so this
+    // costs the whole A13 line: iPhone 11, 11 Pro, 11 Pro Max and SE 2nd
+    // generation -- three of which have 4 GB.
+    //
+    // MetalBackend gates its own supportsVision on the same flag, for the
+    // same reason. This is that guard, one backend over.
+    public func supportsSoftTokens() async -> Bool { ctx.matrixUnits }
 
     public func extendSoft(_ ids: [Int32],
                            spans: [SoftSpan]) async throws -> Int32 {

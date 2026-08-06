@@ -1,4 +1,26 @@
 import Foundation
+import Metal
+
+// Whether this GPU is A14 / M1 or newer (Metal's apple7 family), and the best
+// available proxy for the NEURAL ENGINE generation, which no API names: the
+// A13's H12 ANE cannot compile the 0.8B decode graph at all, and A13 is
+// exactly what fails apple7. The same flag decides whether the gemma towers
+// can run, for an unrelated reason -- see MetalContext.matrixUnits.
+//
+// Computed once. `all` is read on every picker render, and creating a device
+// to ask is not free.
+let modernGPU: Bool = {
+    MTLCreateSystemDefaultDevice()?.supportsFamily(.apple7) ?? false
+}()
+
+// Installed RAM in GiB, rounded to nearest: iOS reports a little under the
+// marketing size, so a 3 GB phone answers 2.67. ONE definition, so the model
+// tiers and the speech floor cannot come to different conclusions about what
+// a device is.
+
+var installedGB: Int {
+    Int((ProcessInfo.processInfo.physicalMemory + (1 << 29)) >> 30)
+}
 
 extension Bundle {
     // On-device store for downloaded sets; a set lands at models/<name>/<sha>/
@@ -36,15 +58,20 @@ extension Bundle {
 // demand from the Hub (ModelCatalog); the bundle ships no weights.
 enum Models {
     // Availability by installed RAM, rounded to the nearest GiB (iOS reports a
-    // little under the marketing size). iOS: >=4GB adds the 0.8B, >=6GB the
-    // 2B, the 1.7B is offered on every device, and exactly one gemma -- E4B at
-    // >=8GB, E2B below. macOS: 0.8B/2B/4B, plus 9B and the 27B at >=16GB, and
-    // both gemmas on anything.
+    // little under the marketing size). iOS: >=4GB AND an A14 adds the 0.8B,
+    // >=6GB the 2B, the 1.7B is offered on every device, and exactly one
+    // gemma -- E4B at >=8GB, E2B below. macOS: 0.8B/2B/4B, plus 9B and the 27B
+    // at >=16GB, and both gemmas on anything.
     static var all: [String] {
-        let gb = (ProcessInfo.processInfo.physicalMemory + (1 << 29)) >> 30
+        let gb = installedGB
         var list: [String] = []
         if isOS {
-            if gb >= 4 { list.append("Qwen3.5-0.8B") }
+            // RAM alone is NOT the test here. An iPhone 11 Pro Max is an A13
+            // with 4 GB, so it clears the tier -- and its H12 Neural Engine
+            // cannot compile this model's decode graph at all, so offering it
+            // buys a multi-hundred-MB download and then "could not be
+            // prepared", twice, with Try Again unable to help.
+            if gb >= 4 && modernGPU { list.append("Qwen3.5-0.8B") }
             if gb >= 6 { list.append("QwenPaw-Flash-2B") }
             // EXACTLY ONE gemma per device, so the picker never offers a
             // choice between two sizes of the same model. E4B's 3.8 GB of
@@ -108,10 +135,11 @@ enum Models {
         return list
     }
 
-    // False when a device is offered no model at all: the app shows a
-    // not-supported notice and downloads nothing. Every device reached today
-    // gets at least the GPU-run 1.7B, so this is a backstop for a future tier
-    // that ships nothing rather than a live gate.
+    // False when a device is offered no model at all, in which case nothing is
+    // downloaded. A backstop for a future tier that ships nothing rather than
+    // a live gate: the App Store cannot offer the app below iOS 18, which
+    // needs an A12, and every device that clears that bar gets at least the
+    // GPU-run 1.7B.
     static var supported: Bool { !all.isEmpty }
 
     // The base Neural Engine model, and the identity the tiling / sample-prompt

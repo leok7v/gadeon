@@ -25,21 +25,22 @@ struct AttachButton: View {
     // A PhotosPicker placed directly as a Menu item never presents (SwiftUI
     // only renders plain buttons in a menu), so a menu Button arms the picker
     // through the .photosPicker(isPresented:) modifier instead.
+    // Documents ride every model, so the button is never withdrawn -- only
+    // the CHOICE is. With no towers there is nothing to pick between, and a
+    // one-item menu is a worse affordance than the action itself, so it opens
+    // the file panel directly.
     var body: some View {
-        Menu {
-            Button(model.canAttachVideo ? "Photos & Videos"
-                                        : "Photo Library") {
-                showPhotos = true
+        Group {
+            if model.canAttachImages {
+                Menu { pickers } label: { glyph }
+            } else {
+                Button { showImporter = true } label: { glyph }
             }
-            Button("Files") { showImporter = true }
-        } label: {
-            Image(systemName: model.attachGlyph)
-                .frame(width: 22, height: 22)
         }
         .buttonStyle(.plain)
         .foregroundStyle(model.hasAttachments ? Color.accentColor
                                               : Color.secondary)
-        .disabled(model.busy || !model.canAttachImages)
+        .disabled(model.busy)
         .photosPicker(isPresented: $showPhotos, selection: $photos,
                       maxSelectionCount: ChatModel.maxImages,
                       matching: model.canAttachVideo
@@ -52,6 +53,20 @@ struct AttachButton: View {
             }
         }
         .onChange(of: photos) { _, items in load(items) }
+    }
+
+    @ViewBuilder
+    private var pickers: some View {
+        Button(model.canAttachVideo ? "Photos & Videos"
+                                    : "Photo Library") {
+            showPhotos = true
+        }
+        Button("Files") { showImporter = true }
+    }
+
+    private var glyph: some View {
+        Image(systemName: model.attachGlyph)
+            .frame(width: 22, height: 22)
     }
 
     // Picked library items -> image Data -> the model's pending attachments.

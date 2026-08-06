@@ -9,20 +9,20 @@ struct DisclaimerView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Before you begin")
-                        .font(.title2).bold()
+                        .appFont(.title2).bold()
                     Text("Gadeon runs a small language model entirely on this "
                         + "device (Apple Neural Engine). Your conversations "
                         + "stay local and are never sent to any server. "
                         + "Optional lookups (Wikipedia, web search; see "
                         + "Settings) download public data from the web.")
-                    Text("Treat every response critically.").font(.headline)
+                    Text("Treat every response critically.").appFont(.headline)
                     Text("A language model predicts plausible text; it does not "
                         + "verify facts and has no understanding of truth. Output "
                         + "may be confident and still be wrong, incomplete, or "
                         + "biased. Check it against reliable sources, and do not "
                         + "use it as the basis for legal, medical, financial, or "
                         + "safety decisions.")
-                    Text("No warranty.").font(.headline)
+                    Text("No warranty.").appFont(.headline)
                     Text("This software is provided \"as is\", without warranty of "
                         + "any kind, and is used at your own risk.")
                     Text("By continuing you acknowledge these terms.")

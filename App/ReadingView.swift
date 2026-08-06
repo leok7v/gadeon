@@ -31,7 +31,7 @@ struct ReadingView: View {
     private var header: some View {
         HStack {
             Text(title.isEmpty ? "Transcript" : title)
-                .font(.headline)
+                .appFont(.headline)
                 .lineLimit(1)
             Spacer()
             Button("Done", action: onClose)
@@ -53,11 +53,11 @@ struct ReadingView: View {
                 .onChange(of: query) { _, q in runFind(q) }
             if matchCount > 0 {
                 Text("\(currentMatch)/\(matchCount)")
-                    .font(.caption.monospacedDigit())
+                    .appFont(.caption).monospacedDigit()
                     .foregroundStyle(.secondary)
             } else if !query.isEmpty {
                 Text("none")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             }
             Button { currentMatch = find.findPrevious() } label: {

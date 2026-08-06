@@ -19,6 +19,9 @@ public final class Diag: @unchecked Sendable {
     private let lock = NSLock()
     private let handle: FileHandle?
     private let stamp: DateFormatter
+    // Where this run is writing, so the debug view can offer the file itself
+    // instead of a path a phone user cannot act on anyway.
+    public let path: String
 
     private init() {
         let f = DateFormatter()
@@ -28,6 +31,7 @@ public final class Diag: @unchecked Sendable {
         let url = Diag.startRun(folder: "diag.log")
         FileManager.default.createFile(atPath: url.path, contents: Data())
         handle = try? FileHandle(forWritingTo: url)
+        path = url.path
     }
 
     // A memory-footprint reporter, filled in by the App layer (which owns the
@@ -36,6 +40,14 @@ public final class Diag: @unchecked Sendable {
     // uses. nil in the CLI and in tests, where there is nothing to report to.
     nonisolated(unsafe)
     public static var memory: (@Sendable (String) -> Void)?
+
+    // The fine-grained twin of `memory`: reports that draw a CURVE (one per
+    // prefill chunk, one per downloaded file) rather than mark a moment.
+    // Split at the CALL SITE, so the character of a report is declared by the
+    // code that knows it instead of guessed from its wording by whoever wires
+    // the hook. Left nil when the channel is off, which costs nothing.
+    nonisolated(unsafe)
+    public static var memoryDetail: (@Sendable (String) -> Void)?
 
     // The caller's file:line comes free via the default arguments, captured at
     // the call site (a thin forwarder passes them through).

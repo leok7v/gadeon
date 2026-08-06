@@ -22,6 +22,23 @@ struct SettingsView: View {
     // never eats half the pane).
     @ScaledMetric(relativeTo: .body) private var railWidth: CGFloat = 180
     @ScaledMetric(relativeTo: .body) private var railIcon: CGFloat = 20
+    // The text-size notch being chosen, applied only on the way out, so the
+    // pane renders throughout at the size it was opened at. Live would reflow
+    // the surface holding the slider and show nothing for it: Settings
+    // replaces the transcript, so there is no transcript here to preview.
+    // The keyboard commands are live instead, since there the chat is in view.
+    //
+    // nil until the widget is touched, which is also what keeps a visit that
+    // never went near it from writing the setting back.
+    @State private var draftZoom: Int?
+
+    private var notch: Int { draftZoom ?? model.textZoom }
+    private var draftScale: CGFloat { 1 + CGFloat(notch) / 10 }
+
+    private func dismiss() {
+        if let draftZoom { model.textZoom = draftZoom }
+        onClose()
+    }
 
     enum Category: String, CaseIterable, Identifiable {
         case systemPrompt = "System Prompt"
@@ -91,11 +108,7 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done", action: onClose)
-                }
-            }
+            .toolbar { DoneToolbar(action: dismiss) }
         }
     }
 
@@ -104,13 +117,10 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             HStack {
                 Label("Settings", systemImage: "gearshape")
-                    .font(.headline)
+                    .appFont(.headline)
                 Spacer()
-                Button("Done", action: onClose)
-                    .keyboardShortcut(.defaultAction)
-                Button("", action: onClose)
-                    .keyboardShortcut(.cancelAction)
-                    .hidden()
+                DoneButton(action: dismiss)
+                EscapeToClose(action: dismiss)
             }
             .padding(12)
             Divider()
@@ -140,7 +150,9 @@ struct SettingsView: View {
             Spacer()
         }
         .padding(12)
-        .frame(width: min(railWidth, 300))
+        // A container holding text follows the text, or bigger labels only
+        // buy themselves more hyphenation in the same width.
+        .frame(width: min(railWidth, 300) * model.textScale)
     }
 
     private func railRow(_ item: Category) -> some View {
@@ -209,12 +221,12 @@ struct SettingsView: View {
             HStack(spacing: 6) {
                 Text(item.name).bold()
                 Text(item.terms)
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(.secondary)
             }
-            Text(item.author).font(.callout)
+            Text(item.author).appFont(.callout)
             if let link = item.link {
-                Link(item.source, destination: link).font(.caption)
+                Link(item.source, destination: link).appFont(.caption)
             }
             explain(item.changed)
         }
@@ -228,7 +240,8 @@ struct SettingsView: View {
         DisclosureGroup(name) {
             ScrollView {
                 Text(text)
-                    .font(.system(.caption2, design: .monospaced))
+                    .appFont(.caption2)
+                    .monospaced()
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -291,7 +304,7 @@ struct SettingsView: View {
             explain("Prepended to every conversation to steer tone and "
                 + "behaviour. Takes effect on the next New Chat.")
             TextEditor(text: $model.systemPrompt)
-                .font(.body)
+                .appFont(.body)
                 .frame(minHeight: 160)
                 .padding(6)
                 .overlay {
@@ -334,16 +347,16 @@ struct SettingsView: View {
         let active = name == model.modelName
         let bytes = ModelCatalog.source(name)?.bytes ?? 0
         return HStack(spacing: 8) {
-            Text(name)
+            Text(Models.display(name))
             if active {
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.caption)
+                    .appFont(.caption)
                     .foregroundStyle(Color.accentColor)
             }
             Spacer()
             Text(ByteCountFormatter.string(fromByteCount: bytes,
                                            countStyle: .file))
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.secondary)
             rowButton(name, downloaded: downloaded, active: active)
         }
@@ -400,20 +413,92 @@ struct SettingsView: View {
     private var viewPane: some View {
         VStack(alignment: .leading, spacing: 10) {
             title("View")
-            Toggle("Status line", isOn: $model.statusLine)
+            Toggle("Status Bar", isOn: $model.statusLine)
                 .toggleStyle(.switch)
-            explain("A line under the composer with the turn's context size, "
-                + "token counts, memory and speed.")
+            explain("Context used, speed and memory, under the message box.")
             Toggle("Markdown", isOn: $model.renderMarkdown)
                 .toggleStyle(.switch)
-            explain("Render replies and reasoning as formatted Markdown "
-                + "(headings, lists, code, tables). Off shows plain text.")
+            explain("Show replies with headings, lists, code and tables.")
             Toggle("Always show sample prompts", isOn: $model.alwaysShowSamples)
                 .toggleStyle(.switch)
-            explain("Sample prompts are tappable examples on an empty chat. "
-                + "They show until you have tried each one; turn this on to "
-                + "always show them.")
+            explain("Keep the examples on an empty chat after you have tried "
+                + "them all.")
+            Text("Zoom")
+            textSizeRow
         }
+    }
+
+    // LAST in the pane, because the paragraph under the slider is the live
+    // sample and is therefore the one thing in Settings that moves while the
+    // slider does. With nothing below it, its reflow has nothing to push.
+    //
+    // Every part of the control itself is sized off something that does not
+    // move: a control that resizes under the finger dragging it cannot be
+    // aimed. Reset Zoom sits in the same centred column as the slider, which
+    // lands it exactly under the middle detent it returns to.
+    private var textSizeRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text("a").font(.system(size: 11))
+                VStack(spacing: 3) {
+                    Slider(value: zoomNotch,
+                           in: -Double(ChatModel.zoomLimit)
+                               ... Double(ChatModel.zoomLimit),
+                           step: 1)
+                    detents
+                    Button("Reset Zoom") { draftZoom = 0 }
+                        .disabled(notch == 0)
+                }
+                .frame(maxWidth: 220)
+                Text("A").font(.system(size: 21))
+                Spacer()
+            }
+            sample
+        }
+    }
+
+    private var zoomNotch: Binding<Double> {
+        Binding(get: { Double(notch) },
+                set: { value in
+                    draftZoom = ChatModel.clampZoom(Int(value))
+                })
+    }
+
+    // Five detents with the middle one marked. The resting size has to be
+    // findable by eye rather than by counting notches in from an end.
+    // Spacers BETWEEN the marks, so the first and last land on the ends of
+    // the travel. Giving each mark an equal slice instead centres it in that
+    // slice, which puts the outer pair a tenth of the track in from the
+    // positions they are supposed to be naming.
+    private var detents: some View {
+        HStack(spacing: 0) {
+            ForEach(-ChatModel.zoomLimit ... ChatModel.zoomLimit,
+                    id: \.self) { notch in
+                if notch > -ChatModel.zoomLimit { Spacer(minLength: 0) }
+                Capsule()
+                    .fill(notch == 0 ? Color.accentColor : Color.secondary)
+                    .frame(width: notch == 0 ? 2 : 1,
+                           height: notch == 0 ? 9 : 5)
+            }
+        }
+        // The thumb cannot reach the ends of the track, so the marks must not
+        // either: inset by its radius, or the outer pair sits a thumb's width
+        // away from the value it names.
+        .padding(.horizontal, isOS ? 13 : 5)
+        .allowsHitTesting(false)
+    }
+
+    // The ONE thing in Settings drawn at the draft size rather than the
+    // committed one. It has to be: Settings replaces the transcript instead of
+    // sitting beside it, so without this nothing on screen would show what the
+    // slider just did. Its own words are the explanation, which is why there
+    // is no separate specimen line to go stale beside it.
+    private var sample: some View {
+        Text("Text and controls throughout the app. This adjusts your "
+            + "device's own text size rather than replacing it.")
+            .font(appTextFont(.callout, draftScale))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var miscPane: some View {
@@ -465,7 +550,7 @@ struct SettingsView: View {
                 + "an article on this device; nothing you type is sent "
                 + "anywhere. The app only downloads the matched article and "
                 + "today's headlines from wikipedia.org.")
-            Toggle("Web access", isOn: Binding(
+            Toggle("Web Access", isOn: Binding(
                 get: { model.webAccess },
                 set: { on in
                     model.setAccess(wikipedia: model.wikipedia, web: on)
@@ -489,9 +574,13 @@ struct SettingsView: View {
                 + "Off deletes immediately.")
             if !ConversationStore.shared.list.isEmpty {
                 Divider().padding(.vertical, 4)
+                // Off while a turn runs, like the sidebar trash: the live
+                // conversation is one of the saved ones being cleared, and
+                // the turn in flight commits it straight back.
                 Button(role: .destructive) { confirmClear = true } label: {
                     Label("Clear all conversations", systemImage: "trash")
                 }
+                .disabled(model.busy)
                 explain("Delete every saved conversation from this device.")
             }
             if optionDown {
@@ -512,13 +601,13 @@ struct SettingsView: View {
     @ViewBuilder
     private func title(_ text: String) -> some View {
         if !isOS {
-            Text(text).font(.title3).bold()
+            Text(text).appFont(.title3).bold()
         }
     }
 
     private func explain(_ text: String) -> some View {
         Text(text)
-            .font(.callout)
+            .appFont(.callout)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }

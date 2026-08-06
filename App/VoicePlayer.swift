@@ -81,11 +81,19 @@ final class VoicePlayer: @unchecked Sendable {
     // Told the tag of whatever is audible now, or nil for silence.
     var onSpeaking: (@Sendable (Int?) -> Void)?
 
+    // Speech is a 4 GB feature. The KittenTTS weights and the audio engine are
+    // more than a 3 GB phone has beside a resident model: an iPhone SE 2nd
+    // generation running E2B is jetsammed by them. Refusing to build here is
+    // the whole gate -- `VoiceSession.available` is `player != nil`, so the
+    // Settings pane and the composer's speaker both disappear off this one
+    // decision rather than each testing the memory themselves.
+    static let speechFloorGB = 4
+
     init?() {
         let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                 sampleRate: Double(Speech.sampleRate),
                                 channels: 1, interleaved: false)
-        if let fmt {
+        if let fmt, installedGB >= VoicePlayer.speechFloorGB {
             format = fmt
             engine.attach(node)
             engine.connect(node, to: engine.mainMixerNode, format: fmt)

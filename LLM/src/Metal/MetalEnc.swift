@@ -162,6 +162,16 @@ struct MetalEnc {
         default:
             fatalError("MetalEnc.gemm: no kernel for \(w.type) (\(w.name))")
         }
+        // Every kernel above is a simdgroup-matrix one, and prewarm skips
+        // exactly those on a GPU that cannot build them -- so arriving here
+        // without matrix units means a capability gate upstream let an
+        // attachment through. Said plainly HERE, because the alternative is
+        // the `try!` below dying inside the Metal compiler with nothing in
+        // the message pointing at the cause.
+        precondition(ctx.matrixUnits,
+                     "MetalEnc.gemm: \(name) needs simdgroup matrix units; "
+                     + "this GPU has none, so its caller should have been "
+                     + "gated (see Gemma4MetalBackend.supportsSoftTokens)")
         let tgmem = MetalEnc.f16Tiles ? (fullTile ? 6144 : 8192) : 12288
         push(name)
         let pipe = try! ctx.pipeline(name)
@@ -847,6 +857,15 @@ struct MetalEnc {
         // The bounds-checked spill path reuses shmem as f32 temp (8192 B); a
         // fully in-bounds tile needs only the half tiles (6144 B).
         let fullTile = M % 64 == 0 && N % 32 == 0
+        // As in `gemm`: a simdgroup-matrix kernel, so prewarm skips it where
+        // the hardware cannot build it. The guard is three frames up in
+        // MetalBackend.extendVision, which refuses without matrix units
+        // before MetalViT is ever constructed -- said here because that is
+        // far enough away to be edited out without anyone noticing.
+        precondition(ctx.matrixUnits,
+                     "MetalEnc.f16Gemm: f16w_gemm_mm needs simdgroup matrix "
+                     + "units; this GPU has none, so MetalViT should never "
+                     + "have been built (see MetalBackend.supportsVision)")
         push("f16w_gemm_mm")
         let pipe = try! ctx.pipeline("f16w_gemm_mm")
         e.setComputePipelineState(pipe)

@@ -26,10 +26,28 @@ struct Composer: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     private var touch: CGFloat { sizeClass == .compact ? 1.35 : 1.0 }
 
-    private var controlSize: CGFloat { baseControl * touch }
-    private var labelSize: CGFloat { baseLabel * touch }
-    private var slotSize: CGFloat { baseSlot * touch }
-    private var sendSize: CGFloat { baseSend * touch }
+    // The reach allowance times the app's text-size setting. The metrics above
+    // carry the platform's Dynamic Type, which moves on iOS and is flat on
+    // macOS, so this is what sizes the controls there.
+    private var scale: CGFloat { touch * model.textScale }
+
+    private var controlSize: CGFloat { baseControl * scale }
+    private var labelSize: CGFloat { baseLabel * scale }
+    private var slotSize: CGFloat { baseSlot * scale }
+    private var sendSize: CGFloat { baseSend * scale }
+
+    // The AppKit / UIKit editor builds its font from a point size, so it is
+    // the one thing in the card that cannot read its size off the
+    // environment. It gets handed the same factor as everything else.
+    @ScaledMetric(relativeTo: .body) private var editorType: CGFloat = 1
+    private var editorScale: CGFloat { editorType * model.textScale }
+
+    // The placeholder sits ON the editor, so it has to be sized off the same
+    // number rather than off .body, which would drift from it at every stop
+    // but the middle one.
+    private var editorFont: Font {
+        .system(size: PromptEditor.points(editorScale))
+    }
 
     // Ten lines ~ a third of a default window. A hard line cap, not a
     // GeometryReader fraction (which re-measures on every resize and makes the
@@ -51,9 +69,17 @@ struct Composer: View {
         .onAppear {
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(250))
-                focused = true
+                if focusOnAppear { focused = true }
             }
         }
+    }
+
+    // Focus raises the soft keyboard, which takes half a phone -- and on an
+    // empty chat the sample cards ARE the invitation, so opening ready to
+    // type covers the thing the screen is there to offer. macOS keeps the
+    // focus unconditionally: no keyboard rises there, so it costs nothing.
+    private var focusOnAppear: Bool {
+        !isOS || !model.showSamples
     }
 
     private var card: some View {
@@ -69,12 +95,13 @@ struct Composer: View {
             PromptEditor(text: $model.input, focused: $focused,
                          caret: $model.caret, disabled: isOS && model.busy,
                          minLines: 2, maxLines: Composer.maxLines,
+                         scale: editorScale,
                          onSubmit: submitReturn,
                          onDropFiles: { model.handleDrop($0, at: model.caret) })
                 .overlay(alignment: .topLeading) {
                     if model.input.isEmpty {
                         Text("Write a message…")
-                            .font(.body)
+                            .font(editorFont)
                             .foregroundStyle(.tertiary)
                             .padding(.top, 2)
                             .allowsHitTesting(false)
@@ -257,7 +284,12 @@ struct Composer: View {
             // exactly the person reaching for "stop reading to me" and "close
             // the mic". A recording control that hides itself is also how a
             // microphone gets left open.
-            speakerButton
+            // HIDDEN, not disabled, where the device cannot speak at all: the
+            // house rule keeps a dead control visible so its tooltip can say
+            // why, but that is for a state which can change, and on a 3 GB
+            // phone this one never will. Settings drops its Voice pane on the
+            // same flag.
+            if model.speech.available { speakerButton }
             micButton
             sendButton
         }
@@ -287,12 +319,7 @@ struct Composer: View {
     private var speakerButton: some View {
         let on = model.speech.enabled
         let live = model.speech.speaking
-        let tip: String
-        if !model.speech.available {
-            tip = "Speech is unavailable in this build"
-        } else {
-            tip = on ? "Replies are spoken" : "Speak replies"
-        }
+        let tip = on ? "Replies are spoken" : "Speak replies"
         return Button { model.speech.enabled.toggle() } label: {
             Image(systemName: live ? "speaker.wave.2.fill"
                                    : (on ? "speaker.wave.2" : "speaker.slash"))
@@ -300,7 +327,6 @@ struct Composer: View {
                 .frame(width: slotSize, height: slotSize)
         }
         .buttonStyle(.plain)
-        .disabled(!model.speech.available)
         .help(tip)
     }
 
@@ -390,7 +416,7 @@ struct Composer: View {
             }
             .buttonStyle(.plain)
         }
-        .font(.caption)
+        .appFont(.caption)
         .foregroundStyle(.secondary)
     }
 
@@ -420,7 +446,7 @@ struct Composer: View {
             Text(text).lineLimit(2)
             Spacer()
         }
-        .font(.caption)
+        .appFont(.caption)
         .foregroundStyle(.orange)
     }
 
@@ -437,7 +463,7 @@ struct Composer: View {
             }
             .buttonStyle(.plain)
         }
-        .font(.caption)
+        .appFont(.caption)
         .foregroundStyle(.secondary)
     }
 
@@ -453,7 +479,7 @@ struct Composer: View {
             }
             .buttonStyle(.plain)
         }
-        .font(.caption)
+        .appFont(.caption)
         .foregroundStyle(.secondary)
     }
 
@@ -521,7 +547,7 @@ struct Composer: View {
     private var footnote: some View {
         let quiet = model.listening || model.speech.speaking
         return Text(noteText)
-            .font(.caption2)
+            .appFont(.caption2)
             .foregroundStyle(quiet ? .secondary : .tertiary)
             .frame(maxWidth: .infinity)
             .animation(.easeInOut(duration: 0.2), value: quiet)

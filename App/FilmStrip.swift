@@ -89,10 +89,12 @@ struct FilmStrip: View {
     // instead -- whatever was fading in becomes the base -- so the only thing
     // that ever schedules work is an arrival, and there is nothing to race.
     //
-    // The duration is the gap itself, so each dissolve spans the whole
-    // interval between frames and the pair is always overlapping rather than
-    // resting on one image. Clamped: the first gap is unknown, and one slow
-    // frame should not leave the picture mid-fade for a second and a half.
+    // The dissolve takes a FRACTION of the gap, so every frame then rests
+    // alone for the remainder of it. One spanning the whole interval never
+    // lets it: the pair is superimposed at every instant, and two moments of
+    // one clip half a second apart read as two copies of the video playing
+    // over each other. Clamped both ways -- the first gap is unknown, and a
+    // slow frame must not stretch its dissolve back into a double exposure.
     private func accept(_ next: CGImage?) {
         let now = Date()
         let gap = previous.map { at in now.timeIntervalSince(at) } ?? 0.35
@@ -105,7 +107,7 @@ struct FilmStrip: View {
             // would cut in with no dissolve at all. The reset lands this
             // tick and the animation starts on the next.
             fade = 0
-            let seconds = min(max(gap, 0.15), 0.8)
+            let seconds = min(max(gap * 0.3, 0.08), 0.25)
             Task { @MainActor in
                 withAnimation(.easeInOut(duration: seconds)) { fade = 1 }
             }

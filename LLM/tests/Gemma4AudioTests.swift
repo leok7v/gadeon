@@ -21,15 +21,31 @@ import Testing
 // Network-free but weight-gated on GADEON_GEMMA_GGUF (see
 // needsGemmaWeights), so without the file these report as SKIPPED rather
 // than passing on an empty body.
+// Repo root: this file sits in LLM/tests.
+private let audioFixtures = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .deletingLastPathComponent()
+    .appendingPathComponent("tests/audio")
+
+private let audioClips = ["en-lets-leave-tomorrow.wav",
+                          "fr-partons-demain.wav"]
+
+// A checkout that does not carry the clips SKIPS rather than fails. The
+// public mirror ships no test audio, and there a missing fixture would report
+// as a broken speech path -- which is the one thing this suite exists to say
+// truthfully. Same reasoning as needsGemmaWeights: an absent input is not a
+// failure, and a trait says so where a thrown error cannot.
+let needsAudioClips = ConditionTrait.enabled(
+    if: audioClips.allSatisfy { name in
+        FileManager.default.fileExists(
+            atPath: audioFixtures.appendingPathComponent(name).path)
+    },
+    "tests/audio/*.wav is not in this checkout")
+
 struct Gemma4AudioTests {
-    // Repo root: this file sits in LLM/tests.
     private static func fixture(_ name: String) -> URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("tests/audio")
-            .appendingPathComponent(name)
+        audioFixtures.appendingPathComponent(name)
     }
 
     // One clip through the whole path, decoded GREEDILY -- no sampler, so the
@@ -70,7 +86,8 @@ struct Gemma4AudioTests {
     // chain has to recover, while the punctuation and any leading politeness
     // are the sampler's business and would make this brittle without making
     // it stronger.
-    @Test(needsGemmaWeights) func englishClipTranscribes() async throws {
+    @Test(needsGemmaWeights, needsAudioClips)
+    func englishClipTranscribes() async throws {
         let path = try #require(gemmaGgufPath)
         let said = try await transcribe(
             path, "en-lets-leave-tomorrow.wav", Gemma4AudioTests.ask)
@@ -82,7 +99,8 @@ struct Gemma4AudioTests {
     // The same sentence in French. It also proves the turn is not merely
     // echoing an English prior: "demain" cannot come from anywhere but the
     // audio.
-    @Test(needsGemmaWeights) func frenchClipTranscribes() async throws {
+    @Test(needsGemmaWeights, needsAudioClips)
+    func frenchClipTranscribes() async throws {
         let path = try #require(gemmaGgufPath)
         let said = try await transcribe(
             path, "fr-partons-demain.wav", Gemma4AudioTests.ask)

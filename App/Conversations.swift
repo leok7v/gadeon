@@ -44,9 +44,13 @@ extension ChatModel {
     // Open a saved conversation read-only: commit the live one first, then swap
     // the transcript in without touching the session (New Chat later resets the
     // engine, so the stale KV is harmless).
+    // A BACKSTOP behind the sidebar's disabled rows, not the visible gate: a
+    // turn in flight holds an index into `messages` and goes on appending to
+    // it, so swapping the transcript here would redirect the reply into the
+    // conversation just opened rather than stopping it.
     func openConversation(_ id: UUID) {
         commitCurrent()
-        if let convo = ConversationStore.shared.load(id) {
+        if !busy, let convo = ConversationStore.shared.load(id) {
             messages = convo.messages.map { s in ChatModel.restored(s) }
             traceEvents = (convo.trace ?? []).map { t in
                 ChatModel.restoredTrace(t)
@@ -139,6 +143,36 @@ extension ChatModel {
 
     // ---- Message <-> stored projection --------------------------------
 
+    // A clip that lives INSIDE the app bundle is stored by name under a
+    // marker, never by path. The bundle moves on every install and update, so
+    // an absolute path into it is stale by the next build -- the video sample
+    // would degrade to its own filename on a transcript from yesterday, which
+    // is exactly the case the fallback exists to cover rather than to cause.
+    //
+    // Detected by prefix rather than by naming the sample, so any bundled
+    // resource a later turn attaches travels the same way.
+    private static let bundleMark = "bundle:"
+
+    private static func storedPath(_ url: URL) -> String {
+        url.path.hasPrefix(Bundle.main.bundlePath)
+            ? bundleMark + url.lastPathComponent : url.path
+    }
+
+    // A bundled name that no longer resolves (the resource was dropped from a
+    // later build) becomes a bare relative URL: it cannot exist, so the view
+    // names it instead of playing it -- which is the honest answer, and
+    // better than the row vanishing from a saved transcript.
+    private static func restoredURL(_ stored: String) -> URL {
+        var out = URL(fileURLWithPath: stored)
+        if stored.hasPrefix(bundleMark) {
+            let name = String(stored.dropFirst(bundleMark.count)) as NSString
+            out = Bundle.main.url(forResource: name.deletingPathExtension,
+                                  withExtension: name.pathExtension)
+                ?? URL(fileURLWithPath: name as String)
+        }
+        return out
+    }
+
     private static func stored(_ m: Message) -> ConversationStore.Msg {
         ConversationStore.Msg(
             fromUser: m.fromUser, text: m.text, reasoning: m.reasoning,
@@ -148,7 +182,8 @@ extension ChatModel {
                     args: r.args, result: r.result)
             },
             images: m.images.compactMap { cg in jpeg(cg) },
-            loopStopped: m.loopStopped)
+            loopStopped: m.loopStopped,
+            clips: m.clips.map { url in storedPath(url) })
     }
 
     // Rebuild a display Message from its stored projection. The Markdown docs
@@ -159,6 +194,10 @@ extension ChatModel {
         m.reasoning = s.reasoning
         m.loopStopped = s.loopStopped
         m.images = s.images.compactMap { data in decodeImage(data) }
+        // The path is restored whether or not the file survived; the view
+        // checks, so a clip that is gone becomes a named row rather than a
+        // player that cannot play.
+        m.clips = (s.clips ?? []).map { p in restoredURL(p) }
         m.toolRounds = s.rounds.enumerated().map { pair in
             ToolRound(id: pair.offset, emitted: pair.element.emitted,
                       label: pair.element.label, symbol: pair.element.symbol,

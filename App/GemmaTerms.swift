@@ -58,9 +58,9 @@ struct GemmaTermsView: View {
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "doc.text")
-                .font(.largeTitle)
+                .appFont(.largeTitle)
                 .foregroundStyle(.secondary)
-            Text("Gemma Terms of Use").font(.title2).bold()
+            Text("Gemma Terms of Use").appFont(.title2).bold()
             Text("\(Models.display(model)) is provided by "
                + "Google under the Gemma Terms of Use, not the open-source "
                + "licence the other models use. By continuing you agree to "
@@ -73,10 +73,10 @@ struct GemmaTermsView: View {
                 Link("Gemma Terms of Use", destination: GemmaTerms.termsURL)
                 Link("Prohibited Use Policy", destination: GemmaTerms.policyURL)
             }
-            .font(.callout)
+            .appFont(.callout)
             Text("Gemma is a Google model. This app is not affiliated with "
                + "or endorsed by Google.")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
             VStack(spacing: 14) {

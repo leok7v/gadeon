@@ -82,13 +82,13 @@ struct Sidebar: View {
     private var emptyState: some View {
         VStack(spacing: 8) {
             Image(systemName: "bubble.left.and.bubble.right")
-                .font(.largeTitle)
+                .appFont(.largeTitle)
                 .foregroundStyle(.tertiary)
             Text("No conversations yet")
-                .font(.callout)
+                .appFont(.callout)
                 .foregroundStyle(.secondary)
             Text("Your chats will appear here.")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -147,7 +147,7 @@ struct Sidebar: View {
         VStack(spacing: 6) {
             Text("No matches").foregroundStyle(.secondary)
             Text("for \u{201C}\(query)\u{201D}")
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
         }
@@ -165,6 +165,7 @@ struct Sidebar: View {
                 ForEach(items) { convo in
                     historyRow(convo)
                         .listRowBackground(Color.clear)
+                        .deleteDisabled(model.busy)
                 }
                 .onDelete { offsets in delete(offsets, in: items) }
             } else {
@@ -173,6 +174,7 @@ struct Sidebar: View {
                         ForEach(group.items) { convo in
                             historyRow(convo)
                                 .listRowBackground(Color.clear)
+                                .deleteDisabled(model.busy)
                         }
                         .onDelete { offsets in
                             delete(offsets, in: group.items)
@@ -193,11 +195,13 @@ struct Sidebar: View {
         HStack(spacing: 6) {
             Button { armedDelete = nil; onOpen(convo.id) } label: { row(convo) }
                 .buttonStyle(.plain)
+                .disabled(model.busy)
+                .help(rowHelp)
             if !isOS {
                 if armedDelete == convo.id {
                     Button { confirmArmed(convo) } label: {
                         Text("Delete")
-                            .font(.caption)
+                            .appFont(.caption)
                             .fontWeight(.semibold)
                             .foregroundStyle(.white)
                             .padding(.horizontal, 10)
@@ -205,19 +209,47 @@ struct Sidebar: View {
                             .background(Color.red, in: Capsule())
                     }
                     .buttonStyle(.plain)
+                    .disabled(model.busy)
                     .help("Click to delete; this cannot be undone")
                 } else {
                     Button { requestDelete(convo) } label: {
                         Image(systemName: "trash")
-                            .font(.caption)
+                            .appFont(.caption)
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .help("Delete conversation")
+                    .disabled(model.busy)
+                    .help(trashHelp)
                 }
             }
         }
         .animation(.easeInOut(duration: 0.15), value: armedDelete)
+    }
+
+    // A running turn OWNS the engine and writes into the live transcript, and
+    // deleting the conversation it belongs to restarts the session under it.
+    // So the whole list stops offering delete for as long as one runs: the
+    // encode, the prefill and the reply are one turn to the person waiting,
+    // and a trash that works on some rows and not others reads as a fault.
+    //
+    // Disabled rather than hidden, so the row keeps its shape and the tooltip
+    // answers what a dead control otherwise leaves open. iOS has no tooltip
+    // and no room for one, so there the swipe simply refuses to arm
+    // (deleteDisabled) instead of opening onto a button that does nothing.
+    private var trashHelp: String {
+        model.busy ? "Available once this turn has finished"
+                   : "Delete conversation"
+    }
+
+    // Opening one is gated for a sharper reason than deleting. The running
+    // turn holds an INDEX into the live transcript and keeps appending to it;
+    // swapping that transcript for a reopened conversation does not stop the
+    // turn, it redirects it, so the tokens land in whatever message now sits
+    // at that index. The reader watches one conversation while another is
+    // written into it.
+    private var rowHelp: String {
+        model.busy ? "Available once this turn has finished"
+                   : "Open this conversation"
     }
 
     // macOS: the first trash click arms the row (inline red Delete); confirm
@@ -290,7 +322,7 @@ struct Sidebar: View {
         return VStack(alignment: .leading, spacing: 2) {
             Text(convo.title).lineLimit(1)
             Text(reason ?? Sidebar.when(convo.updated))
-                .font(.caption)
+                .appFont(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }

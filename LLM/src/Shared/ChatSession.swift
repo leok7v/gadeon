@@ -619,6 +619,24 @@ public actor ChatSession {
         priming = nil
     }
 
+    // The GPU work the APP does BEFORE a turn -- the vision and audio towers
+    // an attachment is encoded through -- drives the SAME engine as the prime
+    // but does not travel the turn path, so it never reaches the gate inside
+    // runSoftTurn. It has to await this first.
+    //
+    // MEASURED, an iPhone SE 2nd generation tapping the picture sample at
+    // launch: the precook prefill was still running, the system was down to
+    // 71 MB free, and the vision tower asked for its first pipeline. The Metal
+    // shader compiler is a separate XPC service, so it was jetsammed
+    // mid-compile and the pipeline build trapped. Our own footprint claimed
+    // 1.9 GB of headroom throughout -- see [[gpu-weights-are-wired]].
+    //
+    // Unlike endPriming this does NOT stop the prime, it waits for it: the
+    // caller wants the engine next, not instead of.
+    public func awaitPriming() async {
+        await priming?.value
+    }
+
     // Restore a precooked prefix and complete the system block with the
     // current dynamic tail. false -> no usable cache (absent, a changed
     // prompt/tools/template, a backend without byte state, or a token-

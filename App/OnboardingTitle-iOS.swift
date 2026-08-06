@@ -11,7 +11,7 @@ struct OnboardingTitle: ViewModifier {
     func body(content: Content) -> some View {
         VStack(spacing: 0) {
             Text(Bundle.appName)
-                .font(.headline)
+                .appFont(.headline)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
             content

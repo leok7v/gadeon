@@ -224,12 +224,12 @@ public struct HubFetch: Sendable {
                 // page cache, and this download path streams to a temp file
                 // and hashes in chunks, so where it comes from was not
                 // apparent from reading. These say which step owns it.
-                Diag.memory?("fetch start \(e.path)")
+                Diag.memoryDetail?("fetch start \(e.path)")
                 let tmp = try await pump.body(url, resume, onBytes)
-                Diag.memory?("fetch body \(e.path)")
+                Diag.memoryDetail?("fetch body \(e.path)")
                 do {
                     try verify(tmp, e)
-                    Diag.memory?("fetch verified \(e.path)")
+                    Diag.memoryDetail?("fetch verified \(e.path)")
                     verified = tmp
                 } catch {
                     // One corrupted CDN read must not fail the whole fetch:
@@ -250,7 +250,7 @@ public struct HubFetch: Sendable {
         let file = try need(verified, e.path, last)
         try? fm.removeItem(at: dst)
         try fm.moveItem(at: file, to: dst)
-        Diag.memory?("fetch moved \(e.path)")
+        Diag.memoryDetail?("fetch moved \(e.path)")
     }
 
     static func verify(_ file: URL, _ e: Entry) throws {

@@ -94,6 +94,14 @@ import UniformTypeIdentifiers
         // decoded once at send, bounded size), so the transcript SHOWS
         // what was sent instead of a bare "@name" reference.
         var images: [CGImage] = []
+        // The turn's attached VIDEOS, so the transcript can play back what
+        // the model was shown -- with its sound, which no still can carry.
+        //
+        // The PATH is persisted, never the bytes: a conversation is kilobytes
+        // and a phone clip is tens of megabytes. A path can go stale -- a
+        // picker's temporary copy, a security scope, or the app bundle moving
+        // on update -- so the view tests the file and falls back to naming it.
+        var clips: [URL] = []
         // The turn's tool rounds, appended live as the session runs them, so
         // the transcript shows which tools ran with what arguments -- the
         // "did it even call the tool" debugging surface.
@@ -159,6 +167,59 @@ import UniformTypeIdentifiers
     }() {
         didSet { UserDefaults.standard.set(theme.rawValue, forKey: "theme") }
     }
+    // Text size, as NOTCHES either side of what this device already gives
+    // rather than as an absolute size. Someone reading on a borrowed phone set
+    // to xLarge wants everything a step smaller than THAT; an absolute stop
+    // would throw their accessibility setting away. Zero is the device's own
+    // size, which is also what an absent default reads as.
+    //
+    // A multiplier of ours and NOT a dynamicTypeSize shift, which is the
+    // obvious answer and does nothing on macOS: the environment value arrives
+    // (rendered, it reports accessibility3) and both Font.body and
+    // @ScaledMetric stay exactly where they were, because AppKit has no
+    // content size category for them to read. On iOS the system's own Dynamic
+    // Type still works underneath and this multiplies on top of it.
+    var textZoom: Int = ChatModel.clampZoom(
+        UserDefaults.standard.integer(forKey: "textZoom")) {
+        didSet { UserDefaults.standard.set(textZoom, forKey: "textZoom") }
+    }
+    static let zoomLimit = 2
+
+    static func clampZoom(_ notches: Int) -> Int {
+        min(max(notches, -zoomLimit), zoomLimit)
+    }
+
+    // A notch is a tenth: 0.8 to 1.2 across the five stops. Far enough at the
+    // ends to be worth reaching for, near enough that no layout has to be
+    // redrawn to survive them.
+    var textScale: CGFloat { ChatModel.zoomScale(textZoom) }
+
+    static func zoomScale(_ notch: Int) -> CGFloat {
+        1 + CGFloat(notch) / 10
+    }
+
+    // The stop a free-running scale lands on, for the pinch. Bounded before
+    // it is converted: a two-finger fling can report a ratio of any size, and
+    // the whole ladder spans 1.5.
+    static func zoomNotch(nearest scale: CGFloat) -> Int {
+        clampZoom(Int(((min(max(scale, 0.5), 2) - 1) * 10).rounded()))
+    }
+
+    // The pinch applies nothing until the fingers lift, and there is no
+    // control on screen to watch, so this flash is the only thing saying it
+    // heard the gesture at all.
+    func flashZoom(_ notch: Int) {
+        flashHUD("Zoom \(Int(ChatModel.zoomScale(notch) * 100))%")
+    }
+
+    var canZoomIn: Bool { textZoom < ChatModel.zoomLimit }
+    var canZoomOut: Bool { textZoom > -ChatModel.zoomLimit }
+    var atDefaultZoom: Bool { textZoom == 0 }
+
+    func zoomIn() { if canZoomIn { textZoom += 1 } }
+    func zoomOut() { if canZoomOut { textZoom -= 1 } }
+    func resetZoom() { textZoom = 0 }
+
     var input = ""
     // Insertion point (UTF-16 offset into input), synced from the editor so a
     // dropped or picked file's reference lands at the caret.
@@ -223,26 +284,65 @@ import UniformTypeIdentifiers
     // What the status line says before a turn has run, where every number
     // would read zero. The model's own shape is the interesting thing at that
     // moment, and it is all fact rather than flavour.
-    var modelSummary: String {
-        var parts: [String] = []
+    //
+    // PARTS, not one string, because each weight is drawn behind its own SF
+    // Symbol and an emoji standing in for those reads as a toy beside a
+    // technical line. It also fixes an off-by-one the words used to carry: a
+    // single marker in front of three numbers labels only the group, leaving
+    // the reader to work out which number is which tower.
+    struct Tower: Identifiable {
+        let id: Int
+        let symbol: String
+        let weight: String
+    }
+
+    var modelTowers: [Tower] {
+        var out: [Tower] = []
         if let shape = modelShape {
-            let towers = shape.towers
-            // One tower needs no label: "text 426 MB" only says "text" is
-            // the only thing there is.
-            parts.append("🐏 " + (towers.count == 1
-                ? ChatModel.weight(towers[0].bytes)
-                : towers.map { t in
-                    "\(t.name) \(ChatModel.weight(t.bytes))"
-                  }.joined(separator: " + ")))
-            if shape.trainedContext > 0 {
-                parts.append("⇄ \(shape.trainedContext.formatted(.number)) max")
-            }
-            if shape.embedding > 0 {
-                parts.append("embeddings: "
-                    + shape.embedding.formatted(.number))
+            for (i, t) in shape.towers.enumerated() {
+                out.append(Tower(id: i, symbol: ChatModel.towerSymbol(t.name),
+                                 weight: ChatModel.weight(t.bytes)))
             }
         }
-        return parts.joined(separator: "   ")
+        return out
+    }
+
+    // `waveform.path` and not a microphone: the microphone is the composer's
+    // record button, and one glyph meaning both "record" and "the audio tower
+    // weighs this" is a glyph meaning neither. `eye` is what Settings already
+    // calls this model's ability to see.
+    private static func towerSymbol(_ name: String) -> String {
+        var out = "text.alignleft"
+        if name == "vision" {
+            out = "eye"
+        } else if name == "audio" {
+            out = "waveform.path"
+        }
+        return out
+    }
+
+    // The facts that are not sizes. Separated in the view by a dot rather
+    // than by an arrow or a colon: an arrow claims the context feeds the
+    // width and a colon claims the width belongs to it, and neither is true
+    // of two independent numbers.
+    var modelFacts: [String] {
+        var out: [String] = []
+        if let shape = modelShape {
+            if shape.trainedContext > 0 {
+                out.append(ChatModel.tokens(shape.trainedContext) + " ctx")
+            }
+            if shape.embedding > 0 {
+                out.append(shape.embedding.formatted(.number) + " dim")
+            }
+        }
+        return out
+    }
+
+    // 131,072 reads slower than 128K, and a context length is a round binary
+    // number, so the short form is EXACT here rather than an approximation.
+    // Anything that is not gets its digits.
+    private static func tokens(_ n: Int) -> String {
+        n >= 1024 && n % 1024 == 0 ? "\(n / 1024)K" : n.formatted(.number)
     }
 
     // Weights in the unit that carries the information. A tenth of a gigabyte
@@ -613,6 +713,7 @@ import UniformTypeIdentifiers
     // once, at model construction.
     private let instrument = Instrument.install()
     var tracePath: String { traceFile.path }
+    var diagPath: String { Diag.shared.path }
     // Ring cap so a marathon session cannot grow the array unbounded; the
     // on-disk transcript keeps everything.
     private static let traceCap = 2000
@@ -1523,6 +1624,15 @@ import UniformTypeIdentifiers
         if showSettings { showDebug = false }
     }
 
+    // Command-comma OPENS, where the gear toggles: the shortcut is a request
+    // for Settings, and a second press closing them again would surprise
+    // anyone who pressed it twice not knowing whether the first took.
+
+    func openSettings() {
+        showDebug = false
+        showSettings = true
+    }
+
     func toggleDebug() {
         showDebug.toggle()
         if showDebug { showSettings = false }
@@ -2116,6 +2226,7 @@ import UniformTypeIdentifiers
                 cue = .reading
             }
             softTurn(display: display, typed: typed, previews: previews,
+                     films: clips.filter { c in c.isVideo }.map { c in c.url },
                      cue: cue) { [weak self] in
                 let out = try await ChatModel.encode(
                     media, images: images, clips: clips) { peek in
@@ -2160,7 +2271,8 @@ import UniformTypeIdentifiers
     // the bubbles to the rollback is the same afterwards.
     private func softTurn(
         display: String, typed: String, previews: [CGImage],
-        labelled: Bool = true, cue: SpokenCue.Kind = .thinking,
+        films: [URL] = [], labelled: Bool = true,
+        cue: SpokenCue.Kind = .thinking,
         _ encode: @escaping @Sendable () async throws
             -> (parts: [ContentPart], spans: [SoftSpan], perImage: Int)
     ) {
@@ -2168,7 +2280,7 @@ import UniformTypeIdentifiers
             prefilling = true
             activePrefillStage = .vision
             var asked = Message(fromUser: true, text: display,
-                                images: previews)
+                                images: previews, clips: films)
             asked.placeholder = spokenTurn
             messages.append(asked)
             messages.append(Message(fromUser: false, text: ""))
@@ -2195,6 +2307,13 @@ import UniformTypeIdentifiers
                 await session.setReasoningCaps(soft: thinkTokenCap,
                                                hard: thinkTokenCap * 2)
                 do {
+                    // The towers run on the SAME GPU as the prefix prime, and
+                    // `busy` cannot see the prime -- it lives in its own task,
+                    // not in genTask -- so a sample tapped at launch would
+                    // otherwise put a shader compile and a prefill on the GPU
+                    // together. The session's turn path already waits here;
+                    // the encode is the one GPU step that runs before it.
+                    await session.awaitPriming()
                     let built = try await encode()
                     if built.perImage > 0 { perImageTokens = built.perImage }
                     let ask = typed.isEmpty
@@ -2345,6 +2464,7 @@ import UniformTypeIdentifiers
         "of introductory or concluding remarks."
     static let sampleStory = "Describe everything you see in this "
         + "picture, then write a story based on it."
+    static let sampleClip = "Describe what happens in this video."
     static let sampleEuler = "Using Euler's formula e^(ix) = cos(x) + "
         + "i*sin(x) and your calculator, explore: e^i (one radian around "
         + "the unit circle), Euler's identity e^(i*pi) + 1 = 0, i^i, "
@@ -2379,9 +2499,16 @@ import UniformTypeIdentifiers
     var calcSampleIsInterest: Bool { modelName != Models.fallback }
 
     // The bundled demo picture (the beach scene); nil hides the pill.
+    // App/Resources/ on disk, but the copy phase FLATTENS into the bundle, so
+    // these stay a plain forResource lookup with no subdirectory.
     static let samplePicture: Data? = Bundle.main
-        .url(forResource: "SamplePicture", withExtension: "jpeg")
+        .url(forResource: "dogs-beach", withExtension: "jpg")
         .flatMap { url in try? Data(contentsOf: url) }
+
+    // A URL, not Data: VideoFrames hands it to AVURLAsset, and the whole point
+    // of the streaming encode is that a clip is never held whole.
+    static let sampleVideo: URL? = Bundle.main
+        .url(forResource: "dogs-beach", withExtension: "mp4")
     // Pill-sized preview decoded once, like the attach chips.
     static let samplePictureThumb: CGImage? = samplePicture.flatMap { data in
         VisionPreprocess.thumbnail(data, maxPx: 128)
@@ -2403,14 +2530,25 @@ import UniformTypeIdentifiers
 
     // The samples applicable to the current model + access tier -- mirrors the
     // pill view's own gating: calc always, research when online, the picture
-    // demo on a vision model.
+    // demo on a vision model, the clip on a desktop that takes video.
     private var applicableSampleIds: [String] {
         var ids = ["calc"]
         if accessState != .offline { ids.append("research") }
         if canAttachImages, ChatModel.samplePictureThumb != nil {
             ids.append("picture")
         }
+        if canOfferVideoSample { ids.append("video") }
         return ids
+    }
+
+    // Desktop only. A video turn is ~32 tower passes and a couple of thousand
+    // soft tokens to prefill whatever the clip's own size -- the frame count
+    // and per-frame budget are the model's numbers, not the file's -- and on a
+    // phone that is a minute before a first-run user sees a word.
+    // canAttachVideo already implies a soft-token model, so it picks out the
+    // gemma family on its own.
+    var canOfferVideoSample: Bool {
+        !isOS && canAttachVideo && ChatModel.sampleVideo != nil
     }
 
     // The pill area shows on an empty chat while at least one applicable
@@ -2463,8 +2601,23 @@ import UniformTypeIdentifiers
             markSampleUsed("picture")
             input = ""
             caret = 0
-            attachImage(data, name: "beach.jpeg", at: 0)
+            attachImage(data, name: "dogs-beach.jpg", at: 0)
             input += ChatModel.sampleStory
+            send()
+        }
+    }
+
+    // The clip rides the ordinary attachment path, so the film strip plays its
+    // frames behind the composer while the towers run -- which is the part of
+    // this demo worth watching, and the reason the wait reads as work rather
+    // than as a stall.
+    func runVideoSample() {
+        if let url = ChatModel.sampleVideo {
+            markSampleUsed("video")
+            input = ""
+            caret = 0
+            attachClip(url, isVideo: true, at: 0)
+            input += ChatModel.sampleClip
             send()
         }
     }

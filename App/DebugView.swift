@@ -40,9 +40,29 @@ struct DebugView: View {
             ?? Instrument.launched)
     }
 
+    // Dismissal comes from the SAME place Settings gets it: the navigation
+    // stack's own confirmation slot on iOS, a header of ours on macOS. Two
+    // hand-rolled headers rendered two different Dones -- Settings' system
+    // one and a bare tinted button here -- for one word doing one job.
     var body: some View {
+        Group {
+            if isOS {
+                NavigationStack {
+                    content.navigationTitle("Session Debug")
+                        .toolbar { DoneToolbar(action: onClose) }
+                }
+            } else {
+                VStack(spacing: 0) {
+                    header
+                    content
+                }
+            }
+        }
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
-            header
+            if isOS { eventCount.padding(.horizontal, 16) }
             TraceGraph(events: model.traceEvents, zero: zero,
                        selected: $selected)
                 .frame(height: 190)
@@ -55,19 +75,23 @@ struct DebugView: View {
         }
     }
 
+    // The navigation title carries the name on iOS, so the count travels on
+    // its own rather than being dropped with the header that held it.
+    private var eventCount: some View {
+        Text("\(model.traceEvents.count) events")
+            .appFont(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private var header: some View {
         HStack {
             Label("Session Debug", systemImage: "ladybug")
-                .font(.headline)
-            Text("\(model.traceEvents.count) events")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .appFont(.headline)
+            eventCount.fixedSize()
             Spacer()
-            Button("Done", action: onClose)
-                .keyboardShortcut(.defaultAction)
-            Button("", action: onClose)
-                .keyboardShortcut(.cancelAction)
-                .hidden()
+            DoneButton(action: onClose)
+            EscapeToClose(action: onClose)
         }
         .padding(12)
     }
@@ -75,7 +99,10 @@ struct DebugView: View {
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
+                // A log is scanned, not read: the gap between rows sits well
+                // under the height of a row's own line, so a screenful is
+                // events rather than air.
+                LazyVStack(alignment: .leading, spacing: 2) {
                     ForEach(model.traceEvents) { e in
                         TraceRow(e: e, zero: zero, selected: e.id == selected)
                             .id(e.id)
@@ -94,15 +121,64 @@ struct DebugView: View {
         }
     }
 
+    // Both logs by NAME and size, each a button that puts that file's contents
+    // on the clipboard. The full path was accurate and useless: on a phone it
+    // is a sandbox UUID nobody can act on, it needed head-truncating to fit,
+    // and it named only ONE of the two files -- diag.log had no route out of
+    // the app at all.
     private var footer: some View {
-        Text(model.tracePath)
-            .font(.caption2.monospaced())
-            .foregroundStyle(.secondary)
-            .textSelection(.enabled)
-            .lineLimit(1)
-            .truncationMode(.head)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(8)
+        HStack(spacing: 8) {
+            logButton("Transcript", model.tracePath)
+            Text("\u{00B7}").foregroundStyle(.tertiary)
+            logButton("Diagnostics", model.diagPath)
+            Spacer()
+        }
+        .appFont(.caption2)
+        .padding(8)
+    }
+
+    // The checkmark is the same acknowledgement the transcript's code blocks
+    // give: a clipboard write is invisible, and a button that says nothing is
+    // indistinguishable from a dead one.
+    @State private var copied: String?
+
+    private func logButton(_ label: String, _ path: String) -> some View {
+        Button { copyLog(path) } label: {
+            HStack(spacing: 4) {
+                Image(systemName: copied == path
+                      ? "checkmark" : "doc.on.doc")
+                Text("\(label): \(DebugView.folder(path)) "
+                     + "(\(DebugView.size(path)))")
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Copy the \(label.lowercased()) log to the clipboard")
+    }
+
+    private func copyLog(_ path: String) {
+        let text = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        setClipboard(text)
+        copied = path
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1200))
+            if copied == path { copied = nil }
+        }
+    }
+
+    // The FOLDER, not the file: every run writes a `current.txt`, so the name
+    // that tells the two apart is the directory holding it.
+    private static func folder(_ path: String) -> String {
+        URL(fileURLWithPath: path).deletingLastPathComponent()
+            .lastPathComponent
+    }
+
+    private static func size(_ path: String) -> String {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let bytes = (attrs?[.size] as? Int64) ?? 0
+        return ByteCountFormatter.string(fromByteCount: bytes,
+                                         countStyle: .file)
     }
 }
 
@@ -119,6 +195,9 @@ private struct TraceGraph: View {
     @Binding var selected: UUID?
     @State private var hovered: TraceEvent?
     @State private var hoverAt: CGPoint = .zero
+    // A Canvas draws Text values, not views, so its labels cannot take the
+    // .appFont modifier the rest of the app uses and read the scale directly.
+    @Environment(\.appTextScale) private var textScale
 
     private static let pad: CGFloat = 8
 
@@ -249,11 +328,12 @@ private struct TraceGraph: View {
             }
         }
         ctx.stroke(line, with: .color(.blue), lineWidth: 1.5)
+        let label = appTextFont(.caption2, textScale)
         ctx.draw(Text("ctx \(maxCtx)")
-                     .font(.caption2).foregroundStyle(.secondary),
+                     .font(label).foregroundStyle(.secondary),
                  at: CGPoint(x: size.width - 34, y: 8))
         ctx.draw(Text(String(format: "%.0f t/s", maxRate))
-                     .font(.caption2).foregroundStyle(.green.opacity(0.7)),
+                     .font(label).foregroundStyle(.green.opacity(0.7)),
                  at: CGPoint(x: size.width - 34, y: 22))
     }
 
@@ -297,14 +377,14 @@ private struct HoverBubble: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("\(elapsed(e.t1, since: zero))  \(e.kind.rawValue)")
-                .font(.caption2.monospaced())
+                .appFont(.caption2).monospaced()
                 .foregroundStyle(.secondary)
             Text(e.summary)
-                .font(.caption)
+                .appFont(.caption)
                 .lineLimit(2)
             if !stats.isEmpty {
                 Text(stats)
-                    .font(.caption2.monospaced())
+                    .appFont(.caption2).monospaced()
                     .foregroundStyle(.secondary)
             }
         }
@@ -355,21 +435,21 @@ private struct TraceRow: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Text(elapsed(e.t1, since: zero))
-                    .font(.caption.monospaced())
+                    .appFont(.caption).monospaced()
                     .foregroundStyle(.secondary)
                 Text(e.kind.rawValue)
-                    .font(.caption.bold())
+                    .appFont(.caption).bold()
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(color.opacity(0.18), in: Capsule())
                     .foregroundStyle(color)
                 if !meta.isEmpty {
                     Text(meta)
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Text(e.summary)
-                    .font(.caption)
+                    .appFont(.caption)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -385,7 +465,11 @@ private struct TraceRow: View {
                 payload
             }
         }
-        .padding(6)
+        // Tighter vertically than horizontally, but not to nothing: the
+        // selection highlight needs some body around the text or it reads as
+        // a stray tint rather than as a selected row.
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(selected ? Color.accentColor.opacity(0.12) : .clear,
                     in: RoundedRectangle(cornerRadius: 6))
@@ -398,7 +482,7 @@ private struct TraceRow: View {
     // geometry into a blank void when it shrinks back.
     @ViewBuilder private var payload: some View {
         let text = Text(e.text)
-            .font(.caption2.monospaced())
+            .appFont(.caption2).monospaced()
             .foregroundStyle(.secondary)
             .textSelection(.enabled)
             .padding(.leading, 4)

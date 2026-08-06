@@ -15,10 +15,25 @@ struct PromptEditor: NSViewRepresentable {
     var disabled: Bool
     var minLines: Int
     var maxLines: Int
+    // The app's text size. NSTextView takes a font, not an environment, and
+    // preferredFont(forTextStyle:) is a fixed 13pt on this platform whatever
+    // the app is set to -- so without this the field is the one control that
+    // stays put while the card around it grows.
+    var scale: CGFloat = 1
     var onSubmit: () -> Void
     // A file dropped ONTO the field: routed to the chat's attach handler (chip
     // + @reference) instead of the field pasting the path. iOS ignores it.
     var onDropFiles: ([URL]) -> Void = { _ in }
+
+    // The body point size at a given scale, shared with the SwiftUI
+    // placeholder drawn over the field so the two cannot drift apart.
+    static func points(_ scale: CGFloat) -> CGFloat {
+        NSFont.preferredFont(forTextStyle: .body).pointSize * scale
+    }
+
+    private var font: NSFont {
+        NSFont.systemFont(ofSize: PromptEditor.points(scale))
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -30,7 +45,7 @@ struct PromptEditor: NSViewRepresentable {
         tv.isRichText = false
         tv.allowsUndo = true
         tv.drawsBackground = false
-        tv.font = NSFont.preferredFont(forTextStyle: .body)
+        tv.font = font
         tv.textContainerInset = NSSize(width: 0, height: 2)
         tv.isVerticallyResizable = true
         tv.isHorizontallyResizable = false
@@ -61,6 +76,7 @@ struct PromptEditor: NSViewRepresentable {
                 tv.setSelectedRange(
                     NSRange(location: max(0, min(caret, len)), length: 0))
             }
+            if tv.font != font { tv.font = font }
             tv.isEditable = !disabled
             tv.isSelectable = !disabled
             if focused, tv.window != nil, tv.window?.firstResponder !== tv {
@@ -76,7 +92,7 @@ struct PromptEditor: NSViewRepresentable {
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView,
                       context: Context) -> CGSize? {
         let tv = nsView.documentView as? SubmitTextView
-        let font = tv?.font ?? NSFont.preferredFont(forTextStyle: .body)
+        let font = tv?.font ?? self.font
         let width = proposal.width ?? 300
         let inset = (tv?.textContainerInset.height ?? 2) * 2
         let line = ceil(font.ascender - font.descender + font.leading)

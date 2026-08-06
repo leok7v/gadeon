@@ -1,3 +1,4 @@
+import AVKit
 import MD
 import SwiftUI
 
@@ -13,9 +14,13 @@ struct ContentView: View {
     // default 28pt h1 shouts in a bubble) ride body-relative increments;
     // reasoning sits smaller in the disclosure grey. Code sits 2pt below
     // each body: monospaced reads optically larger at equal point size.
+    // The phone's code sits FOUR under its body, not two. A monospaced face
+    // is wider per character, so on a narrow column the cost of matching the
+    // prose optically is paid in wrapping: at 15 a line of Python folds three
+    // times and the block reads as the loudest thing on screen.
     static let answerStyle = MarkdownStyle(
         bodySize: isOS ? 17 : 14,
-        codeSize: isOS ? 15 : 12,
+        codeSize: isOS ? 13 : 12,
         headingSizes: isOS ? [25, 21, 19, 17, 17, 16]
                            : [22, 18, 16, 14, 14, 13])
     static let reasoningStyle = MarkdownStyle(
@@ -32,6 +37,12 @@ struct ContentView: View {
     // label around it scales -- a mixed soup under Larger Text. Scale the
     // style by the body text style's own curve so both move together.
     @ScaledMetric(relativeTo: .body) private var typeScale: CGFloat = 1
+
+    // The two curves that decide how big the transcript reads, multiplied:
+    // the platform's Dynamic Type, which moves on iOS and is flat on macOS,
+    // and the app's own text-size setting, which is the only one that moves on
+    // both. Everything the MD renderer sizes comes through here.
+    private var textScale: CGFloat { typeScale * model.textScale }
 
     static func scaled(_ s: MarkdownStyle, by k: CGFloat) -> MarkdownStyle {
         var out = s
@@ -77,6 +88,42 @@ struct ContentView: View {
     @State private var showModelInvite = false
     // Highlights the whole chat area while a file is dragged over it.
     @State private var dropActive = false
+    // Pinch is the phone's way in, there being no menu bar to hang Zoom on.
+    // It is magnitude-aware but lands only when the fingers LIFT: every stop
+    // re-renders the whole transcript, and each answer is its own text view,
+    // so following the fingers would relayout the entire conversation on
+    // every frame of the gesture.
+    //
+    // `pinchFrom` is the stop the gesture began at, since a magnification is
+    // reported relative to its own start rather than absolutely; `pinchShown`
+    // keeps the flash from being re-raised sixty times a second for a stop it
+    // is already showing.
+    @State private var pinchFrom: Int?
+    @State private var pinchShown: Int?
+
+    // simultaneousGesture, or it takes the scroll view's own gestures with
+    // it and the transcript stops scrolling. Masked off on macOS, where the
+    // View menu and its shortcuts already cover this.
+    private var pinchZoom: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                let from = pinchFrom ?? model.textZoom
+                if pinchFrom == nil { pinchFrom = from }
+                let want = ChatModel.zoomScale(from) * value.magnification
+                let notch = ChatModel.zoomNotch(nearest: want)
+                if notch != pinchShown {
+                    pinchShown = notch
+                    model.flashZoom(notch)
+                }
+            }
+            .onEnded { value in
+                let from = pinchFrom ?? model.textZoom
+                let want = ChatModel.zoomScale(from) * value.magnification
+                model.textZoom = ChatModel.zoomNotch(nearest: want)
+                pinchFrom = nil
+                pinchShown = nil
+            }
+    }
     // The optimizing / downloading screens' cycling whimsical phrases,
     // seeded from the ring holder (an idempotent read) so no placeholder
     // word ever renders and a view re-init cannot advance the rotation.
@@ -106,6 +153,14 @@ struct ContentView: View {
         content
             .modifier(OptionKeyMonitor(down: $optionDown))
             .preferredColorScheme(model.theme.scheme)
+            // Every label below reads its size off this one value.
+            .environment(\.appTextScale, model.textScale)
+            // And the DEFAULT font moves with it. Without this, anything that
+            // never names a font -- every Toggle and Button label, every bare
+            // Text -- keeps the system body size while the labelled text
+            // around it grows, which reads as half the app ignoring the
+            // setting. `.appFont` on a view still wins over this.
+            .font(appTextFont(.body, model.textScale))
             // A returning user who cleared both onboarding gates resolves the
             // model on appear (build if on disk, else its download). A first run
             // instead starts the fetch at EULA acceptance (acceptEULA), so it is
@@ -172,7 +227,7 @@ struct ContentView: View {
     // system default is larger than any figure that looked right written
     // down, and an override applies everywhere it is not needed.
     private var barGlyph: Font? {
-        sizeClass == .compact ? .system(size: 20) : nil
+        sizeClass == .compact ? .system(size: 20 * model.textScale) : nil
     }
 
     private var foldersButton: some View {
@@ -263,7 +318,9 @@ struct ContentView: View {
                     onClose: closeSidebar, onOpen: openConversation,
                     onNewChat: openNewChat,
                     onSettings: openSettings)
-                .frame(width: 300)
+                // The drawer is nothing but conversation titles, so it follows
+                // the text; fixed, larger titles would only truncate sooner.
+                .frame(width: 300 * model.textScale)
                 .frame(maxHeight: .infinity)
                 .background(.bar)
                 .transition(.move(edge: .leading))
@@ -275,9 +332,7 @@ struct ContentView: View {
     // progress, load failure, and the one-time Optimizing compile. Full-screen.
     private var onboarding: some View {
         Group {
-            if !Models.supported {
-                unsupportedView
-            } else if !model.eulaAccepted {
+            if !model.eulaAccepted {
                 EULAView(onAgree: model.acceptEULA)
             } else if let name = model.downloadName {
                 // Explicit download consent BEFORE the disclaimer (App Store
@@ -351,7 +406,7 @@ struct ContentView: View {
         if !actionsExpanded {
             if model.inTurn && isOS {
                 Text(ContentView.appName)
-                    .font(.headline)
+                    .appFont(.headline)
                     .lineLimit(1)
                     .transition(.opacity)
             } else {
@@ -402,11 +457,11 @@ struct ContentView: View {
             // bar, and on the phone there is no width to spend on it either.
             // Smaller than the title so a long name fits.
             Text(Models.display(model.modelName))
-                .font(.subheadline)
+                .appFont(.subheadline)
                 .fontWeight(.semibold)
                 .lineLimit(1)
             if Models.all.count >= 2 {
-                Image(systemName: "chevron.down").font(.caption2)
+                Image(systemName: "chevron.down").appFont(.caption2)
             }
         }
     }
@@ -459,24 +514,6 @@ struct ContentView: View {
         withAnimation(.snappy) { sidebarOpen = false }
     }
 
-    // Shown on a device with too little RAM for even the 0.8B (iOS <=3GB): a
-    // clear notice, and nothing is downloaded.
-
-    private var unsupportedView: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.largeTitle)
-                .foregroundStyle(.secondary)
-            Text("Device not supported").font(.title2).bold()
-            Text("This device does not have enough memory to run the on-device "
-               + "model. At least 4 GB of RAM is required.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-        }
-        .padding(32)
-        .frame(maxWidth: 420)
-    }
-
     // Model not on disk yet: ask before spending the bytes. The storage +
     // backup note is required disclosure for a multi-hundred-MB on-device
     // download.
@@ -484,9 +521,9 @@ struct ContentView: View {
     private func downloadConsent(_ name: String) -> some View {
         VStack(spacing: 16) {
             VStack(spacing: 4) {
-                Text("Download").font(.title2).bold()
-                Text(name)
-                    .font(.title3)
+                Text("Download").appFont(.title2).bold()
+                Text(Models.display(name))
+                    .appFont(.title3)
                     .foregroundStyle(.secondary)
             }
             Text("This model is about \(model.downloadSizeText).")
@@ -495,14 +532,14 @@ struct ContentView: View {
                      ? "Estimated ~\(est.download) min download\n"
                        + "~\(est.optimize) min optimize"
                      : "Estimated ~\(est.download) min download")
-                    .font(.callout)
+                    .appFont(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
             Text("Stored on this device, excluded from iCloud and backup.\n"
                + "It downloads once.\n"
                + "Later launches need no network.")
-                .font(.callout)
+                .appFont(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             // Stacked, not side by side, so "Cancel Download" does not read as
@@ -534,13 +571,13 @@ struct ContentView: View {
             VStack(spacing: 4) {
                 Text(model.downloadTotal > 0
                      ? "Downloading" : "Preparing download…")
-                    .font(.headline)
+                    .appFont(.headline)
                 if model.downloadTotal > 0 {
-                    Text(model.modelName)
-                        .font(.subheadline)
+                    Text(Models.display(model.modelName))
+                        .appFont(.subheadline)
                         .foregroundStyle(.secondary)
                     Text(model.downloadCounter)
-                        .font(.callout)
+                        .appFont(.callout)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -548,7 +585,7 @@ struct ContentView: View {
                 stageWhimsical(.downloading, $downloadingPhrase)
             }
             if let eta = model.downloadETA {
-                Text(eta).font(.caption).foregroundStyle(.tertiary)
+                Text(eta).appFont(.caption).foregroundStyle(.tertiary)
             }
         }
         .padding(32)
@@ -574,26 +611,26 @@ struct ContentView: View {
             .frame(maxWidth: 320)
             if model.firstCompile {
                 VStack(spacing: 4) {
-                    Text("Optimizing for your device…").font(.headline)
-                    Text(model.modelName)
-                        .font(.subheadline)
+                    Text("Optimizing for your device…").appFont(.headline)
+                    Text(Models.display(model.modelName))
+                        .appFont(.subheadline)
                         .foregroundStyle(.secondary)
                 }
                 Text("It will take a while.\nLater launches will be fast.")
-                    .font(.callout)
+                    .appFont(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                 stageWhimsical(.optimizing, $optimizingPhrase)
             } else {
                 VStack(spacing: 4) {
-                    Text("Loading…").font(.headline)
-                    Text(model.modelName)
-                        .font(.subheadline)
+                    Text("Loading…").appFont(.headline)
+                    Text(Models.display(model.modelName))
+                        .appFont(.subheadline)
                         .foregroundStyle(.secondary)
                 }
             }
             if let eta = model.optimizeETA {
-                Text(eta).font(.caption).foregroundStyle(.tertiary)
+                Text(eta).appFont(.caption).foregroundStyle(.tertiary)
             }
         }
         // Wider than the other panels and slimmer side padding: the one-line
@@ -617,7 +654,7 @@ struct ContentView: View {
         // phrases render full subheadline everywhere; only the longest
         // (~64 chars) shrink, and only on narrow screens.
         Text(phrase.wrappedValue)
-            .font(.subheadline)
+            .appFont(.subheadline)
             .foregroundStyle(.secondary)
             .lineLimit(1)
             .minimumScaleFactor(0.4)
@@ -655,7 +692,7 @@ struct ContentView: View {
     private func failureView(_ message: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle")
-                .font(.largeTitle)
+                .appFont(.largeTitle)
                 .foregroundStyle(.secondary)
             Text(message)
                 .multilineTextAlignment(.center)
@@ -695,8 +732,9 @@ struct ContentView: View {
 
     private var chat: some View {
         transcript
+            .simultaneousGesture(pinchZoom,
+                                 including: isOS ? .all : .none)
             .modifier(Shimmer(active: ContentView.stallProbeOn))
-            .overlay { if model.showSamples { samplePills } }
             // The composer rides as a bottom safe-area inset, so the transcript
             // insets its scrollable content beneath it -- the last bubble always
             // scrolls clear of the composer, and the inset composes with the
@@ -756,10 +794,10 @@ struct ContentView: View {
                 }
             if findCount > 0 {
                 Text("\(findCurrent)/\(findCount)")
-                    .font(.caption.monospacedDigit())
+                    .appFont(.caption).monospacedDigit()
                     .foregroundStyle(.secondary)
             } else if !findQuery.isEmpty {
-                Text("none").font(.caption).foregroundStyle(.secondary)
+                Text("none").appFont(.caption).foregroundStyle(.secondary)
             }
             Button { findStep(findController.findPrevious) } label: {
                 Image(systemName: "chevron.up")
@@ -859,8 +897,21 @@ struct ContentView: View {
                            thumb: ChatModel.samplePictureThumb,
                            action: model.runPictureSample)
             }
+            // A SYMBOL, not a poster frame: the clip and the photo are the
+            // same beach, so two thumbnails would read as one demo listed
+            // twice.
+            if model.canOfferVideoSample, model.showSample("video") {
+                sampleCard(symbol: "play.rectangle",
+                           title: "Video Understanding",
+                           subtitle: "Watch the frames it is looking at",
+                           thumb: nil,
+                           action: model.runVideoSample)
+            }
         }
         .padding(24)
+        // The transcript stack is leading-aligned for bubbles; the cards are a
+        // centred column, so they claim the full width to centre within it.
+        .frame(maxWidth: .infinity)
     }
 
     private func sampleCard(symbol: String, title: String, subtitle: String,
@@ -876,14 +927,14 @@ struct ContentView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                 } else {
                     Image(systemName: symbol)
-                        .font(.title2)
+                        .appFont(.title2)
                         .frame(width: 44, height: 44)
                         .foregroundStyle(Color.accentColor)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.headline)
+                    Text(title).appFont(.headline)
                     Text(subtitle)
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
@@ -898,7 +949,7 @@ struct ContentView: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SampleCardStyle())
     }
 
     // The status line under the prompt: the turn's numbers, or the working
@@ -906,14 +957,22 @@ struct ContentView: View {
 
     private var statusLine: some View {
         HStack {
-            // caption2 on iOS + a scale floor: the line must FIT rather than
-            // truncate -- the t/s term trails, and it is the one being read.
-            Text(statusText)
-                .font(isOS ? .caption2 : .caption)
+            // The Mac has width, so one line that shrinks a little rather than
+            // truncating -- the t/s term trails and it is the one being read.
+            //
+            // The PHONE wraps instead. Scale-to-fit and a zoom setting are in
+            // direct conflict on a narrow screen: the line grew, overflowed,
+            // and was scaled straight back to where it started, so the text
+            // looked frozen while the symbols -- interpolated Image runs,
+            // which that shrink does not touch -- moved with the zoom. One
+            // number drives both, so the mismatch was the scaling, not the
+            // sizing.
+            statusText
+                .font(.system(size: statusPoints))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
+                .lineLimit(isOS ? 2 : 1)
+                .minimumScaleFactor(isOS ? 1 : 0.6)
                 .modifier(Shimmer(active: model.prefilling))
             Spacer()
         }
@@ -928,8 +987,39 @@ struct ContentView: View {
     // surface written for it. Shimmer (driven by `prefilling`) is what says
     // "working" from then on.
 
-    private var statusText: String {
-        model.statsLabel.isEmpty ? model.modelSummary : model.statsLabel
+    // A Text either way, so one set of modifiers covers both and the symbols
+    // ride INSIDE the run: interpolating an Image keeps this a single line
+    // that lineLimit, minimumScaleFactor and the shimmer all still apply to,
+    // which an HStack of views would have broken.
+    private var statusText: Text {
+        model.statsLabel.isEmpty ? modelSummary : Text(model.statsLabel)
+    }
+
+    // A point above footnote. The line is dense and its numbers are the whole
+    // point of it, and no named style sits at that size.
+    private var statusPoints: CGFloat {
+        (appTextPoints(.footnote) + 1) * model.textScale
+    }
+
+    // The symbols LABEL the numbers beside them rather than being read, so
+    // they sit under the text: at equal size an SF Symbol carries more ink
+    // than a digit and pulls the eye off the figure it is introducing.
+    private var statusSymbol: Font {
+        .system(size: statusPoints - 2)
+    }
+
+    private var modelSummary: Text {
+        var out = Text("")
+        for tower in model.modelTowers {
+            let gap = tower.id == 0 ? "" : " "
+            out = out + Text(gap)
+                + Text(Image(systemName: tower.symbol)).font(statusSymbol)
+                + Text(" \(tower.weight)")
+        }
+        for fact in model.modelFacts {
+            out = out + Text(" \u{00B7} \(fact)")
+        }
+        return out
     }
 
     private var transcript: some View {
@@ -944,6 +1034,11 @@ struct ContentView: View {
                     ForEach(model.messages) { m in
                         bubble(m).id(m.id)
                     }
+                    // INSIDE the scroll, not an overlay over it. As an overlay
+                    // the cards had no scroller of their own, so the soft
+                    // keyboard's half of the screen simply took the last one
+                    // and nothing could reach it.
+                    if model.showSamples { samplePills }
                     Color.clear
                         .frame(height: max(tailInset, 1))
                         .id("chat-tail")
@@ -1048,12 +1143,19 @@ struct ContentView: View {
         return out
     }
 
-    private var peekScale: CGFloat { min(popScale, 1.5) }
+    // Both carry the app's text size as well as Dynamic Type, or the callout
+    // stays at 11pt while the transcript it explains grows around it. The
+    // width follows for the same reason the sidebar's does: it holds text.
+    private var peekScale: CGFloat {
+        min(popScale, 1.5) * model.textScale
+    }
 
     // A raw-data debug view wants DENSITY: one step below caption, scaling at
     // quarter speed of the Dynamic Type curve so Large Text nudges it instead
     // of ballooning the monospaced dump.
-    private var peekTextSize: CGFloat { 11 * (1 + (popScale - 1) / 4) }
+    private var peekTextSize: CGFloat {
+        11 * (1 + (popScale - 1) / 4) * model.textScale
+    }
 
     // Centered across the transcript, so the panel is whole inside it at any
     // window size, with the tail naming the row it came from. It sits below a
@@ -1126,7 +1228,7 @@ struct ContentView: View {
     private var quickAnswerButton: some View {
         Button(action: model.quickAnswer) {
             Label("Quick Answer", systemImage: "bolt.fill")
-                .font(.caption)
+                .appFont(.caption)
                 .fontWeight(.semibold)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
@@ -1151,7 +1253,7 @@ struct ContentView: View {
             withAnimation { scrollToBottom(proxy) }
         } label: {
             Image(systemName: "arrow.down.circle.fill")
-                .font(.title)
+                .appFont(.title)
                 .symbolRenderingMode(.hierarchical)
         }
         .buttonStyle(.plain)
@@ -1165,12 +1267,15 @@ struct ContentView: View {
                 if !m.images.isEmpty {
                     imageStrip(m.images)
                 }
+                ForEach(m.clips, id: \.self) { url in
+                    ClipPlayer(url: url)
+                }
                 if !m.fromUser, !m.reasoning.isEmpty {
                     ReasoningView(text: m.reasoning,
                                   doc: m.reasoningDoc,
                                   style: ContentView.scaled(
                                       ContentView.reasoningStyle,
-                                      by: typeScale),
+                                      by: textScale),
                                   markdown: model.renderMarkdown,
                                   active: isThinking(m),
                                   label: isThinking(m)
@@ -1269,7 +1374,7 @@ struct ContentView: View {
                 // scroll (scrolls: false).
                 MarkdownTextView(m.answerDoc,
                                  style: ContentView.scaled(
-                                     ContentView.answerStyle, by: typeScale),
+                                     ContentView.answerStyle, by: textScale),
                                  find: findController, findId: m.id,
                                  scrolls: false, speaking: spoken(m))
             } else if !m.fromUser {
@@ -1278,11 +1383,18 @@ struct ContentView: View {
                 // Find works with Markdown rendering off.
                 PlainTextView(answer,
                               style: ContentView.scaled(
-                                  ContentView.answerStyle, by: typeScale),
+                                  ContentView.answerStyle, by: textScale),
                               find: findController, findId: m.id,
                               scrolls: false, speaking: spoken(m))
             } else {
-                Text(answer).textSelection(.enabled)
+                // Sized off the ANSWER's own body size rather than off .body,
+                // so the question and the reply stay the same size at every
+                // zoom stop on both platforms -- which they only did by
+                // coincidence while both were fixed.
+                Text(answer)
+                    .font(.system(
+                        size: ContentView.answerStyle.bodySize * textScale))
+                    .textSelection(.enabled)
             }
         }
         .padding(10)
@@ -1299,7 +1411,7 @@ struct ContentView: View {
 
     private var prefillWhimsical: some View {
         Text(model.thinkStatus)
-            .font(.caption)
+            .appFont(.caption)
             .foregroundStyle(.secondary)
             .modifier(Shimmer(active: true))
     }
@@ -1333,7 +1445,7 @@ struct ContentView: View {
 
     private var noAnswerNote: some View {
         Text("The model made tool calls but gave no final answer.")
-            .font(.caption)
+            .appFont(.caption)
             .italic()
             .foregroundStyle(.secondary)
     }
@@ -1341,7 +1453,7 @@ struct ContentView: View {
     private var loopStopNote: some View {
         Text("The model began repeating itself and was stopped before it "
            + "reached an answer. Try rephrasing.")
-            .font(.caption)
+            .appFont(.caption)
             .italic()
             .foregroundStyle(.secondary)
     }
@@ -1364,6 +1476,73 @@ struct ContentView: View {
         isLive(m) && m.text.isEmpty
     }
 
+}
+
+// The clip a turn was built from, playable in the transcript with its sound.
+// The film strip shows the 32 stills the model was handed; this is the thing
+// itself, which is the only way to hear a soundtrack the model DID receive
+// (a video attachment carries its audio track as its own spans) and which no
+// still can carry.
+//
+// The player is built on APPEAR rather than at init: a transcript bubble is
+// re-evaluated on every streamed token, and an AVPlayer per evaluation would
+// be a decoder per token. Paused on disappear so a scrolled-away clip does
+// not go on playing into a conversation it has left.
+
+// A reopened conversation restores the PATH, and a path can go stale: a
+// picker's temporary copy is swept, a security scope does not survive a
+// relaunch, and the app bundle moves on update. So the file is tested once
+// when the row appears -- present, it plays; gone, it says what it was, which
+// keeps the transcript a truthful record instead of a button that does
+// nothing.
+
+private struct ClipPlayer: View {
+
+    let url: URL
+    @State private var player: AVPlayer?
+    @State private var playable = true
+
+    var body: some View {
+        Group {
+            if playable {
+                ClipSurface(player: player)
+                    .frame(maxWidth: 300, minHeight: 170, maxHeight: 260)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: "film")
+                    Text("Video: \(url.lastPathComponent)")
+                        .lineLimit(1).truncationMode(.middle)
+                }
+                .appFont(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .onAppear {
+            playable = FileManager.default.fileExists(atPath: url.path)
+            if playable, player == nil { player = AVPlayer(url: url) }
+        }
+        .onDisappear { player?.pause() }
+    }
+}
+
+// A sample card must LOOK armed before it fires: the press state is what
+// separates a deliberate tap from a finger that was starting a scroll, and a
+// card is a large target sitting in a scrolling column.
+//
+// The cancellation itself is the scroll view's own and is the reason these
+// moved inside it: a UIScrollView delays touches to its content and takes the
+// press back the instant a drag begins, so a scroll cannot fire a button. As
+// an overlay there was no scroll view to do that, and every touch was a tap.
+
+private struct SampleCardStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.55 : 1)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.12),
+                       value: configuration.isPressed)
+    }
 }
 
 // Collapsed grey (#888) disclosure of an assistant turn's <think> reasoning.
@@ -1405,10 +1584,10 @@ private struct ReasoningView: View {
                 HStack(spacing: 6) {
                     Image(systemName: expanded
                           ? "chevron.down" : "chevron.right")
-                        .font(.caption2)
+                        .appFont(.caption2)
                         .foregroundStyle(.secondary)
                     Text(label)
-                        .font(.caption)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
                 }
                 .contentShape(Rectangle())
@@ -1429,7 +1608,7 @@ private struct ReasoningView: View {
                         MarkdownView(doc, style: style)
                     } else {
                         Text(text)
-                            .font(.callout)
+                            .appFont(.callout)
                             .foregroundStyle(Color(white: 0.53))
                             .textSelection(.enabled)
                     }
@@ -1565,10 +1744,10 @@ private struct ToolCallStrip: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
                 Image(systemName: "wrench.and.screwdriver")
-                    .font(.caption2)
+                    .appFont(.caption2)
                 Text("Using tools")
             }
-            .font(.caption)
+            .appFont(.caption)
             .foregroundStyle(.secondary)
             ForEach(rounds) { round in row(round) }
         }
@@ -1577,16 +1756,16 @@ private struct ToolCallStrip: View {
     private func row(_ round: ChatModel.ToolRound) -> some View {
         HStack(spacing: 6) {
             Text(round.id == rounds.last?.id ? "└─" : "├─")
-                .font(.caption.monospaced())
+                .appFont(.caption).monospaced()
             Image(systemName: round.symbol)
-                .font(.caption2)
+                .appFont(.caption2)
                 .foregroundStyle(errored(round) ? Color.orange
                                                 : Color.secondary)
             Text(round.label)
-                .font(.caption)
+                .appFont(.caption)
             if !round.args.isEmpty {
                 Text(round.args)
-                    .font(.caption2)
+                    .appFont(.caption2)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -1677,7 +1856,7 @@ private struct ThinkingTicker: View {
         // ellipsis would sit. suffix caps the string fed to Text; the frame
         // shows only what fits.
         Text(String(text.suffix(120)))
-            .font(.caption)
+            .appFont(.caption)
             .foregroundStyle(Color(white: 0.53))
             .lineLimit(1)
             .truncationMode(.head)

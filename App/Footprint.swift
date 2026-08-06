@@ -148,23 +148,30 @@ enum Footprint {
             m.operatingSystemVersionString, hardwareID()))
     }
 
+    // The device line is unconditional -- one fact, once, and the tier it
+    // names is what every memory decision in the app is gated on. Only the
+    // 250 ms curve is behind the switch; see DiagGate for what that costs.
+    // Called once, from Instrument.install.
     static func watch() {
         queue.async {
             if timer == nil {
                 describeDevice()
-                let t = DispatchSource.makeTimerSource(queue: queue)
-                t.schedule(deadline: .now() + .milliseconds(tickMS),
-                           repeating: .milliseconds(tickMS))
-                t.setEventHandler {
-                    if let s = sample(),
-                       moved(s.footprint, last) || moved(s.wired, lastWired) {
-                        last = s.footprint
-                        lastWired = s.wired
-                        report("watch")
+                if DiagGate.memWatch {
+                    let t = DispatchSource.makeTimerSource(queue: queue)
+                    t.schedule(deadline: .now() + .milliseconds(tickMS),
+                               repeating: .milliseconds(tickMS))
+                    t.setEventHandler {
+                        if let s = sample(),
+                           moved(s.footprint, last)
+                               || moved(s.wired, lastWired) {
+                            last = s.footprint
+                            lastWired = s.wired
+                            report("watch")
+                        }
                     }
+                    timer = t
+                    t.resume()
                 }
-                timer = t
-                t.resume()
             }
         }
     }

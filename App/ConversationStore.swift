@@ -24,6 +24,12 @@ import Foundation
         let rounds: [Round]
         let images: [Data]
         let loopStopped: Bool
+        // Attached video PATHS, not bytes: a conversation is kilobytes and a
+        // phone clip is tens of megabytes. OPTIONAL because a synthesized
+        // Codable does not fall back to a property's default for a missing
+        // key -- it throws -- so every record written before this field would
+        // stop decoding. Same reason `trace` is optional.
+        let clips: [String]?
     }
 
     // Trimmed trace for debug-on-reopen: timings + metrics + tool results, but

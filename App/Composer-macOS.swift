@@ -27,7 +27,11 @@ struct AttachButton: View {
         .buttonStyle(.plain)
         .foregroundStyle(model.hasAttachments ? Color.accentColor
                                               : Color.secondary)
-        .disabled(model.busy || !model.canAttachImages)
+        // NOT gated on canAttachImages: .txt / .md ride every model, so a
+        // device whose GPU cannot run the towers still attaches documents.
+        // attachableTypes is what narrows the panel to what is actually
+        // takeable, and attachHelp already names the reduced offer.
+        .disabled(model.busy)
         .help(model.attachHelp)
         .fileImporter(isPresented: $showImporter,
                       allowedContentTypes: model.attachableTypes,

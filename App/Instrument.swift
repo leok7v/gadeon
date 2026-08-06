@@ -20,8 +20,14 @@ enum Instrument {
         MarkdownDiag.report = { s in Diag.shared.report(s) }
         MainThreadWatch.shared.start()
         Footprint.watch()
-        // LLM reports through this because it cannot reach App directly.
+        // LLM reports through this because it cannot reach App directly. The
+        // detail twin -- one line per prefill chunk, per downloaded file --
+        // is left NIL unless asked for, so the cost of a silenced channel is
+        // a nil check at the call site rather than a formatted string.
         Diag.memory = { tag in Footprint.report(tag) }
+        if DiagGate.memWatch {
+            Diag.memoryDetail = { tag in Footprint.report(tag) }
+        }
         return true
     }
 
@@ -48,15 +54,17 @@ enum Instrument {
     static func note(_ text: String) { Diag.shared.report(text) }
 
     @MainActor static func beat(_ label: String) {
-        var b = beats[label] ?? (0, Date())
-        b.n += 1
-        let dt = Date().timeIntervalSince(b.at)
-        if dt >= 1.0 {
-            Diag.shared.report("[beat] \(label): \(b.n) evals in "
-                + String(format: "%.1fs", dt))
-            b = (0, Date())
+        if DiagGate.beat {
+            var b = beats[label] ?? (0, Date())
+            b.n += 1
+            let dt = Date().timeIntervalSince(b.at)
+            if dt >= 1.0 {
+                Diag.shared.report("[beat] \(label): \(b.n) evals in "
+                    + String(format: "%.1fs", dt))
+                b = (0, Date())
+            }
+            beats[label] = b
         }
-        beats[label] = b
     }
 }
 
@@ -128,10 +136,15 @@ final class MainThreadWatch: @unchecked Sendable {
                 self.mainCPUms = cpu
                 if ms >= MainThreadWatch.thresholdMs,
                    sent.uptimeNanoseconds >= self.drained {
+                    // `drained` still advances with the switch off, or the
+                    // burst collapsing that makes one stall read as one line
+                    // would come back wrong the moment it is switched on.
                     self.drained = now.uptimeNanoseconds
-                    Diag.shared.report(String(format:
-                        "[hang] main queue starved %.0fms, main thread used "
-                        + "%.0fms CPU", ms, burned))
+                    if DiagGate.hang {
+                        Diag.shared.report(String(format:
+                            "[hang] main queue starved %.0fms, main thread "
+                            + "used %.0fms CPU", ms, burned))
+                    }
                 }
             }
         }

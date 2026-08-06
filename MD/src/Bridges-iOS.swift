@@ -123,6 +123,11 @@ extension NativeText: UIViewRepresentable {
         private var findCaseSensitive = false
         private var spokenText: String?
         private var spokenRange: NSRange?
+        // Copy buttons keyed by the block's atomic id. REUSED across layouts
+        // rather than torn down, so a copy checkmark survives a streaming
+        // reflow -- and so rebuilding inside layoutSubviews settles instead of
+        // adding a subview on every pass.
+        private var copyButtons: [String: CopyRunButton] = [:]
 
         var liveFindCount: Int { findMatches.count }
 
@@ -344,6 +349,122 @@ extension NativeText: UIViewRepresentable {
                 lastWidth = bounds.size.width
                 invalidateIntrinsicContentSize()
             }
+            rebuildCopyOverlays()
+        }
+
+        // A corner Copy button pinned to each atomic code / table block, so a
+        // reader takes the WHOLE block's source (atomicCopyKey) in one tap
+        // rather than dragging a selection across it. The attributes this
+        // reads are already stamped by DocumentText on both platforms; only
+        // the buttons were missing here.
+        //
+        // A REAL control, unlike the macOS twin's decorative one. There a
+        // selection drag can begin anywhere over a block, so the button had to
+        // refuse the mouse and let the text view detect the click; a touch
+        // selection begins with a long press, which a corner button does not
+        // take away.
+        //
+        // Images carry an atomic id but no copy source, so they get no button.
+        private func rebuildCopyOverlays() {
+            var live: Set<String> = []
+            layoutManager.ensureLayout(for: textContainer)
+            let inset = textContainerInset
+            let full = NSRange(location: 0, length: textStorage.length)
+            textStorage.enumerateAttribute(atomicIdKey, in: full,
+                                           options: []) { value, range, _ in
+                let id = value as? String
+                let source = id == nil ? nil : textStorage.attribute(
+                    atomicCopyKey, at: range.location,
+                    effectiveRange: nil) as? String
+                if let id, source != nil {
+                    let gr = layoutManager.glyphRange(
+                        forCharacterRange: range, actualCharacterRange: nil)
+                    let block = layoutManager.boundingRect(
+                        forGlyphRange: gr, in: textContainer)
+                    // Centred on the FIRST LINE fragment rather than on the
+                    // block's top edge: the symbol is centred in its own
+                    // frame, so anchoring to the top reads as sitting on the
+                    // first line's baseline, worst on a table whose header row
+                    // starts below its cell padding.
+                    let line = layoutManager.lineFragmentUsedRect(
+                        forGlyphAt: gr.location, effectiveRange: nil)
+                    let side = CopyRunButton.side
+                    let btn = copyButtons[id] ?? makeCopyButton(id)
+                    btn.frame = CGRect(
+                        x: block.maxX + inset.left - side - 4,
+                        y: line.minY + inset.top + (line.height - side) / 2,
+                        width: side, height: side)
+                    copyButtons[id] = btn
+                    live.insert(id)
+                }
+            }
+            for (id, btn) in copyButtons where !live.contains(id) {
+                btn.removeFromSuperview()
+                copyButtons[id] = nil
+            }
+        }
+
+        private func makeCopyButton(_ id: String) -> CopyRunButton {
+            let btn = CopyRunButton()
+            btn.atomicId = id
+            btn.addAction(UIAction { [weak self] _ in
+                self?.copyBlock(id)
+            }, for: .touchUpInside)
+            addSubview(btn)
+            return btn
+        }
+
+        // The block's CURRENT source, found by locating its atomic id in the
+        // live storage: ranges shift as tokens stream but the id is stable, so
+        // a block copied mid-reply yields its latest text rather than the text
+        // it had when the button was made.
+        private func copyBlock(_ id: String) {
+            var copy: String? = nil
+            let full = NSRange(location: 0, length: textStorage.length)
+            textStorage.enumerateAttribute(atomicIdKey, in: full,
+                                           options: []) { value, range, stop in
+                if value as? String == id {
+                    copy = textStorage.attribute(
+                        atomicCopyKey, at: range.location,
+                        effectiveRange: nil) as? String
+                    stop.pointee = true
+                }
+            }
+            if let copy {
+                platformSetClipboardString(copy)
+                copyButtons[id]?.flashDone()
+            }
+        }
+    }
+}
+
+// The macOS twin of this lives in Bridges-macOS.swift; the two differ only in
+// that one is decorative and this one is tappable, for the reason recorded at
+// rebuildCopyOverlays.
+
+private final class CopyRunButton: UIButton {
+
+    static let side: CGFloat = 26
+
+    var atomicId = ""
+
+    init() {
+        super.init(frame: .zero)
+        tintColor = .secondaryLabel
+        accessibilityLabel = "Copy"
+        setSymbol("doc.on.doc")
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    private func setSymbol(_ name: String) {
+        setImage(UIImage(systemName: name), for: .normal)
+    }
+
+    func flashDone() {
+        setSymbol("checkmark")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            [weak self] in self?.setSymbol("doc.on.doc")
         }
     }
 }
