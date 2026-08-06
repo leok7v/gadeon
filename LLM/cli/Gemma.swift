@@ -89,7 +89,7 @@ enum GemmaCLIError: Error, CustomStringConvertible {
     if let dir = valueAfter(args, "--gemma-unified-gate") {
         try gemmaUnifiedGate(chat, dir,
                              valueAfter(args, "--image")
-                                 ?? "tests/vl/ad-rexall.jpg",
+                                 ?? "LLM/fixtures/vl/ad-rexall.jpg",
                              valueAfter(args, "--clip") ?? "")
         exit(0)
     }
@@ -131,7 +131,7 @@ enum GemmaCLIError: Error, CustomStringConvertible {
     }
     if let dir = valueAfter(args, "--gemma-patch-gate") {
         try gemmaPatchGate(chat, dir, valueAfter(args, "--image")
-            ?? "tests/vl/ad-rexall.jpg")
+            ?? "LLM/fixtures/vl/ad-rexall.jpg")
         exit(0)
     }
     if let dir = valueAfter(args, "--gemma-mel-gate") {
@@ -1375,7 +1375,7 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
         contentsOf: base.appendingPathComponent("manifest.json"))
     let man = try JSONSerialization.jsonObject(with: raw) as! [String: Any]
     let turn = man["image_turn"] as? [String: Any] ?? [:]
-    let image = turn["image"] as? String ?? "tests/vl/elephant.jpeg"
+    let image = turn["image"] as? String ?? "LLM/fixtures/vl/elephant.jpeg"
     let embd = chat.model.cfg.nEmbd
     let nLayer = chat.model.cfg.nLayer
     let wire = try chat.visionWire()
