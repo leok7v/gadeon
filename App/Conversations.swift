@@ -183,7 +183,11 @@ extension ChatModel {
             },
             images: m.images.compactMap { cg in jpeg(cg) },
             loopStopped: m.loopStopped,
-            clips: m.clips.map { url in storedPath(url) })
+            clips: m.clips.map { url in storedPath(url) },
+            docs: m.docs.map { ref in
+                ConversationStore.StoredDoc(path: storedPath(ref.url),
+                                            bytes: ref.bytes)
+            })
     }
 
     // Rebuild a display Message from its stored projection. The Markdown docs
@@ -198,6 +202,9 @@ extension ChatModel {
         // checks, so a clip that is gone becomes a named row rather than a
         // player that cannot play.
         m.clips = (s.clips ?? []).map { p in restoredURL(p) }
+        m.docs = (s.docs ?? []).map { d in
+            ChatModel.DocRef(url: restoredURL(d.path), bytes: d.bytes)
+        }
         m.toolRounds = s.rounds.enumerated().map { pair in
             ToolRound(id: pair.offset, emitted: pair.element.emitted,
                       label: pair.element.label, symbol: pair.element.symbol,

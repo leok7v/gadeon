@@ -1297,6 +1297,9 @@ struct ContentView: View {
                 ForEach(m.clips, id: \.self) { url in
                     ClipPlayer(url: url)
                 }
+                ForEach(m.docs, id: \.self) { doc in
+                    DocChip(doc: doc)
+                }
                 if !m.fromUser, !m.reasoning.isEmpty {
                     ReasoningView(text: m.reasoning,
                                   doc: m.reasoningDoc,

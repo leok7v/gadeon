@@ -30,6 +30,14 @@ import Foundation
         // key -- it throws -- so every record written before this field would
         // stop decoding. Same reason `trace` is optional.
         let clips: [String]?
+        // Attached DOCUMENTS: where the file was kept, and how much text came
+        // out of it. Optional for the same reason `clips` is.
+        let docs: [StoredDoc]?
+    }
+
+    struct StoredDoc: Codable {
+        let path: String
+        let bytes: Int
     }
 
     // Trimmed trace for debug-on-reopen: timings + metrics + tool results, but

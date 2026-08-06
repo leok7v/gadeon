@@ -12,6 +12,16 @@ import UniformTypeIdentifiers
         let id = UUID()
         let name: String
         let content: String
+        // Where the file itself is, so the transcript can offer it back. The
+        // TEXT is what the turn carries; this is only for the reader.
+        let url: URL?
+    }
+
+    // A document as the TRANSCRIPT needs it: the file to offer back, and how
+    // much text came out of it.
+    struct DocRef: Hashable {
+        let url: URL
+        let bytes: Int
     }
 
     struct ImageAttachment: Identifiable {
@@ -102,6 +112,14 @@ import UniformTypeIdentifiers
         // picker's temporary copy, a security scope, or the app bundle moving
         // on update -- so the view tests the file and falls back to naming it.
         var clips: [URL] = []
+        // The turn's attached DOCUMENTS. A .txt arrives as itself, while a
+        // PDF or an office file was read into Markdown first, and the size
+        // recorded here is of that TEXT -- which is the honest thing to show,
+        // since text is the whole of what the model was given. A page image
+        // never reached it.
+        //
+        // Same path-not-bytes rule as clips, for the same reasons.
+        var docs: [DocRef] = []
         // The turn's tool rounds, appended live as the session runs them, so
         // the transcript shows which tools ran with what arguments -- the
         // "did it even call the tool" debugging surface.
@@ -1709,12 +1727,13 @@ import UniformTypeIdentifiers
 
     // A dropped .txt/.md: keep the content, add a uniquely-named inline
     // reference (so two same-named files stay distinct) at `at`.
-    func attachDoc(_ name: String, _ content: String, at offset: Int) {
+    func attachDoc(_ name: String, _ content: String, at offset: Int,
+                   from url: URL? = nil) {
         let capped = Self.capDoc(content)
         // Skip an exact-content duplicate (same file dropped twice).
         if !attachedDocs.contains(where: { $0.content == capped }) {
             let unique = uniqueName(name)
-            attachedDocs.append(Doc(name: unique, content: capped))
+            attachedDocs.append(Doc(name: unique, content: capped, url: url))
             insertRef(unique, at: offset)
         }
     }
@@ -1723,29 +1742,54 @@ import UniformTypeIdentifiers
     // everything downstream sees exactly what a dropped .md gives and nothing
     // else in the turn has to know where the text came from.
     //
-    // The file is COPIED first: reading it is seconds of work on anything
-    // large, so it happens off the main actor, and the security scope a drop
-    // holds does not outlive the loop that opened it. The reference appears
-    // when the text lands rather than at the moment of the drop, which is
-    // also when a user would have got it had they waited.
+    // The file is COPIED first, and the copy is what the transcript keeps.
+    // Reading is seconds of work on anything large, so it happens off the
+    // main actor, and neither the security scope a drop holds nor the
+    // original path outlives this turn -- a sandboxed app cannot reopen a
+    // dropped URL later, so a transcript pointing at one would offer a
+    // document it could not show. The reference appears when the text lands
+    // rather than at the moment of the drop, which is also when a user would
+    // have got it had they waited.
     private func convertDoc(_ from: URL, _ name: String) {
-        let copy = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString + "-" + name)
-        try? FileManager.default.removeItem(at: copy)
-        if (try? FileManager.default.copyItem(at: from, to: copy)) != nil {
+        if let kept = ChatModel.keep(from, name) {
             converting += 1
             flashHUD("Reading \(name)")
             Task { @MainActor in
-                let text = await ChatModel.markdown(of: copy)
-                try? FileManager.default.removeItem(at: copy)
+                let text = await ChatModel.markdown(of: kept)
                 converting -= 1
                 if let text {
-                    attachDoc(name, text, at: caret)
+                    attachDoc(name, text, at: caret, from: kept)
                 } else {
+                    try? FileManager.default.removeItem(at: kept)
                     flashHUD("Cannot read \(name)")
                 }
             }
         }
+    }
+
+    // Attached files live beside the conversations that cite them, under the
+    // Data container's Application Support -- the same store the weights use,
+    // and preserved across upgrades where Caches is purgeable. The name is
+    // unique-prefixed so two files called report.pdf cannot collide.
+    //
+    // NOT pruned when a conversation is deleted. See the attachment-store
+    // task; a handful of documents is small beside one model.
+    private static let attachments: URL = {
+        let fm = FileManager.default
+        let support = (try? fm.url(for: .applicationSupportDirectory,
+                                   in: .userDomainMask, appropriateFor: nil,
+                                   create: true)) ?? fm.temporaryDirectory
+        let dir = support.appendingPathComponent("attachments",
+                                                 isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    private static func keep(_ from: URL, _ name: String) -> URL? {
+        let to = attachments
+            .appendingPathComponent(UUID().uuidString + "-" + name)
+        return (try? FileManager.default.copyItem(at: from, to: to)) != nil
+            ? to : nil
     }
 
     // Off the main actor: a scanned PDF puts every page through recognition,
@@ -1756,6 +1800,17 @@ import UniformTypeIdentifiers
                 ? try? await Pdf2md.markdown(of: url)
                 : try? Docs2md.markdown(of: url)
         }.value
+    }
+
+    // What the transcript keeps of a turn's documents: the file to offer back
+    // and the size of the TEXT taken from it. A doc whose file could not be
+    // kept is dropped rather than shown as a chip that opens nothing.
+    private static func refs(_ docs: [Doc]) -> [DocRef] {
+        docs.compactMap { doc in
+            doc.url.map { url in
+                DocRef(url: url, bytes: doc.content.utf8.count)
+            }
+        }
     }
 
     // Bound a doc to maxDocBytes, cut on a character boundary and marked, so one
@@ -1887,7 +1942,8 @@ import UniformTypeIdentifiers
             } else if Self.docExts.contains(ext),
                       attachedDocs.count < Self.maxDocs,
                       let text = try? String(contentsOf: url, encoding: .utf8) {
-                attachDoc(url.lastPathComponent, text, at: caret)
+                attachDoc(url.lastPathComponent, text, at: caret,
+                          from: Self.keep(url, url.lastPathComponent))
             } else if Self.convertExts.contains(ext),
                       attachedDocs.count < Self.maxDocs {
                 convertDoc(url, url.lastPathComponent)
@@ -2262,6 +2318,7 @@ import UniformTypeIdentifiers
         if let media {
             let images = attachedImages
             let clips = attachedClips
+            let docs = attachedDocs
             let previews = images.compactMap { img in
                 VisionPreprocess.thumbnail(img.data, maxPx: 640)
             }
@@ -2282,6 +2339,7 @@ import UniformTypeIdentifiers
             }
             softTurn(display: display, typed: typed, previews: previews,
                      films: clips.filter { c in c.isVideo }.map { c in c.url },
+                     papers: ChatModel.refs(docs),
                      cue: cue) { [weak self] in
                 let out = try await ChatModel.encode(
                     media, images: images, clips: clips) { peek in
@@ -2326,7 +2384,7 @@ import UniformTypeIdentifiers
     // the bubbles to the rollback is the same afterwards.
     private func softTurn(
         display: String, typed: String, previews: [CGImage],
-        films: [URL] = [], labelled: Bool = true,
+        films: [URL] = [], papers: [DocRef] = [], labelled: Bool = true,
         cue: SpokenCue.Kind = .thinking,
         _ encode: @escaping @Sendable () async throws
             -> (parts: [ContentPart], spans: [SoftSpan], perImage: Int)
@@ -2336,6 +2394,7 @@ import UniformTypeIdentifiers
             activePrefillStage = .vision
             var asked = Message(fromUser: true, text: display,
                                 images: previews, clips: films)
+            asked.docs = papers
             asked.placeholder = spokenTurn
             messages.append(asked)
             messages.append(Message(fromUser: false, text: ""))
@@ -2698,7 +2757,8 @@ import UniformTypeIdentifiers
             flashHUD("Reading the report")
             Task { @MainActor in
                 if let text = await ChatModel.markdown(of: url) {
-                    attachDoc("harvest-report.pdf", text, at: 0)
+                    attachDoc("harvest-report.pdf", text, at: 0,
+                              from: url)
                     input += ChatModel.sampleReport
                     send()
                 } else {
@@ -2922,12 +2982,15 @@ import UniformTypeIdentifiers
             lastTurnSpoken = false
             input = ""
             caret = 0
+            let papers = ChatModel.refs(attachedDocs)
             attachedDocs = []
             // Prefill runs before the first decoded token. The status
             // line keeps the previous turn's numbers (shimmering) rather
             // than blanking; only a turn-zero context shows a phrase.
             prefilling = true
-            messages.append(Message(fromUser: true, text: display))
+            var asked = Message(fromUser: true, text: display)
+            asked.docs = papers
+            messages.append(asked)
             messages.append(Message(fromUser: false, text: ""))
             let idx = messages.count - 1
             resetLiveBuffers()
