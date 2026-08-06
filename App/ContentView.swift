@@ -897,14 +897,15 @@ struct ContentView: View {
                            thumb: ChatModel.samplePictureThumb,
                            action: model.runPictureSample)
             }
-            // A SYMBOL, not a poster frame: the clip and the photo are the
-            // same beach, so two thumbnails would read as one demo listed
-            // twice.
+            // The badge is what says CLIP: a bare poster frame beside the
+            // photo's reads as a second picture demo until the eye reaches
+            // the title. With no poster in the bundle the symbol stands in.
             if model.canOfferVideoSample, model.showSample("video") {
                 sampleCard(symbol: "play.rectangle",
                            title: "Video Understanding",
                            subtitle: "Watch the frames it is looking at",
-                           thumb: nil,
+                           thumb: ChatModel.sampleClipThumb,
+                           badge: "play.circle.fill",
                            action: model.runVideoSample)
             }
         }
@@ -915,7 +916,8 @@ struct ContentView: View {
     }
 
     private func sampleCard(symbol: String, title: String, subtitle: String,
-                            thumb: CGImage?, action: @escaping () -> Void)
+                            thumb: CGImage?, badge: String? = nil,
+                            action: @escaping () -> Void)
         -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
@@ -925,6 +927,7 @@ struct ContentView: View {
                         .aspectRatio(contentMode: .fill)
                         .frame(width: 44, height: 44)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay { badgeMark(badge) }
                 } else {
                     Image(systemName: symbol)
                         .appFont(.title2)
@@ -950,6 +953,20 @@ struct ContentView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(SampleCardStyle())
+    }
+
+    // Sized in POINTS, not the app's text scale: it sits on a thumbnail with
+    // a fixed 44pt frame, and a badge that followed the zoom would outgrow
+    // it. The shadow is what keeps a white glyph legible on a bright frame.
+
+    @ViewBuilder
+    private func badgeMark(_ symbol: String?) -> some View {
+        if let symbol {
+            Image(systemName: symbol)
+                .font(.system(size: 18))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.55), radius: 2)
+        }
     }
 
     // The status line under the prompt: the turn's numbers, or the working

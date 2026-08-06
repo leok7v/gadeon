@@ -2514,6 +2514,15 @@ import UniformTypeIdentifiers
         VisionPreprocess.thumbnail(data, maxPx: 128)
     }
 
+    // A STILL of the clip rather than a frame pulled from it: drawing the card
+    // must not depend on decoding the video, which is exactly what fails on a
+    // device whose formats the clip outruns -- the demo would then advertise
+    // itself with a blank square on the phones least able to run it.
+    static let sampleClipThumb: CGImage? = Bundle.main
+        .url(forResource: "dogs-beach-poster", withExtension: "jpg")
+        .flatMap { url in try? Data(contentsOf: url) }
+        .flatMap { data in VisionPreprocess.thumbnail(data, maxPx: 128) }
+
     // "Always show sample prompts" (Settings), OFF by default. Off, each
     // sample shows until it has been used once, then hides; on, every
     // applicable sample always shows. One switch -- no per-conversation
@@ -2530,7 +2539,7 @@ import UniformTypeIdentifiers
 
     // The samples applicable to the current model + access tier -- mirrors the
     // pill view's own gating: calc always, research when online, the picture
-    // demo on a vision model, the clip on a desktop that takes video.
+    // demo on a vision model, the clip on a device that takes video.
     private var applicableSampleIds: [String] {
         var ids = ["calc"]
         if accessState != .offline { ids.append("research") }
@@ -2541,14 +2550,14 @@ import UniformTypeIdentifiers
         return ids
     }
 
-    // Desktop only. A video turn is ~32 tower passes and a couple of thousand
-    // soft tokens to prefill whatever the clip's own size -- the frame count
-    // and per-frame budget are the model's numbers, not the file's -- and on a
-    // phone that is a minute before a first-run user sees a word.
+    // A video turn is ~32 tower passes and a couple of thousand soft tokens to
+    // prefill whatever the clip's own size -- the frame count and per-frame
+    // budget are the model's numbers, not the file's -- so the smallest phones
+    // are not offered a demo that would hold them for a minute.
     // canAttachVideo already implies a soft-token model, so it picks out the
     // gemma family on its own.
     var canOfferVideoSample: Bool {
-        !isOS && canAttachVideo && ChatModel.sampleVideo != nil
+        installedGB >= 4 && canAttachVideo && ChatModel.sampleVideo != nil
     }
 
     // The pill area shows on an empty chat while at least one applicable

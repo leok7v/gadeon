@@ -163,7 +163,7 @@ public final class Gemma4Media: @unchecked Sendable {
             throw Gemma4MediaError(description:
                 "Frame \(i) of that video could not be read.")
         }
-        return strip.span()
+        return try strip.span()
     }
 
     // One frame to its soft rows, with the tower built ONCE: a construction
@@ -225,8 +225,19 @@ public final class Gemma4Media: @unchecked Sendable {
                 count: got.count))
         }
 
-        func span() -> SoftSpan {
-            SoftSpan(placeholder: film.token, ids: ids, features: feats)
+        // A clip whose frames all fail to decode leaves nothing here, and a
+        // span carrying no rows is a precondition failure deep in the prefill
+        // rather than a sentence a user can act on. The usual cause is a
+        // codec the device has no decoder for -- AV1 below an A17 Pro, where
+        // the sound track still decodes and only the picture is missing.
+        func span() throws -> SoftSpan {
+            if ids.isEmpty {
+                throw Gemma4MediaError(description:
+                    "That video could not be read. This device may not "
+                    + "support the format it was compressed with.")
+            }
+            return SoftSpan(placeholder: film.token, ids: ids,
+                            features: feats)
         }
     }
 
@@ -272,7 +283,7 @@ public final class Gemma4Media: @unchecked Sendable {
                     "Frame \(read) of that video could not be read.")
             }
         }
-        return strip.span()
+        return try strip.span()
     }
 
     // What a microphone must capture at for this model's frontend, so a
