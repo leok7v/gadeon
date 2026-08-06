@@ -1,26 +1,36 @@
-# Pdf2md: where it comes from, and the contract that keeps it cheap
+# Pdf2md and Docs2md: where they come from, and the contract
 
-`LLM/src/Shared/Pdf2md.swift` is VENDORED. It is developed in a separate
-effort against its own benchmark, and it arrives here by copy. Re-import is
-`cp`, and it must stay that way.
+`LLM/src/Shared/Pdf2md.swift` and `LLM/src/Shared/Docs2md.swift` are both
+VENDORED. They are developed in a separate effort against its own benchmarks
+and arrive here by copy. Re-import is `cp`, and it must stay that way. (This
+directory is named for that effort, which ships both readers, not for the one
+file.)
+
+Pdf2md reads PDFs, which have to be reconstructed from geometry. Docs2md
+reads the formats that STATE their structure -- docx, xlsx, pptx, epub, html
+-- so it infers nothing and needs no OCR. Same contract for both.
 
 ## The contract
 
-DO NOT EDIT THE VENDORED FILE. Specifically, do not:
+DO NOT EDIT A VENDORED FILE. Specifically, do not:
 
-- rename its types (`Converter`, `Page`, `Element`, `Mode`, `Fragment`,
-  `Grid`, `Ruling`, `Audit`, `ConversionError`),
-- add `public` to anything in it,
-- nest its types to tidy the namespace,
-- reflow, reorder, or "while I am here" it.
+- rename their types (Pdf2md: `Converter`, `Page`, `Element`, `Mode`,
+  `Fragment`, `Grid`, `Ruling`, `Audit`, `ConversionError`. Docs2md:
+  `Format`, `DocsError`, `Archive`, `Markup`, `MarkupParser`, `Cell`,
+  `DocsElement`, `Span`, `Emitter`, `DocsConverter`, `Relations`,
+  `WordReader`, `HTMLParser`, `PageReader`, `SheetReader`, `SlideReader`,
+  `BookReader`),
+- add `public` to anything in them,
+- nest their types to tidy the namespace,
+- reflow, reorder, or "while I am here" them.
 
 Every one of those is tempting and every one converts the next re-import
-from a copy into a merge, against a file whose constants are still being
+from a copy into a merge, against files whose constants are still being
 swept upstream. None of them buys anything: the names collide with nothing
 in this module (checked), and `internal` is sufficient because the public
 surface lives in a SEPARATE file beside it. Put every adaptation there.
 
-If the file needs a change to be usable, ASK UPSTREAM FOR IT rather than
+If a file needs a change to be usable, ASK UPSTREAM FOR IT rather than
 making it locally. That worked once already: the span audit was `private`
 and folded into a trace string, and upstream exposed it as data on request
 (`Audit` plus the `onAudit` sink). A local patch would have been faster and
@@ -28,7 +38,13 @@ would have cost every re-import after it.
 
 ## The gate
 
-`onAudit` is the correctness assertion available here. It fires once per
+Docs2md has no audit, and needs none: these formats state their structure, so
+`Docs2mdTests` asserts the structure exactly -- a heading is a heading, a
+table row is a table row. Its containers are BUILT in the test, which the
+reader makes cheap by accepting STORED zip entries, so a fixture is a few
+parts of XML and a forty-line archive writer with nothing to license.
+
+For Pdf2md, `onAudit` is the correctness assertion available here. It fires once per
 page whatever `trace` says, and the counts need no ground truth:
 
     lost == 0 && unaccounted == 0
@@ -45,7 +61,13 @@ app depends on. Two different jobs; do not try to host the first one.
 
 ## Why the fixtures here are generated, not borrowed
 
-The upstream benchmark is `piushorn/pdf-parse-bench`:
+Docs2md is scored upstream against Microsoft's markitdown (MIT,
+https://github.com/microsoft/markitdown), currently 48/48 across docx, xlsx,
+pptx, epub and html. Its test documents were NOT borrowed either, for the
+first reason below: markitdown's own licence covers the tool, not
+necessarily what its fixtures contain.
+
+The upstream PDF benchmark is `piushorn/pdf-parse-bench`:
 
 - https://huggingface.co/datasets/piushorn/pdf-parse-bench
 - https://github.com/phorn1/pdf-parse-bench
