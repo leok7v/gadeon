@@ -1,6 +1,9 @@
 # model weights download on demand; never committed
 models/
 
+# local scratch, and any build directed into it
+tmp/
+
 # build products
 .build/
 Build/
