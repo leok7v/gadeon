@@ -40,9 +40,17 @@ would have cost every re-import after it.
 
 Docs2md has no audit, and needs none: these formats state their structure, so
 `Docs2mdTests` asserts the structure exactly -- a heading is a heading, a
-table row is a table row. Its containers are BUILT in the test, which the
-reader makes cheap by accepting STORED zip entries, so a fixture is a few
+table row is a table row. Most of its containers are BUILT in the test, which
+the reader makes cheap by accepting STORED zip entries, so a fixture is a few
 parts of XML and a forty-line archive writer with nothing to license.
+
+`fixtures/docs/` is the exception, and covers what a hand-cut fixture cannot:
+whole documents from a real writer, with styles.xml, numbering.xml, slide
+masters and every other part an authoring tool emits. They assert a ROUND
+TRIP -- Markdown out to a document and back -- so a table has to survive two
+independent implementations of OOXML. They are still nobody else's:
+`harvest-report.md` is our own invented prose and sits beside them, and
+regenerating the pair is two `pandoc` commands (named in the test).
 
 For Pdf2md, `onAudit` is the correctness assertion available here. It fires once per
 page whatever `trace` says, and the counts need no ground truth:

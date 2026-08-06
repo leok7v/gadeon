@@ -291,6 +291,65 @@ struct Docs2mdTests {
         #expect(markdown.contains("| Western | 22.9 |"), "\(markdown)")
     }
 
+    // ---- against files a real writer produced --------------------------
+
+    // The fixtures above are the MINIMUM each reader must handle, cut to the
+    // few parts it opens. These two are the opposite test: whole documents
+    // from a real writer, carrying styles.xml, numbering.xml, slide masters
+    // and every other part an authoring tool emits and a hand-written
+    // fixture never would.
+    //
+    // They are the one thing in this suite committed rather than built,
+    // because generating them needs pandoc and a test may not. Nothing here
+    // is anyone else's: harvest-report.md is our own invented prose, and
+    // regenerating the pair is two commands from it.
+    //
+    //     pandoc harvest-report.md -o harvest-report.docx
+    //     pandoc harvest-report.md -o harvest-report.pptx
+    //
+    // Two components up from LLM/tests/<file> is LLM.
+    private static let written = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("fixtures/docs")
+
+    // The assertion is a ROUND TRIP -- Markdown out to a document and back --
+    // so the table has to survive being written into OOXML and read out of it
+    // by two independent implementations. Nothing softer would notice a cell
+    // landing in the wrong column.
+    private static let table = """
+        | Block | Trees | Tonnes | Yield per tree | To press |
+        | --- | --- | --- | --- | --- |
+        | Eastern | 840 | 47.2 | 56.2kg | 18% |
+        | Western | 610 | 22.9 | 37.5kg | 41% |
+        | Riverbank | 295 | 19.4 | 65.8kg | 9% |
+        | Nursery | 150 | 3.1 | 20.7kg | 0% |
+        """
+
+    @Test func aWrittenWordFileRoundTrips() throws {
+        let markdown = try Docs2md.markdown(
+            of: Docs2mdTests.written
+                .appendingPathComponent("harvest-report.docx"))
+        #expect(markdown.contains("# Northwind Orchards"), "\(markdown)")
+        #expect(markdown.contains("## Harvest Report, Third Quarter"),
+                "\(markdown)")
+        #expect(markdown.contains(Docs2mdTests.table), "\(markdown)")
+        #expect(markdown.contains("Riverbank remains the puzzle"),
+                "\(markdown)")
+    }
+
+    // A deck splits at its headings, so the same source becomes slides -- and
+    // the table has to survive that too, sitting inside one of them.
+    @Test func aWrittenDeckKeepsItsSlidesAndTable() throws {
+        let markdown = try Docs2md.markdown(
+            of: Docs2mdTests.written
+                .appendingPathComponent("harvest-report.pptx"))
+        #expect(markdown.contains("## Slide 1"), "\(markdown)")
+        #expect(markdown.contains("## Slide 2"), "\(markdown)")
+        #expect(markdown.contains("### Northwind Orchards"), "\(markdown)")
+        #expect(markdown.contains(Docs2mdTests.table), "\(markdown)")
+    }
+
     // An extension with no reader says so, rather than returning empty text
     // that a caller would attach to a turn as if the file had been read.
     @Test func anUnknownFormatIsRefused() throws {
