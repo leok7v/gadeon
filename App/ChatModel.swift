@@ -231,6 +231,9 @@ import UniformTypeIdentifiers
     // Attached .txt/.md docs for the next turn: shown as chips, referenced
     // inline as "@name", and substituted into the prompt in place at send.
     var attachedDocs: [Doc] = []
+    // Files being read into Markdown right now. A drop is accepted the moment
+    // it starts, and only the text arrives late.
+    private(set) var converting = 0
     // Sound / video for the next turn, on a model that takes them. Referenced
     // inline as "@name" exactly like images and docs, so one composer gesture
     // covers every kind.
@@ -482,9 +485,14 @@ import UniformTypeIdentifiers
 
     // What the open panel accepts, so the picker offers exactly what the
     // model can take rather than letting a user choose a file that will be
-    // silently ignored. Docs ride every model.
+    // silently ignored. Docs ride every model, and so do the formats that
+    // become one: a PDF or an office file is read into Markdown before it is
+    // attached, which needs no tower and no vision.
     var attachableTypes: [UTType] {
-        var out: [UTType] = [.plainText]
+        var out: [UTType] = [.plainText, .pdf]
+        out += Docs2md.readable.compactMap { ext in
+            UTType(filenameExtension: ext)
+        }
         if canAttachImages { out.append(.image) }
         if canAttachAudio { out.append(.audio) }
         if canAttachVideo { out.append(.movie) }
@@ -1711,6 +1719,45 @@ import UniformTypeIdentifiers
         }
     }
 
+    // A PDF or an office file becomes Markdown BEFORE it is attached, so
+    // everything downstream sees exactly what a dropped .md gives and nothing
+    // else in the turn has to know where the text came from.
+    //
+    // The file is COPIED first: reading it is seconds of work on anything
+    // large, so it happens off the main actor, and the security scope a drop
+    // holds does not outlive the loop that opened it. The reference appears
+    // when the text lands rather than at the moment of the drop, which is
+    // also when a user would have got it had they waited.
+    private func convertDoc(_ from: URL, _ name: String) {
+        let copy = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + "-" + name)
+        try? FileManager.default.removeItem(at: copy)
+        if (try? FileManager.default.copyItem(at: from, to: copy)) != nil {
+            converting += 1
+            flashHUD("Reading \(name)")
+            Task { @MainActor in
+                let text = await ChatModel.markdown(of: copy)
+                try? FileManager.default.removeItem(at: copy)
+                converting -= 1
+                if let text {
+                    attachDoc(name, text, at: caret)
+                } else {
+                    flashHUD("Cannot read \(name)")
+                }
+            }
+        }
+    }
+
+    // Off the main actor: a scanned PDF puts every page through recognition,
+    // and the office readers walk a whole archive.
+    private static func markdown(of url: URL) async -> String? {
+        await Task.detached(priority: .userInitiated) {
+            url.pathExtension.lowercased() == "pdf"
+                ? try? await Pdf2md.markdown(of: url)
+                : try? Docs2md.markdown(of: url)
+        }.value
+    }
+
     // Bound a doc to maxDocBytes, cut on a character boundary and marked, so one
     // dropped file cannot balloon the prompt (the aggregate warning is separate).
     private static func capDoc(_ content: String) -> String {
@@ -1791,6 +1838,9 @@ import UniformTypeIdentifiers
     static let imageExts: Set<String> =
         ["png", "jpg", "jpeg", "heic", "heif", "gif", "webp", "bmp", "tiff"]
     static let docExts: Set<String> = ["txt", "md", "markdown", "text"]
+    // Read into Markdown rather than read as text. They land in the same
+    // place a .md does, so the cap and the send path are already right.
+    static let convertExts: Set<String> = Set(["pdf"] + Docs2md.readable)
     // Sound and video are recognised by the SYSTEM's own type conformance,
     // not by a list here: the file panel already filters on UTType.audio /
     // .movie, so an extension list can only disagree with it -- and it did,
@@ -1829,7 +1879,7 @@ import UniformTypeIdentifiers
             let ext = url.pathExtension.lowercased()
             let scoped = url.startAccessingSecurityScopedResource()
             let before = attachedImages.count + attachedDocs.count
-                + attachedClips.count
+                + attachedClips.count + converting
             if Self.imageExts.contains(ext),
                attachedImages.count < Self.maxImages,
                let data = try? Data(contentsOf: url) {
@@ -1838,14 +1888,19 @@ import UniformTypeIdentifiers
                       attachedDocs.count < Self.maxDocs,
                       let text = try? String(contentsOf: url, encoding: .utf8) {
                 attachDoc(url.lastPathComponent, text, at: caret)
+            } else if Self.convertExts.contains(ext),
+                      attachedDocs.count < Self.maxDocs {
+                convertDoc(url, url.lastPathComponent)
             } else if let isVideo = Self.clipKind(url) {
                 attachClip(url, isVideo: isVideo, at: caret)
             }
             // Nothing appeared, so the drop was refused somewhere -- an
             // unreadable type, a model that cannot take this kind, or a full
-            // slate. Any of them looked identical before: silence.
+            // slate. Any of them looked identical before: silence. A file
+            // still being read counts as accepted, or every convertible drop
+            // would report itself refused a second before it arrives.
             let after = attachedImages.count + attachedDocs.count
-                + attachedClips.count
+                + attachedClips.count + converting
             if after == before { refused.append(ext.isEmpty ? "file" : ext) }
             if scoped { url.stopAccessingSecurityScopedResource() }
         }
@@ -2514,6 +2569,17 @@ import UniformTypeIdentifiers
         VisionPreprocess.thumbnail(data, maxPx: 128)
     }
 
+    // A one-page report whose TABLE holds the answer: the prose names Eastern
+    // at every turn (most trees, most tonnes) while the highest yield per
+    // tree is Riverbank's, which only the table says. So a run that merely
+    // reads the words gets it wrong, visibly.
+    static let sampleReport =
+        "Which block gives the most fruit per tree, and what makes that "
+        + "surprising?"
+
+    static let samplePdf: URL? = Bundle.main
+        .url(forResource: "harvest-report", withExtension: "pdf")
+
     // A STILL of the clip rather than a frame pulled from it: drawing the card
     // must not depend on decoding the video, which is exactly what fails on a
     // device whose formats the clip outruns -- the demo would then advertise
@@ -2547,8 +2613,13 @@ import UniformTypeIdentifiers
             ids.append("picture")
         }
         if canOfferVideoSample { ids.append("video") }
+        if canOfferDocumentSample { ids.append("document") }
         return ids
     }
+
+    // No capability gate: a document becomes Markdown before the model sees
+    // it, so this rides every model on every device, text-only included.
+    var canOfferDocumentSample: Bool { ChatModel.samplePdf != nil }
 
     // A video turn is ~32 tower passes and a couple of thousand soft tokens to
     // prefill whatever the clip's own size -- the frame count and per-frame
@@ -2613,6 +2684,27 @@ import UniformTypeIdentifiers
             attachImage(data, name: "dogs-beach.jpg", at: 0)
             input += ChatModel.sampleStory
             send()
+        }
+    }
+
+    // The bundled report is read before the question is sent rather than
+    // beside it: the turn has to carry the text, and a bundle URL needs none
+    // of the copying a dropped file does.
+    func runDocumentSample() {
+        if let url = ChatModel.samplePdf {
+            markSampleUsed("document")
+            input = ""
+            caret = 0
+            flashHUD("Reading the report")
+            Task { @MainActor in
+                if let text = await ChatModel.markdown(of: url) {
+                    attachDoc("harvest-report.pdf", text, at: 0)
+                    input += ChatModel.sampleReport
+                    send()
+                } else {
+                    flashHUD("Cannot read the report")
+                }
+            }
         }
     }
 

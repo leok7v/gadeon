@@ -908,6 +908,16 @@ struct ContentView: View {
                            badge: "play.circle.fill",
                            action: model.runVideoSample)
             }
+            // A SYMBOL here, where the two above carry thumbnails: a page
+            // shrunk to the chip is grey mush, and the glyph says "document"
+            // at a size the page itself cannot.
+            if model.canOfferDocumentSample, model.showSample("document") {
+                sampleCard(symbol: "doc.richtext",
+                           title: "Document Understanding",
+                           subtitle: "It reads the table inside a PDF",
+                           thumb: nil,
+                           action: model.runDocumentSample)
+            }
         }
         .padding(24)
         // The transcript stack is leading-aligned for bubbles; the cards are a
