@@ -1772,9 +1772,8 @@ import UniformTypeIdentifiers
     // and preserved across upgrades where Caches is purgeable. The name is
     // unique-prefixed so two files called report.pdf cannot collide.
     //
-    // NOT pruned when a conversation is deleted. See the attachment-store
-    // task; a handful of documents is small beside one model.
-    private static let attachments: URL = {
+    // Swept by sweepAttachments whenever a conversation is deleted.
+    static let attachments: URL = {
         let fm = FileManager.default
         let support = (try? fm.url(for: .applicationSupportDirectory,
                                    in: .userDomainMask, appropriateFor: nil,

@@ -79,6 +79,7 @@ extension ChatModel {
             traceEvents = []
             newChat()
         }
+        sweepAttachments()
     }
 
     // A reopened (read-only) chat is now gone, so drop back to a live one; a
@@ -87,6 +88,46 @@ extension ChatModel {
         ConversationStore.shared.deleteAll()
         currentConversationId = nil
         if readOnly { newChat() }
+        sweepAttachments()
+    }
+
+    // A kept document exists only so the conversation citing it can offer it
+    // back, so one that nothing cites is garbage. Deleting a conversation is
+    // when that becomes true, and sweeping the WHOLE directory then -- rather
+    // than only the paths that conversation held -- also collects what no
+    // per-delete hook could reach: a turn rolled back, a quit before the
+    // commit, anything an older build left behind.
+    //
+    // The live transcript and the pending attachments are cited too. A file
+    // kept THIS session is referenced by no saved conversation yet, and
+    // deleting some other chat must not take it.
+    //
+    // Matched on FILENAME, not on path: the name carries a UUID and is unique
+    // by construction, while the container's absolute path is not ours to
+    // count on across an install.
+    func sweepAttachments() {
+        var cited = Set<String>()
+        for convo in ConversationStore.shared.list {
+            for message in convo.messages {
+                for doc in message.docs ?? [] {
+                    cited.insert(ChatModel.restoredURL(doc.path)
+                        .lastPathComponent)
+                }
+            }
+        }
+        for message in messages {
+            for doc in message.docs { cited.insert(doc.url.lastPathComponent) }
+        }
+        for doc in attachedDocs {
+            if let url = doc.url { cited.insert(url.lastPathComponent) }
+        }
+        let fm = FileManager.default
+        let kept = (try? fm.contentsOfDirectory(
+            at: ChatModel.attachments,
+            includingPropertiesForKeys: nil)) ?? []
+        for file in kept where !cited.contains(file.lastPathComponent) {
+            try? fm.removeItem(at: file)
+        }
     }
 
     // The whole conversation assembled into one Markdown document for the
@@ -152,10 +193,20 @@ extension ChatModel {
     // Detected by prefix rather than by naming the sample, so any bundled
     // resource a later turn attaches travels the same way.
     private static let bundleMark = "bundle:"
+    // A kept attachment is stored by NAME under its own marker for the same
+    // reason: the Data container's absolute path is not ours to count on
+    // across an install, and the name already carries a UUID.
+    private static let storeMark = "store:"
 
     private static func storedPath(_ url: URL) -> String {
-        url.path.hasPrefix(Bundle.main.bundlePath)
-            ? bundleMark + url.lastPathComponent : url.path
+        var out = url.path
+        if url.path.hasPrefix(Bundle.main.bundlePath) {
+            out = bundleMark + url.lastPathComponent
+        } else if url.deletingLastPathComponent().path
+                    == ChatModel.attachments.path {
+            out = storeMark + url.lastPathComponent
+        }
+        return out
     }
 
     // A bundled name that no longer resolves (the resource was dropped from a
@@ -169,6 +220,9 @@ extension ChatModel {
             out = Bundle.main.url(forResource: name.deletingPathExtension,
                                   withExtension: name.pathExtension)
                 ?? URL(fileURLWithPath: name as String)
+        } else if stored.hasPrefix(storeMark) {
+            out = ChatModel.attachments.appendingPathComponent(
+                String(stored.dropFirst(storeMark.count)))
         }
         return out
     }
