@@ -773,6 +773,7 @@ public actor ChatSession {
         await priming?.value
         var title = ""
         if history.count > 1, let save = try? await backend.checkpoint() {
+            let began = Date()
             let savedThinking = enableThinking
             let savedRunner = runner
             let savedHistory = history
@@ -789,6 +790,9 @@ public actor ChatSession {
                 if raw.count > 160 { backend.requestStop() }
             }
             titleMode = false
+            // Read BEFORE the restore below puts the answering turn's numbers
+            // back: this is what the title itself cost.
+            let spent = lastMetrics
             enableThinking = savedThinking
             runner = savedRunner
             traceSink = savedSink
@@ -801,8 +805,16 @@ public actor ChatSession {
             // the model's raw content-channel output and the cleaned title --
             // a "<think>" here means the reasoning/content split let a stray
             // think block through into the title.
-            Diag.shared.report("makeTitle raw=\(raw.debugDescription) "
-                + "-> \(title.debugDescription)")
+            // The two token counts ARE the diagnosis. A few words of title
+            // costing hundreds of think tokens means the model reasoned its
+            // way there -- which gemma-4 does whatever enable_thinking says,
+            // since it opens that channel itself, and which the raw.count
+            // brake above cannot reach because raw only ever sees content.
+            Diag.shared.report(String(
+                format: "makeTitle raw=%@ -> %@ think=%d content=%d in %.1fs",
+                raw.debugDescription, title.debugDescription,
+                spent.thinkTokens, spent.contentTokens,
+                Date().timeIntervalSince(began)))
         }
         return title
     }
@@ -1155,8 +1167,26 @@ public actor ChatSession {
             // rather than guess at its markup.
             chatLog.warning("generation prompt is not a render suffix")
         }
-        let genText = fullText.hasPrefix(closedText)
+        var genText = fullText.hasPrefix(closedText)
             ? String(fullText.dropFirst(closedText.count)) : ""
+        // A TITLE turn seeds a closed, empty reasoning block -- exactly what
+        // the dense Qwen3 template bakes on every turn. gemma-4 opens that
+        // channel itself as its first decoded output whatever
+        // `enable_thinking` says, so the flag cannot reach it, and reasoning
+        // about four words is pure cost: measured 255 think tokens against 1
+        // of content, which on a capped turn yields no title at all. Seeding
+        // the block closed starts the decode in content, where the caller is
+        // already watching and the length brake can fire.
+        // Asked of the WIRE rather than assumed, because the three shipped
+        // templates each hand over a different state: gemma-4 emits nothing,
+        // Qwen3.5 opens the marker and leaves it open, and the dense Qwen3
+        // already bakes the closed block -- which wants, in order, both
+        // markers, the closing one, and nothing at all.
+        if titleMode, !wire.closesReasoning(genText) {
+            genText += wire.opensReasoning(genText)
+                ? wire.reasoningClose
+                : wire.reasoningOpen + wire.reasoningClose
+        }
         genStartsThink = wire.startsInReasoning(genPrompt: genText,
                                                 enabled: true)
         let expanded = Continuation.expandPads(
@@ -2075,8 +2105,26 @@ public actor ChatSession {
             bosToken: backend.bosToken)) ?? ""
         let head = closedText.hasPrefix(prefix)
             ? String(closedText.dropFirst(prefix.count)) : closedText
-        let genText = fullText.hasPrefix(closedText)
+        var genText = fullText.hasPrefix(closedText)
             ? String(fullText.dropFirst(closedText.count)) : ""
+        // A TITLE turn seeds a closed, empty reasoning block -- exactly what
+        // the dense Qwen3 template bakes on every turn. gemma-4 opens that
+        // channel itself as its first decoded output whatever
+        // `enable_thinking` says, so the flag cannot reach it, and reasoning
+        // about four words is pure cost: measured 255 think tokens against 1
+        // of content, which on a capped turn yields no title at all. Seeding
+        // the block closed starts the decode in content, where the caller is
+        // already watching and the length brake can fire.
+        // Asked of the WIRE rather than assumed, because the three shipped
+        // templates each hand over a different state: gemma-4 emits nothing,
+        // Qwen3.5 opens the marker and leaves it open, and the dense Qwen3
+        // already bakes the closed block -- which wants, in order, both
+        // markers, the closing one, and nothing at all.
+        if titleMode, !wire.closesReasoning(genText) {
+            genText += wire.opensReasoning(genText)
+                ? wire.reasoningClose
+                : wire.reasoningOpen + wire.reasoningClose
+        }
         genStartsThink = wire.startsInReasoning(genPrompt: genText,
                                                 enabled: true)
         var seed = backend.eos
