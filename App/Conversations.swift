@@ -108,25 +108,25 @@ extension ChatModel {
     func sweepAttachments() {
         var cited = Set<String>()
         for convo in ConversationStore.shared.list {
-            for message in convo.messages {
-                for doc in message.docs ?? [] {
-                    cited.insert(ChatModel.restoredURL(doc.path)
-                        .lastPathComponent)
+            for doc in convo.messages.flatMap({ m in m.docs ?? [] }) {
+                if let top = ChatModel.topName(
+                    ChatModel.restoredURL(doc.path)) {
+                    cited.insert(top)
                 }
             }
         }
-        for message in messages {
-            for doc in message.docs { cited.insert(doc.url.lastPathComponent) }
+        for doc in messages.flatMap({ m in m.docs }) {
+            if let top = ChatModel.topName(doc.url) { cited.insert(top) }
         }
-        for doc in attachedDocs {
-            if let url = doc.url { cited.insert(url.lastPathComponent) }
+        for url in attachedDocs.compactMap({ d in d.url }) {
+            if let top = ChatModel.topName(url) { cited.insert(top) }
         }
         let fm = FileManager.default
         let kept = (try? fm.contentsOfDirectory(
             at: ChatModel.attachments,
             includingPropertiesForKeys: nil)) ?? []
-        for file in kept where !cited.contains(file.lastPathComponent) {
-            try? fm.removeItem(at: file)
+        for entry in kept where !cited.contains(entry.lastPathComponent) {
+            try? fm.removeItem(at: entry)
         }
     }
 
@@ -198,13 +198,29 @@ extension ChatModel {
     // across an install, and the name already carries a UUID.
     private static let storeMark = "store:"
 
+    private static var storeRoot: String {
+        ChatModel.attachments.path + "/"
+    }
+
     private static func storedPath(_ url: URL) -> String {
         var out = url.path
         if url.path.hasPrefix(Bundle.main.bundlePath) {
             out = bundleMark + url.lastPathComponent
-        } else if url.deletingLastPathComponent().path
-                    == ChatModel.attachments.path {
-            out = storeMark + url.lastPathComponent
+        } else if url.path.hasPrefix(storeRoot) {
+            out = storeMark + String(url.path.dropFirst(storeRoot.count))
+        }
+        return out
+    }
+
+    // What identifies ONE kept document under the store: the directory it
+    // sits in. A document kept before those directories existed is a bare
+    // file there instead, and answers with its own name, so both forms sweep
+    // by the same rule.
+    private static func topName(_ url: URL) -> String? {
+        var out: String? = nil
+        if url.path.hasPrefix(storeRoot) {
+            out = String(url.path.dropFirst(storeRoot.count))
+                .split(separator: "/").first.map(String.init)
         }
         return out
     }
@@ -221,8 +237,8 @@ extension ChatModel {
                                   withExtension: name.pathExtension)
                 ?? URL(fileURLWithPath: name as String)
         } else if stored.hasPrefix(storeMark) {
-            out = ChatModel.attachments.appendingPathComponent(
-                String(stored.dropFirst(storeMark.count)))
+            out = URL(fileURLWithPath:
+                storeRoot + String(stored.dropFirst(storeMark.count)))
         }
         return out
     }
@@ -240,7 +256,8 @@ extension ChatModel {
             clips: m.clips.map { url in storedPath(url) },
             docs: m.docs.map { ref in
                 ConversationStore.StoredDoc(path: storedPath(ref.url),
-                                            bytes: ref.bytes)
+                                            bytes: ref.bytes,
+                                            short: ref.short)
             })
     }
 
@@ -257,7 +274,8 @@ extension ChatModel {
         // player that cannot play.
         m.clips = (s.clips ?? []).map { p in restoredURL(p) }
         m.docs = (s.docs ?? []).map { d in
-            ChatModel.DocRef(url: restoredURL(d.path), bytes: d.bytes)
+            ChatModel.DocRef(url: restoredURL(d.path), bytes: d.bytes,
+                             short: d.short ?? false)
         }
         m.toolRounds = s.rounds.enumerated().map { pair in
             ToolRound(id: pair.offset, emitted: pair.element.emitted,

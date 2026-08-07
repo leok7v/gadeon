@@ -62,7 +62,9 @@ struct DocChip: View {
         let kb = Double(doc.bytes) / 1024
         let shown = kb < 1 ? String(format: "%.0f bytes", Double(doc.bytes))
                            : String(format: "%.1f KB", kb)
-        return shown + " of text"
+        // The cut is named because the model answered from a PREFIX, and
+        // nothing else in the turn would ever say so.
+        return shown + " of text" + (doc.short ? ", truncated" : "")
     }
 
     // A PDF shows its own first page; everything else shows a glyph, since

@@ -15,6 +15,10 @@ import UniformTypeIdentifiers
         // Where the file itself is, so the transcript can offer it back. The
         // TEXT is what the turn carries; this is only for the reader.
         let url: URL?
+        // Whether the budget cut it. Recorded rather than inferred: the
+        // budget can be raised later, and that would not un-cut what an
+        // earlier turn already sent.
+        let short: Bool
     }
 
     // A document as the TRANSCRIPT needs it: the file to offer back, and how
@@ -22,6 +26,7 @@ import UniformTypeIdentifiers
     struct DocRef: Hashable {
         let url: URL
         let bytes: Int
+        let short: Bool
     }
 
     struct ImageAttachment: Identifiable {
@@ -1729,11 +1734,13 @@ import UniformTypeIdentifiers
     // reference (so two same-named files stay distinct) at `at`.
     func attachDoc(_ name: String, _ content: String, at offset: Int,
                    from url: URL? = nil) {
-        let capped = Self.capDoc(content)
+        let capped = Self.capDoc(content, docBudget.bytes)
         // Skip an exact-content duplicate (same file dropped twice).
         if !attachedDocs.contains(where: { $0.content == capped }) {
             let unique = uniqueName(name)
-            attachedDocs.append(Doc(name: unique, content: capped, url: url))
+            attachedDocs.append(
+                Doc(name: unique, content: capped, url: url,
+                    short: content.utf8.count > docBudget.bytes))
             insertRef(unique, at: offset)
         }
     }
@@ -1754,9 +1761,12 @@ import UniformTypeIdentifiers
         if let kept = ChatModel.keep(from, name) {
             converting += 1
             flashHUD("Reading \(name)")
+            let t0 = Date()
             Task { @MainActor in
                 let text = await ChatModel.markdown(of: kept)
                 converting -= 1
+                ChatModel.read(name, text, t0,
+                               docBudget.bytes)
                 if let text {
                     attachDoc(name, text, at: caret, from: kept)
                 } else {
@@ -1765,6 +1775,20 @@ import UniformTypeIdentifiers
                 }
             }
         }
+    }
+
+    // Reading a document is the SLOWEST way a turn can gain an attachment --
+    // a scan with no text layer goes through recognition page by page -- and
+    // it was the one that said nothing, where an image or a clip each names
+    // itself. Truncation is called out because the model then saw a prefix of
+    // the document and nothing downstream says so.
+    private static func read(_ name: String, _ text: String?,
+                             _ since: Date, _ limit: Int) {
+        let bytes = text?.utf8.count ?? 0
+        let cut = bytes > limit ? ", TRUNCATED to \(limit)" : ""
+        Diag.shared.report(String(
+            format: "attach document %@ -> %d bytes%@ (%.1fs)", name, bytes,
+            cut, Date().timeIntervalSince(since)))
     }
 
     // Attached files live beside the conversations that cite them, under the
@@ -1784,11 +1808,17 @@ import UniformTypeIdentifiers
         return dir
     }()
 
+    // Kept under a directory of its own rather than behind a unique PREFIX,
+    // so the file keeps the name it arrived with. The prefix would show in
+    // Quick Look's own title as well as in the transcript, and a viewer
+    // naming a document by a UUID is telling the reader nothing.
     private static func keep(_ from: URL, _ name: String) -> URL? {
-        let to = attachments
-            .appendingPathComponent(UUID().uuidString + "-" + name)
-        return (try? FileManager.default.copyItem(at: from, to: to)) != nil
-            ? to : nil
+        let fm = FileManager.default
+        let dir = attachments.appendingPathComponent(UUID().uuidString,
+                                                     isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let to = dir.appendingPathComponent(name)
+        return (try? fm.copyItem(at: from, to: to)) != nil ? to : nil
     }
 
     // Off the main actor: a scanned PDF puts every page through recognition,
@@ -1807,17 +1837,33 @@ import UniformTypeIdentifiers
     private static func refs(_ docs: [Doc]) -> [DocRef] {
         docs.compactMap { doc in
             doc.url.map { url in
-                DocRef(url: url, bytes: doc.content.utf8.count)
+                DocRef(url: url, bytes: doc.content.utf8.count,
+                       short: doc.short)
             }
         }
     }
 
-    // Bound a doc to maxDocBytes, cut on a character boundary and marked, so one
-    // dropped file cannot balloon the prompt (the aggregate warning is separate).
-    private static func capDoc(_ content: String) -> String {
-        content.utf8.count > maxDocBytes
-            ? String(content.prefix(maxDocBytes)) + "\n[... truncated at 8 KB]"
-            : content
+    // Bound a doc to the budget so one file cannot balloon the prompt (the
+    // aggregate warning is separate).
+    //
+    // Cut on BYTES, backed off to the last whole character. Counting
+    // Characters instead lets a document of multi-byte text through at
+    // several times the stated bound, and a byte prefix on its own can land
+    // inside a scalar, which String refuses to make -- so the loop steps back
+    // at most three bytes to the nearest boundary.
+    private static func capDoc(_ content: String, _ limit: Int) -> String {
+        var out = content
+        if content.utf8.count > limit {
+            var take = limit
+            var head: String? = nil
+            while head == nil && take > 0 {
+                head = String(content.utf8.prefix(take))
+                take -= 1
+            }
+            out = (head ?? "")
+                + "\n[... truncated at \(limit >> 10) KB]"
+        }
+        return out
     }
 
     func clearImage(_ id: UUID) {
@@ -1917,7 +1963,35 @@ import UniformTypeIdentifiers
     // One clip is already hundreds to thousands of soft tokens; several would
     // bury the question under them.
     static let maxClips = 2
-    static let maxDocBytes = 8192
+    // How much text a document may contribute. A dropped note and an
+    // attached PDF land in the same place, but they are not the same act:
+    // a note is incidental where a document someone chose to attach IS the
+    // subject of the turn, so the default is well past the 8 KB that suited
+    // the first. Roughly 4 bytes to a token, so M is around 8,000 of them --
+    // which every model here handles, given the time to prefill it.
+    enum DocBudget: String, CaseIterable, Identifiable {
+        case xs = "XS", s = "S", m = "M", l = "L", xl = "XL"
+        var id: String { rawValue }
+        var bytes: Int {
+            switch self {
+            case .xs: return 8 << 10
+            case .s: return 16 << 10
+            case .m: return 32 << 10
+            case .l: return 64 << 10
+            case .xl: return 128 << 10
+            }
+        }
+        var label: String { "\(bytes >> 10) KB" }
+    }
+
+    var docBudget: DocBudget = {
+        let raw = UserDefaults.standard.string(forKey: "docBudget") ?? ""
+        return DocBudget(rawValue: raw) ?? .m
+    }() {
+        didSet {
+            UserDefaults.standard.set(docBudget.rawValue, forKey: "docBudget")
+        }
+    }
     // Warn once the pending attachments cross this rough prefill-token estimate
     // (a few thousand tokens is a noticeable ingest).
     static let warnTokens = 4000

@@ -38,6 +38,9 @@ import Foundation
     struct StoredDoc: Codable {
         let path: String
         let bytes: Int
+        // Optional for the same reason `docs` is: records written before it
+        // must keep decoding.
+        let short: Bool?
     }
 
     // Trimmed trace for debug-on-reopen: timings + metrics + tool results, but

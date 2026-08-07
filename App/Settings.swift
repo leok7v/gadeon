@@ -45,6 +45,7 @@ struct SettingsView: View {
         case models = "Models"
         case voice = "Voice"
         case vision = "Vision"
+        case documents = "Documents"
         case view = "View"
         case misc = "Misc"
         case about = "About"
@@ -55,6 +56,7 @@ struct SettingsView: View {
             case .models: return "internaldrive"
             case .voice: return "waveform"
             case .vision: return "eye"
+            case .documents: return "doc.richtext"
             case .view: return "paintbrush"
             case .misc: return "slider.horizontal.3"
             case .about: return "info.circle"
@@ -192,6 +194,7 @@ struct SettingsView: View {
         case .models: modelsPane
         case .voice: voicePane
         case .vision: visionPane
+        case .documents: documentsPane
         case .view: viewPane
         case .misc: miscPane
         case .about: aboutPane
@@ -407,6 +410,27 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             explain(model.visionMode.detail)
+        }
+    }
+
+    // A PDF or an office file is read into Markdown and attached like a note,
+    // so ONE budget governs both -- naming the two separately in Settings
+    // would ask a user to know which path their file took.
+    private var documentsPane: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            title("Documents")
+            explain("How much text an attached document may contribute. "
+                    + "Roughly four bytes to a token, so M is around 8,000 "
+                    + "of them; more is more to read and longer to wait.")
+            Picker("Document size", selection: $model.docBudget) {
+                ForEach(ChatModel.DocBudget.allCases) { size in
+                    Text(size.rawValue).tag(size)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            explain("Up to \(model.docBudget.label). Anything past it is cut "
+                    + "and marked, and the transcript says so.")
         }
     }
 
