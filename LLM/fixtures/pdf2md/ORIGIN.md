@@ -67,6 +67,18 @@ QUALITY question and stays upstream, where the corpus and the harness live.
 What runs here is a REGRESSION gate: did this re-import break something the
 app depends on. Two different jobs; do not try to host the first one.
 
+`harvest-report.pdf` is the one fixture NOT generated, and it is here because
+the generated ones were not enough. An upstream build turned its five columns
+into seven, split a header cell in half, and put `Tonnes` and `47.2` into
+different columns although both begin at x=241.1 -- and every generated case
+passed it. A drawn table is tidier than a typeset one: three columns, ruled,
+one word per header. This page is the app's own Document Understanding
+sample, so what it asserts is what a user sees. It is a COPY of
+App/Resources/harvest-report.pdf, since LLM is a framework the app consumes
+and must not reach back into it; replace the app's sample and replace this
+with it. VERIFIED TO BITE: it is the only test that fails on the build that
+regressed, which is the whole reason it exists.
+
 ## Why the fixtures here are generated, not borrowed
 
 Docs2md is scored upstream against Microsoft's markitdown (MIT,

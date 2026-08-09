@@ -165,6 +165,51 @@ struct Pdf2mdTests {
         }
     }
 
+    // ---- the one page that is not generated -------------------------------
+
+    // Every fixture above is drawn here, and between them they missed a real
+    // regression: an upstream build turned this document's five columns into
+    // seven, split `Yield per tree` across two cells, and put `Tonnes` and
+    // `47.2` in different columns although both start at x=241.1. All five
+    // generated cases passed it, because a hand-drawn table is tidier than a
+    // typeset one -- three columns, ruled, one word per header.
+    //
+    // So this page earns its place by being REAL: it is the PDF the app ships
+    // as its Document Understanding sample, rendered by md.too from Markdown,
+    // and what a user actually sees is what this asserts.
+    //
+    // A COPY of App/Resources/harvest-report.pdf. LLM is a framework the app
+    // consumes and must not reach back into it -- the same reason the speech
+    // and vision fixtures moved under LLM/fixtures. Replace the app's sample
+    // and this wants replacing with it.
+    // Two components up from LLM/tests/<file> is LLM.
+    private static let shipped = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("fixtures/pdf2md/harvest-report.pdf")
+
+    // Exact, because the defect this exists to catch loses no text at all --
+    // the audit reads 305 spans, 0 lost, 0 unaccounted either way. It moves
+    // cells between columns, which only a cell-for-cell comparison sees.
+    private static let shippedTable = """
+        | Block | Trees | Tonnes | Yield per tree | To press |
+        | --- | --- | --- | --- | --- |
+        | Eastern | 840 | 47.2 | 56.2kg | 18% |
+        | Western | 610 | 22.9 | 37.5kg | 41% |
+        | Riverbank | 295 | 19.4 | 65.8kg | 9% |
+        | Nursery | 150 | 3.1 | 20.7kg | 0% |
+        """
+
+    @Test func theShippedSampleKeepsItsFiveColumns() async throws {
+        let (markdown, audits) = try await Pdf2mdTests.convert(
+            Pdf2mdTests.shipped)
+        #expect(markdown.contains(Pdf2mdTests.shippedTable), "\(markdown)")
+        let audit = try #require(audits.first)
+        let counts = "\(audit.spans) spans, \(audit.lost) lost, "
+            + "\(audit.unaccounted) unaccounted"
+        #expect(audit.lost == 0 && audit.unaccounted == 0, "\(counts)")
+    }
+
     // ---- what a re-import must not break ----------------------------------
 
     // Every recognized span reaches the output exactly once. This is the

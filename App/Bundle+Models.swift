@@ -22,6 +22,16 @@ var installedGB: Int {
     Int((ProcessInfo.processInfo.physicalMemory + (1 << 29)) >> 30)
 }
 
+// The ONE `#if DEBUG` in the app, here beside the other two questions the
+// model tiers ask about the machine they are running on. A build condition is
+// not platform-varying, so it wants one definition rather than the paired
+// *-iOS / *-macOS declarations that carry things which genuinely differ.
+#if DEBUG
+let debugBuild = true
+#else
+let debugBuild = false
+#endif
+
 extension Bundle {
     // On-device store for downloaded sets; a set lands at models/<name>/<sha>/
     // and HubFetch marks each excluded-from-backup. The store lives in the
@@ -60,8 +70,9 @@ enum Models {
     // Availability by installed RAM, rounded to the nearest GiB (iOS reports a
     // little under the marketing size). iOS: >=4GB AND an A14 adds the 0.8B,
     // >=6GB the 2B, the 1.7B is offered on every device, and exactly one
-    // gemma -- E4B at >=8GB, E2B below. macOS: 0.8B/2B/4B, plus 9B and the 27B
-    // at >=16GB, and both gemmas on anything.
+    // gemma -- E4B at >=8GB, E2B below. macOS: 2B/4B, plus 9B and the 27B at
+    // >=16GB, and both gemmas on anything. The 0.8B rides `offersSmall` on
+    // both.
     static var all: [String] {
         let gb = installedGB
         var list: [String] = []
@@ -71,7 +82,9 @@ enum Models {
             // cannot compile this model's decode graph at all, so offering it
             // buys a multi-hundred-MB download and then "could not be
             // prepared", twice, with Try Again unable to help.
-            if gb >= 4 && modernGPU { list.append("Qwen3.5-0.8B") }
+            if gb >= 4 && modernGPU && offersSmall(gb) {
+                list.append("Qwen3.5-0.8B")
+            }
             if gb >= 6 { list.append("QwenPaw-Flash-2B") }
             // EXACTLY ONE gemma per device, so the picker never offers a
             // choice between two sizes of the same model. E4B's 3.8 GB of
@@ -113,7 +126,8 @@ enum Models {
             // model a 3 GB H12-class iPhone can run at all.
             list.append("Ternary-Bonsai-1.7B")
         } else {
-            list = ["Qwen3.5-0.8B", "QwenPaw-Flash-2B", "QwenPaw-Flash-4B"]
+            if offersSmall(gb) { list.append("Qwen3.5-0.8B") }
+            list += ["QwenPaw-Flash-2B", "QwenPaw-Flash-4B"]
             if gb >= 16 { list.append("QwenPaw-Flash-9B") }
             // The 27B ternary GGUF is only ~7 GB (Q2_0) + ~78 MB GDN state +
             // lazy paged KV, so it fits the same >=16 GB gate as the 9B. It
@@ -133,6 +147,20 @@ enum Models {
             if gb >= 16 { list.append("gemma-4-12B") }
         }
         return list
+    }
+
+    // The 0.8B is the SMALL set: quick to download, quick to load, and weak
+    // enough that a device with room for anything else is better served by it.
+    // So it is offered where nothing better fits -- and in a Debug build,
+    // where being the fastest set to get running IS what it is for.
+    //
+    // A machine that stops being offered it loses the download too:
+    // pruneUnavailable erases a set the tiers no longer name, which is what
+    // keeps a gating change from stranding gigabytes with no route off the
+    // device. Alternating Debug and Release on one machine therefore
+    // re-downloads it each way.
+    private static func offersSmall(_ gb: Int) -> Bool {
+        gb < 8 || debugBuild
     }
 
     // False when a device is offered no model at all, in which case nothing is

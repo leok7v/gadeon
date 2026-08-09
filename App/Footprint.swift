@@ -146,6 +146,13 @@ enum Footprint {
                 + "%d cores, %@ %@",
             gib, tier, m.processorCount,
             m.operatingSystemVersionString, hardwareID()))
+        // What the tier above actually RESOLVED to. "Why is this model not
+        // offered here" is otherwise answerable only by re-deriving Models.all
+        // by hand against a device whose RAM and chip the reader is guessing
+        // at -- and the answer now differs between a Debug and a Release
+        // build of the same commit, which nothing else in the log would show.
+        Diag.shared.report("[mem] offers \(Models.all.joined(separator: ", "))"
+            + (debugBuild ? " (debug)" : ""))
     }
 
     // The device line is unconditional -- one fact, once, and the tier it

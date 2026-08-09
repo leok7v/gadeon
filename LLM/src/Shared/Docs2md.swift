@@ -1,16 +1,7 @@
 import Compression
 import Foundation
 
-// The formats a machine can READ rather than look at: docx, xlsx, pptx
-// and epub are ZIP containers of XML, html is markup already. None of
-// them needs OCR, so none of them goes near the PDF pipeline.
-//
-// Each reader emits the DocsElement stream directly. Routing OOXML through
-// HTML first - what MarkItDown does - discards the one thing OOXML
-// states outright and ink never does: gridSpan and vMerge, the table
-// spans the PDF side spends its whole life inferring from geometry.
-// HTML to Markdown still exists here, because .html and epub's XHTML
-// need it, but no OOXML format is put through it.
+// see okf/decisions/ooxml-never-goes-through-html.md
 
 enum Format: String, CaseIterable {
     case docx
@@ -51,9 +42,7 @@ enum DocsError: Error, CustomStringConvertible {
     }
 }
 
-// A ZIP central-directory reader. Every OOXML format and epub is a ZIP
-// container, and Foundation can write archives but not read them, so
-// this is the floor the other four formats stand on.
+// see okf/formats/zip-is-read-from-the-tail.md
 
 struct Archive {
     struct Entry {
@@ -130,8 +119,7 @@ struct Archive {
         return result
     }
 
-    // The end-of-central-directory record sits at the tail, after a
-    // comment of up to 64K, so it can only be found by scanning back.
+    // The EOCD trails a comment of up to 64K; hence the back scan.
 
     private static func directory(_ bytes: [UInt8]) -> Int {
         var at = bytes.count - 22
@@ -146,8 +134,7 @@ struct Archive {
         return found
     }
 
-    // A saturated count or offset in the 32-bit record means the real
-    // one lives in the ZIP64 record the locator points at.
+    // An all-ones count or offset means the truth is in ZIP64.
 
     private static func anchor(_ bytes: [UInt8],
                                _ end: Int) -> (Int, Int) {
@@ -233,8 +220,7 @@ struct Archive {
         return result
     }
 
-    // COMPRESSION_ZLIB is Apple's name for raw DEFLATE (RFC 1951),
-    // which is exactly what a ZIP member holds - no zlib wrapper.
+    // COMPRESSION_ZLIB is raw DEFLATE: what a ZIP member holds.
 
     private static func inflated(_ source: [UInt8],
                                  _ expanded: Int) -> Data? {
@@ -256,11 +242,6 @@ struct Archive {
         return result
     }
 }
-
-// A read-only XML tree. The OOXML readers walk structure by name and
-// need to look ahead and back within a parent, which SAX alone makes
-// painful; text nodes keep their place among the children so mixed
-// content (a hyperlink between two runs) survives the parse.
 
 final class Markup {
     let name: String
@@ -359,11 +340,7 @@ final class MarkupParser: NSObject, XMLParserDelegate {
     }
 }
 
-// The intermediate. `column` and `columns` come from the source's own
-// grid - OOXML gridSpan, HTML colspan - and `rows` from vMerge or
-// rowspan. Markdown cannot draw a spanning cell, so the emitter pads
-// with blanks; the span itself is kept here because a caller that
-// wants the real grid should not have to re-infer it from the pipes.
+// columns and rows outlive the emitter, which cannot draw a span.
 
 struct Cell {
     let text: String
@@ -381,11 +358,6 @@ enum DocsElement {
     case table([[Cell]])
     case rule
 }
-
-// A run of text with the marks that apply to the whole of it. Word and
-// PowerPoint split a sentence across runs for reasons of their own -
-// spell-check state, revision ids - so adjacent runs of equal style are
-// folded before any mark is written, or `**Auto****Gen**` comes out.
 
 struct Span {
     var text: String
@@ -476,9 +448,7 @@ struct Emitter {
             .replacingOccurrences(of: "\n", with: "<br>")
     }
 
-    // Emphasis marks must hug the word: `** text **` is literal
-    // asterisks in every Markdown dialect, so edge whitespace is moved
-    // outside the marks rather than dropped.
+    // Edge whitespace moves outside the marks: `** x **` is literal.
 
     static func inline(_ spans: [Span]) -> String {
         var result = ""
@@ -592,18 +562,11 @@ struct DocsConverter {
         return result
     }
 
-    // Web pages declare their encoding in a header this reader never
-    // sees, so the bytes are tried as UTF-8 first and fall back to a
-    // single-byte encoding that cannot fail.
-
     static func string(_ raw: Data) -> String {
         String(data: raw, encoding: .utf8)
             ?? String(data: raw, encoding: .isoLatin1) ?? ""
     }
 }
-
-// Relationship parts map an r:id to a target path, and every OOXML
-// format needs the same lookup for hyperlinks, images and part order.
 
 struct Relations {
     private let targets: [String: (String, Bool)]
@@ -624,8 +587,7 @@ struct Relations {
         base = Relations.folder(part)
     }
 
-    // A relationship target is relative to the part that owns it, and
-    // the rels part sits one folder deeper than that part.
+    // The rels part sits one folder deeper than the part it names.
 
     private static func folder(_ part: String) -> String {
         var pieces = part.split(separator: "/").map(String.init)
@@ -645,10 +607,6 @@ struct Relations {
         targets[id]?.1 ?? false
     }
 
-    // The path a target names inside the container, with `..` steps
-    // resolved so `../media/image1.png` from `ppt/slides` lands in
-    // `ppt/media`.
-
     func part(_ id: String) -> String? {
         var result: String? = nil
         if let target = targets[id], !target.1 {
@@ -656,10 +614,6 @@ struct Relations {
         }
         return result
     }
-
-    // Relationship ids are not dense: a part whose rels list skips
-    // rId2 still owns rId3, so anything looking for a KIND of target
-    // must sweep the whole list rather than count upward.
 
     func parts() -> [String] {
         targets.keys.sorted().compactMap { id in part(id) }
@@ -679,10 +633,6 @@ struct Relations {
         return pieces.joined(separator: "/")
     }
 }
-
-// docx. Paragraph style names carry the outline (styles.xml maps the
-// localized style id to "heading 3"), numbering.xml says whether a list
-// is bulleted or counted, and the table grid states its own spans.
 
 struct WordReader {
     private let body: Markup
@@ -848,9 +798,7 @@ struct WordReader {
         return result
     }
 
-    // Embedded media is named, not inlined: a base64 payload would
-    // dwarf the prose it illustrates. The placeholder says an image
-    // was here and what it depicts.
+    // The payload is elided: base64 would dwarf the prose.
 
     private func picture(_ node: Markup) -> String {
         let described = node.find("wp:docPr").first
@@ -945,10 +893,6 @@ struct WordReader {
         return result
     }
 
-    // numbering.xml reaches the list through two hops: a numId names
-    // an abstract definition, and the level inside it says whether the
-    // marker is a bullet or a counter.
-
     private static func numbering(_ archive: Archive)
             -> [String: Bool] {
         var abstracts: [String: [String: Bool]] = [:]
@@ -995,10 +939,7 @@ struct WordReader {
         return result
     }
 
-    // OMML states the structure of an equation, so the common shapes -
-    // fraction, script, radical, delimiter, n-ary - map onto LaTeX
-    // directly. Anything else falls through to its own children, which
-    // keeps the symbols even when the framing is lost.
+    // Unknown shapes fall through: symbols kept, framing lost.
 
     private static func latex(_ node: Markup) -> String {
         var result = ""
@@ -1051,10 +992,7 @@ struct WordReader {
     }
 }
 
-// A tolerant HTML parser. XMLParser is not usable here: real pages
-// carry unclosed <p>, bare <br>, unquoted attributes and & that is not
-// an entity, and a well-formedness error abandons the whole document.
-// This one never fails - the worst input yields a shallow tree.
+// Never fails; see okf/decisions/html-is-parsed-by-hand.md
 
 final class HTMLParser {
     private let source: [Character]
@@ -1233,9 +1171,7 @@ final class HTMLParser {
         while at < source.count && source[at].isWhitespace { at += 1 }
     }
 
-    // Inside <script> and <style> the only thing that ends the element
-    // is its own end tag; a `<` in a regex or a `>` in a selector is
-    // ordinary text.
+    // A `<` in a regex or a `>` in a selector is text, not markup.
 
     private func skipOpaque(_ tag: String) {
         let sentinel = Array("</" + tag)
@@ -1270,9 +1206,7 @@ final class HTMLParser {
         return same
     }
 
-    // An end tag with no matching open element is noise and is
-    // dropped; one that matches an element further down closes
-    // everything left open above it.
+    // An end tag matching nothing is noise; the root never closes.
 
     private func close(_ tag: String) {
         var depth = stack.count - 1
@@ -1372,10 +1306,6 @@ final class HTMLParser {
         return result
     }
 }
-
-// html and epub's XHTML. Boilerplate - navigation, chrome, scripts -
-// is dropped by element role rather than by heuristics on the text,
-// which is the only signal a converter can trust without a URL.
 
 final class PageReader {
     private struct Style {
@@ -1511,8 +1441,7 @@ final class PageReader {
         }
     }
 
-    // A list item's own text, with any nested list left to the caller
-    // so it keeps its depth instead of collapsing into the parent.
+    // A nested list is left to the caller so it keeps its depth.
 
     private func inline(_ node: Markup, _ style: Style) -> String {
         let held = pending
@@ -1547,9 +1476,6 @@ final class PageReader {
         }
         return result
     }
-
-    // Hidden and navigational subtrees are chrome: they carry no
-    // document text, and keeping them buries the article in menus.
 
     private func skipped(_ node: Markup) -> Bool {
         PageReader.ignored.contains(node.name)
@@ -1625,9 +1551,7 @@ final class PageReader {
         return rows
     }
 
-    // HTML collapses every run of whitespace to one space, and a
-    // Markdown block that keeps the source's newlines would break its
-    // own paragraph in two.
+    // A surviving newline would split the Markdown paragraph in two.
 
     static func condensed(_ text: String) -> String {
         var result = ""
@@ -1645,10 +1569,6 @@ final class PageReader {
         return result
     }
 }
-
-// xlsx. A sheet is already a grid, so the only real questions are what
-// a cell's bytes mean - a shared-string index, a boolean, a serial
-// date - and where the empty cells the file omits belong.
 
 struct SheetReader {
     private let archive: Archive
@@ -1713,9 +1633,7 @@ struct SheetReader {
         return rows
     }
 
-    // A merge is stated once, as a range, and the cells it swallows
-    // are still present in the sheet - so both halves are needed: what
-    // the surviving cell spans, and which cells it has eaten.
+    // Swallowed cells are still in sheetData, hence the covered set.
 
     private static func merges(_ tree: Markup)
             -> ([String: (Int, Int)], Set<String>) {
@@ -1769,8 +1687,7 @@ struct SheetReader {
         return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    // Excel stores a date as a day count, and only the cell's number
-    // format says it is one; without that lookup a date reads as 45000.
+    // Only the cell's number format says the serial is a date.
 
     private func number(_ cell: Markup, _ stored: String) -> String {
         let style = Int(cell.attribute("s") ?? "") ?? -1
@@ -1782,9 +1699,7 @@ struct SheetReader {
         return result
     }
 
-    // Serial day 1 is 1900-01-01, but the format also counts a
-    // 1900-02-29 that never existed, so the epoch that makes every
-    // later date land correctly is 1899-12-30.
+    // 1899-12-30, not -31: it counts a 1900-02-29 that never was.
 
     private static func moment(_ serial: Double) -> String {
         let seconds = (serial - 25_569) * 86_400
@@ -1850,8 +1765,7 @@ struct SheetReader {
         return result
     }
 
-    // A format code is a date's if it uses the calendar placeholders
-    // outside the literal text a code may quote.
+    // [Red] and [$-409] would otherwise read as placeholders.
 
     private static func temporal(_ code: String) -> Bool {
         var literal = false
@@ -1873,9 +1787,7 @@ struct SheetReader {
     }
 }
 
-// pptx. A slide is a canvas, not a stream, so the section per slide is
-// the only order the file itself states; within a slide the shapes are
-// taken in the order the tree lists them.
+// A slide is a canvas: slide order is the only order pptx states.
 
 struct SlideReader {
     private let archive: Archive
@@ -1975,8 +1887,7 @@ struct SlideReader {
         return result
     }
 
-    // A chart's cached data is the only thing in the file a reader can
-    // use: the picture is drawn from numbers that are stated here.
+    // The cached numbers are all there is; the drawing is not here.
 
     private func chart(_ part: String) -> [DocsElement] {
         var result: [DocsElement] = []
@@ -2061,9 +1972,7 @@ struct SlideReader {
         return .paragraph("![\(alt)](\(file))")
     }
 
-    // The shape name is what a person named the picture; the media
-    // part is `image7.png` and says nothing. Non-word characters go so
-    // the result is usable as a filename.
+    // The author named the shape; the media part is `image7.png`.
 
     private static func plain(_ name: String) -> String {
         String(name.unicodeScalars.filter { scalar in
@@ -2137,10 +2046,6 @@ struct SlideReader {
     }
 }
 
-// epub. The spine states reading order, which is the one thing a
-// directory listing cannot; each document in it is XHTML and goes
-// through the same reader the .html format uses.
-
 struct BookReader {
     private let archive: Archive
     private let package: Markup
@@ -2195,8 +2100,7 @@ struct BookReader {
         return result
     }
 
-    // The navigation document is the book's own table of contents;
-    // reproducing it would repeat every chapter title before the text.
+    // The nav document is the book's own contents, not content.
 
     private func spine() -> [String] {
         var sources: [String: String] = [:]

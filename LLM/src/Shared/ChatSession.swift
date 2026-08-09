@@ -769,6 +769,23 @@ public actor ChatSession {
     // empty conversation or any failure, so the caller keeps its instant title.
     // The caller must hold the engine (no concurrent send) for the duration.
 
+    // What a title turn appends to the generation prompt so the decode
+    // starts PAST the reasoning channel. Asked of the wire rather than
+    // assumed: the three shipped templates hand over different states --
+    // gemma-4 emits nothing, Qwen3.5 opens the marker and leaves it open,
+    // the dense Qwen3 already bakes the closed block -- wanting both
+    // markers, the closing one, and nothing, respectively.
+
+    static func titleSeed(_ gen: String, _ wire: ChatWire) -> String {
+        var out = ""
+        if !wire.closesReasoning(gen) {
+            out = wire.opensReasoning(gen)
+                ? wire.reasoningClose
+                : wire.reasoningOpen + wire.reasoningClose
+        }
+        return out
+    }
+
     public func makeTitle() async -> String {
         await priming?.value
         var title = ""
@@ -1177,16 +1194,7 @@ public actor ChatSession {
         // of content, which on a capped turn yields no title at all. Seeding
         // the block closed starts the decode in content, where the caller is
         // already watching and the length brake can fire.
-        // Asked of the WIRE rather than assumed, because the three shipped
-        // templates each hand over a different state: gemma-4 emits nothing,
-        // Qwen3.5 opens the marker and leaves it open, and the dense Qwen3
-        // already bakes the closed block -- which wants, in order, both
-        // markers, the closing one, and nothing at all.
-        if titleMode, !wire.closesReasoning(genText) {
-            genText += wire.opensReasoning(genText)
-                ? wire.reasoningClose
-                : wire.reasoningOpen + wire.reasoningClose
-        }
+        if titleMode { genText += ChatSession.titleSeed(genText, wire) }
         genStartsThink = wire.startsInReasoning(genPrompt: genText,
                                                 enabled: true)
         let expanded = Continuation.expandPads(
@@ -2115,16 +2123,7 @@ public actor ChatSession {
         // of content, which on a capped turn yields no title at all. Seeding
         // the block closed starts the decode in content, where the caller is
         // already watching and the length brake can fire.
-        // Asked of the WIRE rather than assumed, because the three shipped
-        // templates each hand over a different state: gemma-4 emits nothing,
-        // Qwen3.5 opens the marker and leaves it open, and the dense Qwen3
-        // already bakes the closed block -- which wants, in order, both
-        // markers, the closing one, and nothing at all.
-        if titleMode, !wire.closesReasoning(genText) {
-            genText += wire.opensReasoning(genText)
-                ? wire.reasoningClose
-                : wire.reasoningOpen + wire.reasoningClose
-        }
+        if titleMode { genText += ChatSession.titleSeed(genText, wire) }
         genStartsThink = wire.startsInReasoning(genPrompt: genText,
                                                 enabled: true)
         var seed = backend.eos

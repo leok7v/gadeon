@@ -739,11 +739,18 @@ import UniformTypeIdentifiers
     // retroactive, after something already went wrong.
     var showDebug = false
     var traceEvents: [TraceEvent] = []
-    private let traceFile = TraceFile()
+    // NOT built in a Release build. This file is the session's own CONTENT --
+    // rendered prompts, raw decodes, tool results, which is to say the user's
+    // conversation -- and a shipped app has no business writing that to their
+    // disk, however purgeable Caches is. Debug keeps it, which is the loop it
+    // exists for. Constructed rather than merely silenced, because
+    // Diag.startRun creates the folder and archives the previous run before a
+    // single line is written.
+    private let traceFile: TraceFile? = debugBuild ? TraceFile() : nil
     // Wires MD render timing into Diag + starts the main-thread hang watchdog,
     // once, at model construction.
     private let instrument = Instrument.install()
-    var tracePath: String { traceFile.path }
+    var tracePath: String { traceFile?.path ?? "" }
     var diagPath: String { Diag.shared.path }
     // Ring cap so a marathon session cannot grow the array unbounded; the
     // on-disk transcript keeps everything.
@@ -1487,14 +1494,14 @@ import UniformTypeIdentifiers
         if traceEvents.count > Self.traceCap {
             traceEvents.removeFirst(traceEvents.count - Self.traceCap)
         }
-        traceFile.append(e)
+        traceFile?.append(e)
     }
 
     // Wire the fresh session's trace into the debug array + the on-disk
     // transcript, headed by the session's configuration. The vision
     // capability is set BEFORE makeSession (the system prompt reads it).
     private func hookTrace() {
-        traceFile.note("=== \(modelName) thinking=\(thinkingActive) "
+        traceFile?.note("=== \(modelName) thinking=\(thinkingActive) "
             + "wiki=\(wikipedia) web=\(webAccess) \(Date())")
         let s = session
         Task {

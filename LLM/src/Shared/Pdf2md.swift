@@ -8,6 +8,7 @@ enum Mode: String, CaseIterable {
     case vision
     case geometry
     case docling
+    case hybrid
 }
 
 enum ConversionError: Error, CustomStringConvertible {
@@ -29,18 +30,27 @@ enum ConversionError: Error, CustomStringConvertible {
     }
 }
 
-// Coordinates throughout are Vision-normalized: 0...1 across the page,
-// origin bottom-left, y growing upward. Every extraction mode feeds the
-// same Element stream so one emitter renders whatever they produce.
+// Frames are Vision-normalized: 0...1, origin bottom-left, y upward.
 struct Fragment {
     let index: Int
     let text: String
     let frame: CGRect
 }
 
+// see okf/decisions/cells-carry-their-spans.md
+struct Field {
+    let text: String
+    let spans: [Int]
+}
+
+struct Table {
+    let rows: [[Field]]
+    let frame: CGRect?
+}
+
 enum Element {
     case paragraph(String)
-    case table([[String]])
+    case table(Table)
 }
 
 struct Page {
@@ -48,21 +58,14 @@ struct Page {
     let elements: [Element]
 }
 
-// The result of the exactly-once check, per page. Every recognized span
-// must reach the output exactly once: `lost` counts text that never
-// arrived, `unaccounted` text that arrived more often than it was
-// recognized. Needs no ground truth, so a consumer with no benchmark
-// can still assert lost == 0 && unaccounted == 0 over any corpus.
+// see okf/constraints/every-span-reaches-the-output-once.md
 struct Audit {
     let spans: Int
     let lost: Int
     let unaccounted: Int
 }
 
-// A line of drawn ink: `position` is y for a horizontal rule and x for
-// an upright one, `span` its extent along the other axis. Rules carry
-// what text geometry cannot - where a table starts and stops, and, when
-// the table draws them, exactly where its rows and columns divide.
+// `position` is y for a level rule, x for an upright; `span` the rest.
 struct Ruling {
     let position: CGFloat
     let span: ClosedRange<CGFloat>
@@ -74,132 +77,49 @@ struct Grid {
     let header: Int
 }
 
+// Every threshold below is a fraction of the page unless it is a count.
+// The frame each is measured in, and the sweep behind its value, are in
+// okf/glossary/the-converter-knobs.md.
 struct Converter {
     var mode: Mode = .vision
-    /// Raster scale; 8pt type needs about 3x to recognize.
     var scale: CGFloat = 3
-    /// Share of a median line height two fragments may differ by
-    /// vertically and still count as one text band.
     var bandTolerance: CGFloat = 0.6
-    /// Normalized whitespace width that separates two columns, measured
-    /// on the ink profile of all rows at once. It sits near the profile
-    /// resolution on purpose: a gap between columns can be little wider
-    /// than a gap between words, and it is the union over rows - not the
-    /// width alone - that tells them apart.
     var columnGap: CGFloat = 0.004
-    /// The same width measured on text-layer boxes, which are tight to
-    /// their glyphs where a recognized box overshoots them by about a
-    /// seventh of its width. The whitespace between two words therefore
-    /// SURVIVES in the text layer that recognition had already
-    /// swallowed, and a threshold set against swallowed gaps reads
-    /// ordinary word spacing as a column edge. Swept over the whole
-    /// bench: 0.004/0.006/0.008/0.010/0.012/0.015 give cell F1
-    /// 0.461/0.494/0.512/0.524/0.531/0.521.
     var writtenGap: CGFloat = 0.012
-    /// Whitespace that separates the page's own text columns. A folio
-    /// or a centred caption parked in the gutter leaves only a sliver
-    /// of the corridor open, and that sliver is narrower than the gap
-    /// between two words - so width alone cannot tell a gutter from a
-    /// word space. What can is position and balance.
     var pageGap: CGFloat = 0.004
-    /// Where across the page width a gutter may sit.
     var pageMiddle: ClosedRange<CGFloat> = 0.3...0.7
-    /// Least share of the page's words on each side of a gutter.
     var pageShare: CGFloat = 0.15
-    /// Ink gap that divides two table columns, measured on the page
-    /// raster instead of on the recognized boxes. A word box is not its
-    /// ink - it overshoots one end and clips the other - and that error
-    /// is the size of the gap being judged. Zero profiles the boxes.
     var cellGap: CGFloat = 0.006
-    /// Resolution of the ink profile across the page width.
     var buckets = 1024
-    /// Ink darker than this counts as drawn; 250 keeps antialiasing.
     var inkLevel: UInt8 = 250
-    /// Ink this dark is a glyph rather than a tint. Only glyph ink is
-    /// asked to fall inside a text-layer word box: a shaded table fills
-    /// whole cells with light grey that no word covers, and judged at
-    /// `inkLevel` such a page looks as unexplained as a scan.
     var glyphLevel: UInt8 = 128
-    /// Least share of a page's glyph ink that must fall inside a
-    /// text-layer word box before `.geometry` trusts the layer. Rules
-    /// and figure strokes are dark ink no word covers, so a fully
-    /// described page still scores well under 1; a scan scores 0.
     var inkShare: CGFloat = 0.35
-    /// Share of the page a line of ink must cover to be a rule.
     var rulingWidth: CGFloat = 0.1
     var rulingHeight: CGFloat = 0.03
-    /// Rules closer than this share of the page are one boundary.
     var rulingMerge: CGFloat = 0.005
-    /// How much of the shorter span two extents must share to agree.
     var spanAgreement: CGFloat = 0.5
-    /// How much of the table's width a rule must cover to divide ROWS.
-    /// A rule under one header group spans less and is not a boundary.
     var fullWidth: CGFloat = 0.8
-    /// How many consecutive lines must share the same columns before
-    /// unruled text counts as a table. Two lines align by accident far
-    /// too often; three rarely do.
     var alignedRows = 3
-    /// A candidate unruled table is rejected when more than this share
-    /// of its filled cells run longer than `proseCellLength` characters:
-    /// those are sentences, and sentences mean paragraph, not table.
     var proseCellShare: CGFloat = 0.3
     var proseCellLength = 30
-    /// Share of a table's inked rows that must reach into a bucket
-    /// before it stops being a column wall. Guards the corridors against
-    /// a single spanning header, which crosses every column it heads.
-    /// Swept over the whole bench: 0.05/0.10/0.15/0.30 give cell F1
-    /// 0.405/0.420/0.417/0.375, and 0.10 dominates on every metric.
     var cellVote: CGFloat = 0.10
-    /// A window holding a single text band no taller than this many
-    /// line heights is a spanning header, not the end of the table. A
-    /// table can never START on one otherwise: the band between the top
-    /// rule and the next resolves into one column and looks like prose.
-    /// Admitted only at a region's FIRST window, which is the whole of
-    /// the defect: a table cannot START on a spanning header. Allowing
-    /// it anywhere would let a lone caption between two stacked tables
-    /// fuse them, and the height bound alone did not stop that - it cost
-    /// 25 false positives and 4 points of precision.
     var spanWindow: CGFloat = 2.2
-    /// Multiple of the median band gap that ends a paragraph.
     var rowGapRatio: CGFloat = 1.35
-    /// Report what the page detector found, on standard error.
     var trace = false
-    /// Called once per page with its span audit, independent of `trace`.
-    /// The counts are computed on every page regardless, so surfacing
-    /// them costs nothing; this exists because the audit is the only
-    /// correctness assertion available to a caller that has no ground
-    /// truth to score against.
+    var rowShare: CGFloat = 0.80
+    var numericShare: CGFloat = 0.95
+    var packing: CGFloat = 2.5
+    var recoverRows = 3
+    var onDocling: ((CGImage, Int) throws -> [Element])?
+    var onReadings: ((Int, [Fragment], [Element], [Element]) -> Void)?
+    var doclingScale: CGFloat = 0
     var onAudit: ((Int, Audit) -> Void)?
 
     private var wordGap: CGFloat {
         mode == .geometry ? writtenGap : columnGap
     }
 
-    // TODO: a second output shape, for clients that run their own ViT
-    // tower and text transformer rather than reading Markdown.
-    //
-    // Markdown flattens away exactly what such a client needs: it keeps
-    // the words and discards where they sat. Emit instead, on request:
-    //
-    //   - the text spans as an indexed list - one entry per recognized
-    //     span, carrying its string and its normalized frame - so the
-    //     client can address any span by index;
-    //   - the layout as structure over those indices: which spans form
-    //     a cell, a row, a column, a header, a paragraph, referenced by
-    //     span index rather than by copying the text;
-    //   - optionally a very low resolution image of the BOX STRUCTURE
-    //     alone - no glyphs, just the numbered rectangles - so a vision
-    //     tower sees the geometry as an image while the language model
-    //     reads the spans, and the numbering is what joins the two.
-    //     Render filled rectangles rather than the page: at ~47 DPI a
-    //     filled box survives where real ink turns to mush, and the
-    //     boxes ARE the layout signal. Note what this implies about the
-    //     question to ask - having the boxes already, the model is not
-    //     being asked to find reading order, only to name roles.
-    //
-    // The point is that the client fuses layout and text itself; we
-    // supply both halves already aligned by index, and never force the
-    // geometry through a Markdown table it does not fit.
+    // TODO: see okf/decisions/a-second-output-shape-for-vit-clients.md
 
     func markdown(of url: URL) async throws -> String {
         let document = try Converter.require(PDFDocument(url: url),
@@ -230,15 +150,310 @@ struct Converter {
         case .text:
             result = Converter.paragraphs(of: page.string ?? "")
         case .vision, .geometry:
-            result = try await rebuilt(page, number)
+            result = try await rebuilt(page, number).0
         case .docling:
-            throw ConversionError.notImplemented(mode)
+            result = try told(page, number)
+        case .hybrid:
+            let (drawn, spans) = try await rebuilt(page, number)
+            result = merged(try told(page, number), drawn, spans,
+                            number)
         }
         return result
     }
 
-    // MODE text: PDFKit's own extraction. Blank-line separated groups
-    // become paragraphs; everything columnar collapses into prose.
+    private func told(_ page: PDFPage, _ number: Int) throws -> [Element] {
+        let read = try Converter.require(onDocling, .notImplemented(mode))
+        let wanted = doclingScale > 0 ? doclingScale : scale
+        return try read(try Converter.raster(page, wanted, number,
+                                             false), number)
+    }
+
+    // see okf/findings/pairing-and-arbitrating-two-tables.md
+
+    private func merged(_ told: [Element], _ drawn: [Element],
+                        _ spans: [Fragment], _ number: Int) -> [Element] {
+        let words = Converter.spoken(spans)
+        let others = drawn.compactMap { element -> Table? in
+            var result: Table? = nil
+            if case .table(let table) = element { result = table }
+            return result
+        }
+        var taken = [Bool](repeating: false, count: others.count)
+        var placed: [Int: Int] = [:]
+        var result: [Element] = []
+        var swapped = 0
+        var grounded: CGFloat = 0
+        var counted = 0
+        for element in told {
+            switch element {
+            case .paragraph:
+                result.append(element)
+            case .table(let raw):
+                let table = Converter.linked(raw, spans)
+                grounded += Converter.rate(table)
+                counted += 1
+                var keep = table
+                if let at = Converter.nearest(table.rows, others, taken) {
+                    taken[at] = true
+                    placed[at] = result.count
+                    if !trusted(table.rows, others[at].rows, words) {
+                        keep = others[at]
+                        swapped += 1
+                    }
+                }
+                result.append(.table(keep))
+            }
+        }
+        let found = recovered(others, taken, &result, placed)
+        if let watch = onReadings {
+            watch(number, spans, told.map { one in
+                Converter.grounded(one, spans)
+            }, drawn)
+        }
+        let share = counted > 0 ? grounded / CGFloat(counted) : 1
+        report(String(format: "    hybrid: %d paired, %d taken from the "
+                      + "drawn reading, %d recovered, %.3f of told cell "
+                      + "tokens linked to spans", placed.count, swapped,
+                      found, Double(share)))
+        return result
+    }
+
+    // Descending, so an earlier insertion cannot shift a later one.
+
+    private func recovered(_ others: [Table], _ taken: [Bool],
+                           _ result: inout [Element],
+                           _ placed: [Int: Int]) -> Int {
+        var pending: [(Int, Table)] = []
+        for (at, other) in others.enumerated()
+        where !taken[at] && other.rows.count >= recoverRows
+            && (other.rows.first?.count ?? 0) >= 2 {
+            pending.append((at, other))
+        }
+        for (at, other) in pending.sorted(by: { left, right in
+            left.0 > right.0
+        }) {
+            var after = 0
+            for (index, position) in placed where index < at {
+                after = max(after, position + 1)
+            }
+            result.insert(.table(other), at: min(after, result.count))
+        }
+        return pending.count
+    }
+
+    // see okf/decisions/cells-carry-their-spans.md
+
+    private static func linked(_ table: Table,
+                               _ spans: [Fragment]) -> Table {
+        var pool: [String: [Int]] = [:]
+        for (at, span) in spans.enumerated() where
+            table.frame.map({ box in box.intersects(span.frame) }) ?? true {
+            for word in Converter.tokens(span.text) {
+                pool[word, default: []].append(at)
+            }
+        }
+        var used = Set<Int>()
+        var rows: [[Field]] = []
+        for (down, row) in table.rows.enumerated() {
+            var built: [Field] = []
+            for (across, cell) in row.enumerated() {
+                let want = Converter.expected(table, down, across,
+                                              table.rows.count, row.count)
+                var found: [Int] = []
+                for word in Converter.tokens(cell.text) {
+                    let one = Converter.closest(pool[word] ?? [], used,
+                                                want, spans)
+                    if let one {
+                        used.insert(one)
+                        found.append(one)
+                    }
+                }
+                built.append(Field(text: cell.text, spans: found))
+            }
+            rows.append(built)
+        }
+        return Table(rows: rows, frame: table.frame)
+    }
+
+    private static func grounded(_ element: Element,
+                                 _ spans: [Fragment]) -> Element {
+        var result = element
+        if case .table(let table) = element {
+            result = .table(Converter.linked(table, spans))
+        }
+        return result
+    }
+
+    // Where the cell would sit if the table divided its box evenly.
+
+    private static func expected(_ table: Table, _ down: Int,
+                                 _ across: Int, _ rows: Int,
+                                 _ columns: Int) -> CGPoint {
+        var result = CGPoint(x: 0.5, y: 0.5)
+        if let box = table.frame, rows > 0, columns > 0 {
+            result = CGPoint(
+                x: box.minX + (CGFloat(across) + 0.5) * box.width
+                    / CGFloat(columns),
+                y: box.maxY - (CGFloat(down) + 0.5) * box.height
+                    / CGFloat(rows))
+        }
+        return result
+    }
+
+    private static func closest(_ pool: [Int], _ used: Set<Int>,
+                                _ want: CGPoint,
+                                _ spans: [Fragment]) -> Int? {
+        var best: Int? = nil
+        var nearest = CGFloat.infinity
+        for at in pool where !used.contains(at) {
+            let middle = CGPoint(x: spans[at].frame.midX,
+                                 y: spans[at].frame.midY)
+            let away = (middle.x - want.x) * (middle.x - want.x)
+                + (middle.y - want.y) * (middle.y - want.y)
+            if away < nearest {
+                nearest = away
+                best = at
+            }
+        }
+        return best
+    }
+
+    // How much of a told table the page's own words account for.
+
+    private static func rate(_ table: Table) -> CGFloat {
+        var linked = 0
+        var total = 0
+        for row in table.rows {
+            for cell in row {
+                total += Converter.tokens(cell.text).count
+                linked += cell.spans.count
+            }
+        }
+        return total > 0 ? CGFloat(linked) / CGFloat(total) : 1
+    }
+
+    // A ONE-SIDED test: the drawn reading scores 1 by construction.
+
+    private static func spoken(_ spans: [Fragment]) -> [String: Int] {
+        var result: [String: Int] = [:]
+        for span in spans {
+            for word in Converter.tokens(span.text) {
+                result[word, default: 0] += 1
+            }
+        }
+        return result
+    }
+
+    // see okf/findings/pairing-and-arbitrating-two-tables.md
+
+    private static func tokens(_ text: String) -> [String] {
+        var result: [String] = []
+        let plain = text.decomposedStringWithCompatibilityMapping
+        for piece in plain.lowercased().split(whereSeparator: { character in
+            character.isWhitespace
+        }) {
+            let trimmed = piece.trimmingCharacters(
+                in: CharacterSet.alphanumerics.inverted)
+            if !trimmed.isEmpty { result.append(trimmed) }
+        }
+        return result
+    }
+
+    // Keyed without spaces: two readings of one cell disagree
+    // constantly about where a space falls.
+
+    private static func bagged(_ rows: [[Field]]) -> [String: Int] {
+        var result: [String: Int] = [:]
+        for row in rows {
+            for cell in row {
+                let key = Converter.tokens(cell.text).joined()
+                if !key.isEmpty { result[key, default: 0] += 1 }
+            }
+        }
+        return result
+    }
+
+    // Paired on the CELL bags, so a pair survives disagreement about
+    // grouping, spans and row count.
+
+    private static func nearest(_ rows: [[Field]],
+                                _ others: [Table],
+                                _ taken: [Bool]) -> Int? {
+        let mine = Converter.bagged(rows)
+        var best: Int? = nil
+        var strongest = 0.1
+        for (index, other) in others.enumerated() where !taken[index] {
+            let claim = Converter.overlap(mine,
+                                          Converter.bagged(other.rows))
+            if claim > strongest {
+                strongest = claim
+                best = index
+            }
+        }
+        return best
+    }
+
+    private static func overlap(_ mine: [String: Int],
+                                _ theirs: [String: Int]) -> CGFloat {
+        var shared = 0
+        for (key, count) in mine {
+            shared += min(count, theirs[key] ?? 0)
+        }
+        let here = mine.values.reduce(0, +)
+        let there = theirs.values.reduce(0, +)
+        var result: CGFloat = 0
+        if shared > 0 {
+            let precision = CGFloat(shared) / CGFloat(here)
+            let recall = CGFloat(shared) / CGFloat(there)
+            result = 2 * precision * recall / (precision + recall)
+        }
+        return result
+    }
+
+    // Truncation AND drift, or folding on its own.
+    // see okf/findings/pairing-and-arbitrating-two-tables.md
+
+    private func trusted(_ told: [[Field]], _ drawn: [[Field]],
+                         _ words: [String: Int]) -> Bool {
+        let shrunk = drawn.count > 0
+            && CGFloat(told.count) / CGFloat(drawn.count) < rowShare
+        // Folded rows leave coverage at 1.000; only density sees them.
+        let packed = Converter.density(told)
+            > packing * Converter.density(drawn)
+        var mine: [String: Int] = [:]
+        for word in Converter.tokens(of: told)
+        where word.contains(where: { character in character.isNumber }) {
+            mine[word, default: 0] += 1
+        }
+        var shared = 0
+        for (word, count) in mine {
+            shared += min(count, words[word] ?? 0)
+        }
+        let total = mine.values.reduce(0, +)
+        let covered = total > 0 ? CGFloat(shared) / CGFloat(total) : 1
+        return !(packed || (shrunk && covered < numericShare))
+    }
+
+    private static func density(_ rows: [[Field]]) -> CGFloat {
+        var cells = 0
+        var words = 0
+        for row in rows {
+            for cell in row {
+                let count = Converter.tokens(cell.text).count
+                if count > 0 {
+                    cells += 1
+                    words += count
+                }
+            }
+        }
+        return cells > 0 ? CGFloat(words) / CGFloat(cells) : 1
+    }
+
+    private static func tokens(of rows: [[Field]]) -> [String] {
+        rows.flatMap { row in
+            row.flatMap { cell in Converter.tokens(cell.text) }
+        }
+    }
 
     private static func paragraphs(of text: String) -> [Element] {
         var result: [Element] = []
@@ -260,10 +475,14 @@ struct Converter {
         return result
     }
 
-    // MODE vision: rasterize, recognize, rebuild geometry.
+    // `smooth` belongs to the READER, like the scale does. Ink geometry
+    // measures corridors on this raster and its thresholds were set on a
+    // smoothed one; the model wants the lighter page.
+    // see okf/findings/raster-must-not-be-resampled.md
 
     private static func raster(_ page: PDFPage, _ scale: CGFloat,
-                               _ number: Int) throws -> CGImage {
+                               _ number: Int,
+                               _ smooth: Bool) throws -> CGImage {
         let bounds = page.bounds(for: .mediaBox)
         let width = Int((bounds.width * scale).rounded())
         let height = Int((bounds.height * scale).rounded())
@@ -276,6 +495,9 @@ struct Converter {
             context.setFillColor(gray: 1, alpha: 1)
             context.fill(CGRect(x: 0, y: 0, width: CGFloat(width),
                                 height: CGFloat(height)))
+            // see okf/findings/raster-must-not-be-resampled.md
+            context.setShouldSmoothFonts(smooth)
+            context.setAllowsFontSmoothing(smooth)
             context.scaleBy(x: scale, y: scale)
             context.translateBy(x: -bounds.origin.x, y: -bounds.origin.y)
             page.draw(with: .mediaBox, to: context)
@@ -302,50 +524,35 @@ struct Converter {
         }
     }
 
-    // MODE geometry: a digital-born PDF already states every word and
-    // where it sits, so recognition only re-derives what the file says.
-    // The raster is still drawn, because rules and ink corridors are
-    // drawn rather than written and no text layer carries them.
-    //
-    // A page whose layer is missing or partial - a scan, a table pasted
-    // in as an image - must not come out empty, so the words are checked
-    // against the ink before they are believed. A page that fails that
-    // check is then read as `.vision` reads it, THRESHOLDS INCLUDED:
-    // recognized boxes overshoot their glyphs where written ones are
-    // tight, and every width the layout measures is measured against the
-    // boxes it will judge. Carrying the mode on the reader rather than
-    // on the converter is what keeps those two in step.
+    // The spans come back too: `hybrid` judges the other reader on them.
 
-    private func rebuilt(_ page: PDFPage,
-                         _ number: Int) async throws -> [Element] {
-        let image = try Converter.raster(page, scale, number)
-        let written = mode == .geometry ? Converter.written(of: page) : []
+    private func rebuilt(_ page: PDFPage, _ number: Int) async throws
+        -> ([Element], [Fragment]) {
+        let image = try Converter.raster(page, scale, number, true)
+        let written = mode != .vision ? Converter.written(of: page) : []
         let share = written.isEmpty ? 0
             : Converter.explained(written, image, glyphLevel)
         let enough = !written.isEmpty && share >= inkShare
-        if mode == .geometry {
+        if mode != .vision {
             report(String(format: "page %d: text layer %d words, "
                           + "covers %.3f of the ink%@", number,
                           written.count, Double(share),
                           enough ? "" : ", recognizing instead"))
         }
+        // The thresholds belong to the SOURCE of the boxes, not to the
+        // mode asked for. see okf/findings/a-gap-is-not-a-column-edge.md
         var reader = self
         var fragments = written
+        reader.mode = .geometry
         if !enough {
             reader.mode = .vision
             fragments = try await Converter.recognize(image)
         }
-        return reader.layout(fragments, image, number)
+        return (reader.layout(fragments, image, number), fragments)
     }
 
-    // `page.string` and `page.selection(for:)` share one index space,
-    // and `characterBounds(at:)` does not: PDFKit synthesizes a space or
-    // a newline wherever the content stream jumps, and a synthesized
-    // character owns no glyph. So a character walk drifts by one per
-    // synthesized separator - silently, and only on the pages that have
-    // them. Selecting the range a word occupies in the string asks
-    // PDFKit for the box in its own terms and never has to guess which
-    // separators were real.
+    // `page.selection(for:)` and never `characterBounds(at:)`. see
+    // okf/platform/pdfkit-synthesizes-characters-that-own-no-glyph.md
 
     private static func written(of page: PDFPage) -> [Fragment] {
         let bounds = page.bounds(for: .mediaBox)
@@ -398,9 +605,8 @@ struct Converter {
                height: box.height / bounds.height)
     }
 
-    // The share of a page's glyph ink that falls inside a word box.
-    // Drawn into a mask rather than tested per pixel against every box,
-    // so the cost is one page-sized fill instead of pixels times words.
+    // Through a mask, so the cost is one fill and not pixels times
+    // words. see okf/findings/when-to-believe-a-pdf-text-layer.md
 
     private static func explained(_ fragments: [Fragment],
                                   _ image: CGImage,
@@ -422,9 +628,7 @@ struct Converter {
         return result
     }
 
-    // Ink no darker than `ink` anywhere on the page leaves nothing for a
-    // word to explain, so the words explain all of it - the caller has
-    // already established that there ARE words.
+    // No ink at all gives 1: nothing is left for a word to explain.
 
     private static func covered(_ bytes: UnsafePointer<UInt8>,
                                 _ image: CGImage,
@@ -468,10 +672,8 @@ struct Converter {
         return context?.makeImage()
     }
 
-    // Recognition returns whole lines, and a line crosses every column
-    // it touches - so a line box cannot tell two columns apart. Words
-    // can: the whitespace between two columns is the only gap no word
-    // ever spans.
+    // A line crosses every column it touches, so it is broken back into
+    // word boxes. see okf/findings/a-gap-is-not-a-column-edge.md
 
     private static func words(of text: RecognizedText) -> [Fragment] {
         let string = text.string
@@ -488,9 +690,7 @@ struct Converter {
         return result
     }
 
-    // A page is read one text column at a time: on a two-column layout
-    // the whole left column precedes the whole right one, and no table
-    // straddles the two.
+    // One text column at a time, and no table straddles two.
 
     private func layout(_ fragments: [Fragment], _ image: CGImage,
                         _ number: Int) -> [Element] {
@@ -517,11 +717,7 @@ struct Converter {
         return result
     }
 
-    // A page reads as two columns only where a corridor divides the
-    // TEXT: near the middle, with a real share of the words on either
-    // hand. Everything else that survives the ink profile - the outer
-    // margin, a table's own column gap, the slivers a centred page
-    // number leaves on both sides of itself - is not a gutter.
+    // see okf/findings/a-gap-is-not-a-column-edge.md
 
     private func sides(of fragments: [Fragment])
         -> [ClosedRange<CGFloat>] {
@@ -559,12 +755,7 @@ struct Converter {
         return result
     }
 
-    // Every recognized span must reach the output exactly once. The
-    // check needs no ground truth: a multiset difference names dropped
-    // text, duplicated text, and text that was never recognized at all,
-    // on any page. Losses hide easily - a span inside a table's rows
-    // but outside its columns simply vanishes - and nothing else in the
-    // pipeline would notice.
+    // see okf/constraints/every-span-reaches-the-output-once.md
 
     private static func audit(_ fragments: [Fragment],
                               _ elements: [Element]) -> Audit {
@@ -617,18 +808,9 @@ struct Converter {
         }.map { pair in pair.1 }
     }
 
-    // The guard asks whether the STRIP just added still resolves into
-    // columns - `line...bottom`, bottom being the last rule accepted -
-    // not whether the whole region does. Testing the whole region fails
-    // in both directions at once: once any table is inside it the union
-    // has columns forever and the region swallows captions, prose and
-    // the next table; while one wide row anywhere collapses that same
-    // union to one column and cuts the region short.
-    //
-    // A table region runs from its first rule to its last. Rules alone
-    // would also join two tables with a paragraph between them, so a
-    // region grows only while the text it covers still resolves into
-    // columns - prose spans the full width and resolves into one.
+    // The guard tests the STRIP just added, never the whole region, and
+    // `lone` admits a spanning header at the FIRST window only.
+    // see okf/findings/where-a-ruled-table-starts-and-stops.md
 
     private func regions(_ level: [Ruling], _ fragments: [Fragment],
                          _ side: ClosedRange<CGFloat>)
@@ -671,16 +853,14 @@ struct Converter {
         }
     }
 
-    // Rows come from the rules when a table draws one per row, and from
-    // the text lines themselves when it draws only the three rules of a
-    // book-style table. Columns likewise: drawn uprights when present,
-    // otherwise the whitespace corridors that no row crosses.
+    // `ruled`: one rule per row. Otherwise the text lines are the rows,
+    // which is the three-rule book-style table.
 
     private func cells(of region: ClosedRange<CGFloat>,
                        _ fragments: [Fragment], _ level: [Ruling],
                        _ uprights: [Ruling],
                        _ side: ClosedRange<CGFloat>,
-                       _ image: CGImage) -> [[String]] {
+                       _ image: CGImage) -> Table {
         let inside = within(fragments, region, side)
         let lines = bands(inside).map { band in Converter.extent(band) }
         let width = Converter.spread(inside)
@@ -712,17 +892,12 @@ struct Converter {
                       + "columns %d header %d", rows.count,
                       ruled ? "yes" : "no", inner.count, bars.count,
                       header))
-        return Converter.laid(Grid(rows: rows, columns: bars,
-                                   header: header), inside)
+        return Table(rows: Converter.laid(
+            Grid(rows: rows, columns: bars, header: header), inside),
+                     frame: Converter.box(width, region))
     }
 
-    // Place what is certain first, and let it decide the rest. A span
-    // lying wholly inside one column can only belong to that column, so
-    // those spans - and only those - are trusted to report where the
-    // column really is. A corridor merely says where the whitespace
-    // was; the settled extent says where the text actually sits, which
-    // is what an ambiguous span, straddling a boundary or right-aligned
-    // away from its neighbours, must be judged against.
+    // see okf/decisions/turning-corridors-into-cells.md
 
     private static func settled(_ columns: [ClosedRange<CGFloat>],
                                 _ fragments: [Fragment])
@@ -749,79 +924,79 @@ struct Converter {
         }
     }
 
-    // Order a row by x alone. Sorting by midY first and using x only to
-    // break ties reads as reading order but is not: midY comes back from
-    // recognition as a float and two words on one line are never exactly
-    // equal, so the tiebreak never fires and the row comes out ordered by
-    // OCR jitter. The band already established these fragments are one
-    // row; x is the only axis left that means anything.
+    // Ordered by x ALONE: a midY sort never reaches the x tiebreak.
 
     private static func laid(_ grid: Grid,
-                             _ fragments: [Fragment]) -> [[String]] {
+                             _ fragments: [Fragment]) -> [[Field]] {
         let bars = Converter.settled(grid.columns, fragments)
-        var result: [[String]] = []
+        var result: [[Field]] = []
         for row in grid.rows {
-            var cells = [String](repeating: "", count: bars.count)
+            var held = [[Fragment]](repeating: [], count: bars.count)
             let line = fragments.filter { fragment in
                 row.contains(fragment.frame.midY)
             }.sorted { left, right in
                 left.frame.minX < right.frame.minX
             }
             for fragment in line {
-                let column = Converter.column(of: fragment, bars)
-                cells[column] = cells[column].isEmpty ? fragment.text
-                    : cells[column] + " " + fragment.text
+                held[Converter.column(of: fragment, bars)].append(fragment)
             }
-            if cells.contains(where: { cell in !cell.isEmpty }) {
-                result.append(cells)
+            let built = held.map { inside in Converter.field(inside) }
+            if built.contains(where: { cell in !cell.text.isEmpty }) {
+                result.append(built)
             }
         }
         return Converter.folded(Converter.occupied(result), grid.header)
     }
 
-    // A column empty on every row is not a column. Drawn rules and ink
-    // corridors both propose more edges than a table has - a rule at the
-    // table's own border, a corridor inside a wide gutter between two
-    // value columns - and each surplus edge shows up as a column of
-    // nothing.
+    private static func field(_ held: [Fragment]) -> Field {
+        Field(text: held.map { one in one.text }.joined(separator: " "),
+              spans: held.map { one in one.index })
+    }
 
-    private static func occupied(_ rows: [[String]]) -> [[String]] {
+    private static func empty() -> Field {
+        Field(text: "", spans: [])
+    }
+
+    // Rules and corridors both propose more edges than a table has.
+
+    private static func occupied(_ rows: [[Field]]) -> [[Field]] {
         let width = rows.reduce(0) { widest, row in
             max(widest, row.count)
         }
         var used: [Bool] = Array(repeating: false, count: width)
         for row in rows {
-            for (index, cell) in row.enumerated() where !cell.isEmpty {
+            for (index, cell) in row.enumerated() where !cell.text.isEmpty {
                 used[index] = true
             }
         }
-        var result: [[String]] = []
+        var result: [[Field]] = []
         for row in rows {
-            var kept: [String] = []
-            for index in 0..<width {
-                if used[index] {
-                    kept.append(index < row.count ? row[index] : "")
-                }
+            var kept: [Field] = []
+            for index in 0..<width where used[index] {
+                kept.append(index < row.count ? row[index]
+                            : Converter.empty())
             }
             result.append(kept)
         }
         return result
     }
 
-    // Markdown has one header row and no spanning cells, so a stacked
-    // header - what LaTeX writes with multicolumn - folds into that one
-    // row, each column keeping every level of its own label.
+    // Markdown has one header row and no spanning cells.
 
-    private static func folded(_ rows: [[String]],
-                               _ header: Int) -> [[String]] {
+    private static func folded(_ rows: [[Field]],
+                               _ header: Int) -> [[Field]] {
         var result = rows
         if header > 1 && rows.count > header {
-            var merged = [String](repeating: "", count: rows[0].count)
+            var merged = [Field](repeating: Converter.empty(),
+                                 count: rows[0].count)
             for level in rows.prefix(header) {
                 for (index, cell) in level.enumerated()
-                    where !cell.isEmpty && index < merged.count {
-                    merged[index] = merged[index].isEmpty ? cell
-                        : merged[index] + " " + cell
+                    where !cell.text.isEmpty && index < merged.count {
+                    let before = merged[index]
+                    merged[index] = Field(
+                        text: before.text.isEmpty ? cell.text
+                            : before.text + " " + cell.text,
+                        spans: before.spans + cell.spans)
                 }
             }
             result = [merged] + rows.dropFirst(header)
@@ -829,11 +1004,8 @@ struct Converter {
         return result
     }
 
-    // Text the rules did not claim. Some of it is still a table: a
-    // renderer may draw none at all. Consecutive lines that keep
-    // resolving into the same columns are one - prose collapses to a
-    // single column as soon as a second line joins it, because no two
-    // prose lines break their words in the same places.
+    // Text the rules did not claim; some of it is still a table.
+    // see okf/findings/an-unruled-table-is-told-apart-by-its-cells.md
 
     private func prose(_ fragments: [Fragment])
         -> [(CGFloat, Element)] {
@@ -845,8 +1017,10 @@ struct Converter {
             let top = Converter.extent(bands[index]).upperBound
             let shared = aligned(bands, index)
             let candidate = shared - index >= alignedRows - 1
-                ? speculative(Array(bands[index...shared])) : []
-            if Converter.tabular(candidate, proseCellShare, proseCellLength) {
+                ? speculative(Array(bands[index...shared]))
+                : Table(rows: [], frame: nil)
+            if Converter.tabular(candidate.rows, proseCellShare,
+                                 proseCellLength) {
                 result.append((top, .table(candidate)))
                 index = shared + 1
             } else {
@@ -869,32 +1043,36 @@ struct Converter {
         return result
     }
 
-    private func speculative(_ run: [[Fragment]]) -> [[String]] {
+    private func speculative(_ run: [[Fragment]]) -> Table {
         let words = run.flatMap { band in band }
         let rows = run.map { band in Converter.extent(band) }
         let floor = rows[rows.count - 1].lowerBound
         let region = floor...rows[0].upperBound
-        return Converter.laid(
+        let width = Converter.spread(words)
+        return Table(rows: Converter.laid(
             Grid(rows: Converter.separated(rows, region),
                  columns: columns(of: words, wordGap),
-                 header: 1), words)
+                 header: 1), words),
+                     frame: Converter.box(width, region))
     }
 
-    // Aligned lines are not proof of a table: a paragraph whose lines
-    // happen to break alike passes the column test too. What separates
-    // them is what the cells CONTAIN - a table cell is short and
-    // label-like, a prose cell is a sentence. Taken from MarkItDown's
-    // pdfplumber path, which rejects a candidate when too many of its
-    // cells read as prose.
+    private static func box(_ width: ClosedRange<CGFloat>,
+                            _ region: ClosedRange<CGFloat>) -> CGRect {
+        CGRect(x: width.lowerBound, y: region.lowerBound,
+               width: width.upperBound - width.lowerBound,
+               height: region.upperBound - region.lowerBound)
+    }
 
-    private static func tabular(_ rows: [[String]], _ share: CGFloat,
+    // see okf/findings/an-unruled-table-is-told-apart-by-its-cells.md
+
+    private static func tabular(_ rows: [[Field]], _ share: CGFloat,
                                 _ length: Int) -> Bool {
         var filled = 0
         var wordy = 0
         for row in rows {
-            for cell in row where !cell.isEmpty {
+            for cell in row where !cell.text.isEmpty {
                 filled += 1
-                if cell.count > length { wordy += 1 }
+                if cell.text.count > length { wordy += 1 }
             }
         }
         return filled > 0 && CGFloat(wordy) <= CGFloat(filled) * share
@@ -937,10 +1115,7 @@ struct Converter {
         }
     }
 
-    // Column corridors. A gap between two columns is no wider than the
-    // gap between two words - the difference is that the column gap is
-    // empty on EVERY row. So accumulate ink from all rows into one
-    // profile first; only gaps that survive that union are corridors.
+    // see okf/findings/a-gap-is-not-a-column-edge.md
 
     private func columns(of fragments: [Fragment], _ gap: CGFloat,
                          _ vote: CGFloat = 0) -> [ClosedRange<CGFloat>] {
@@ -960,12 +1135,8 @@ struct Converter {
         return result
     }
 
-    // A boolean union asks "did ANY row cross here", and one spanning
-    // header answers yes for every corridor beneath it - which is why a
-    // multicolumn head used to collapse a table to a single column. Count
-    // the crossing ROWS instead: a bucket is a wall while few enough rows
-    // cross it, so a head spanning three of twelve rows can no longer
-    // erase a corridor the other nine respect.
+    // Crossing ROWS are counted, not unioned.
+    // see okf/findings/one-spanning-header-erases-every-corridor.md
 
     private static func profile(_ lines: [[Fragment]], _ buckets: Int,
                                 _ vote: CGFloat)
@@ -1005,10 +1176,7 @@ struct Converter {
         min(max(Int(x * CGFloat(last + 1)), 0), last)
     }
 
-    // Judge by how much of the span a column holds, not by where its
-    // midpoint lands: a cell spanning two columns has its midpoint over
-    // the gap between them, and a midpoint test sends it to whichever
-    // side rounds better.
+    // A cell spanning two columns has its midpoint over the gap.
 
     private static func column(of fragment: Fragment,
                                _ columns: [ClosedRange<CGFloat>]) -> Int {
@@ -1034,8 +1202,7 @@ struct Converter {
         return lower...max(upper, lower)
     }
 
-    // Cut a range at descending interior positions, top piece first, so
-    // rows and columns come out in reading order.
+    // Descending cuts, top piece first.
 
     private static func slice(_ whole: ClosedRange<CGFloat>,
                               _ cuts: [CGFloat]) -> [ClosedRange<CGFloat>] {
@@ -1049,10 +1216,8 @@ struct Converter {
         return result
     }
 
-    // Drawn uprights and whitespace corridors are both evidence of a
-    // column edge, and a table often supplies one where it lacks the
-    // other: a single upright beside three corridors is three columns
-    // plus one, not a choice between them.
+    // Unioned, not chosen between: a table often supplies one where it
+    // lacks the other.
 
     private static func cuts(_ posts: [CGFloat],
                              _ corridors: [ClosedRange<CGFloat>],
@@ -1068,9 +1233,7 @@ struct Converter {
         return result
     }
 
-    // Text-band extents overlap where one line's descender reaches
-    // past the next line's ascender, and an overlapping row would claim
-    // the same word twice. Cut instead halfway between the bands.
+    // Descenders make band extents overlap; cut halfway between.
 
     private static func separated(_ lines: [ClosedRange<CGFloat>],
                                   _ region: ClosedRange<CGFloat>)
@@ -1082,7 +1245,7 @@ struct Converter {
         return Converter.slice(region, cuts)
     }
 
-    // Cut a range at ascending interior positions, left piece first.
+    // Ascending cuts, left piece first.
 
     private static func slices(_ whole: ClosedRange<CGFloat>,
                                _ cuts: [CGFloat]) -> [ClosedRange<CGFloat>] {
@@ -1129,19 +1292,9 @@ struct Converter {
         band.map { fragment in fragment.text }.joined(separator: " ")
     }
 
-    // Column corridors read off the raster rather than off the boxes.
-    // Rows that a drawn rule crosses are left out: a rule covers every
-    // corridor under it, and one such row would erase them all. The rule
-    // is measured against the TABLE's width, which is what it spans -
-    // against the page column's it would look far too short to matter.
-
-    // Ink unioned over every row asks "did ANYTHING cross here", and one
-    // spanning header answers yes for every corridor beneath it - which
-    // is how a multicolumn head collapses a table to a single column.
-    // Count crossing ROWS instead: a bucket stays a wall while fewer
-    // than `cellVote` of the region's inked rows reach into it, so a
-    // head spanning one line of twelve can no longer erase a corridor
-    // the other eleven respect.
+    // Off the raster, not the boxes. Pixel rows a drawn rule crosses
+    // are skipped, and the rule is measured against the TABLE's width.
+    // see okf/findings/one-spanning-header-erases-every-corridor.md
 
     private func corridors(_ region: ClosedRange<CGFloat>,
                            _ width: ClosedRange<CGFloat>,
@@ -1213,10 +1366,6 @@ struct Converter {
         return result
     }
 
-    // Rule detection, in normalized page space like everything else.
-    // The same scan finds horizontal rules and vertical ones; only the
-    // axis it walks differs.
-
     private static func scan(_ image: CGImage, _ ink: UInt8,
                              _ share: CGFloat, level: Bool) -> [Ruling] {
         var result: [Ruling] = []
@@ -1257,11 +1406,7 @@ struct Converter {
         return result
     }
 
-    // A rule is a long CONTIGUOUS run of ink. Measuring instead from
-    // the first inked pixel to the last would work for a horizontal
-    // rule on an otherwise empty row, but never for a vertical one:
-    // any text elsewhere in that pixel column stretches the extent and
-    // the rule dissolves into it.
+    // see okf/findings/a-rule-is-a-contiguous-run-of-ink.md
 
     private static func inked(_ bytes: UnsafePointer<UInt8>,
                               _ image: CGImage, _ index: Int,
@@ -1332,10 +1477,8 @@ struct Converter {
         return result
     }
 
-    // `agrees` asks whether two extents overlap substantially, scaled
-    // by the SHORTER one - so a short rule always agrees with the wide
-    // table containing it. `covers` asks the different question a row
-    // boundary needs: does this rule cross the whole table.
+    // `covers` scales the shared extent by the whole, `agrees` by the
+    // SHORTER of the two.
 
     private static func covers(_ span: ClosedRange<CGFloat>,
                                _ whole: ClosedRange<CGFloat>,
@@ -1370,8 +1513,6 @@ struct Converter {
         }
     }
 
-    // Markdown emission, shared by every mode.
-
     private static func render(_ pages: [Page]) -> String {
         var blocks: [String] = []
         for page in pages {
@@ -1382,17 +1523,16 @@ struct Converter {
         return blocks.joined(separator: "\n\n") + "\n"
     }
 
-    // The words an element carries, without the Markdown that frames
-    // them - pipes and rules are not recognized text and must not count.
+    // The words alone: Markdown framing would break the audit.
 
     private static func spoken(_ element: Element) -> String {
         var result = ""
         switch element {
         case .paragraph(let text):
             result = text
-        case .table(let rows):
-            result = rows.map { row in
-                row.joined(separator: " ")
+        case .table(let table):
+            result = table.rows.map { row in
+                row.map { cell in cell.text }.joined(separator: " ")
             }.joined(separator: " ")
         }
         return result
@@ -1403,20 +1543,20 @@ struct Converter {
         switch element {
         case .paragraph(let text):
             result = text
-        case .table(let rows):
-            result = Converter.table(rows)
+        case .table(let table):
+            result = Converter.table(table.rows)
         }
         return result
     }
 
-    private static func table(_ rows: [[String]]) -> String {
+    private static func table(_ rows: [[Field]]) -> String {
         let width = rows.reduce(0) { widest, row in
             max(widest, row.count)
         }
         var lines: [String] = []
         for (index, row) in rows.enumerated() {
             var cells = row.map { cell in
-                cell.replacingOccurrences(of: "|", with: "\\|")
+                cell.text.replacingOccurrences(of: "|", with: "\\|")
             }
             while cells.count < width { cells.append("") }
             lines.append("| " + cells.joined(separator: " | ") + " |")

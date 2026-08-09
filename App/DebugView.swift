@@ -128,8 +128,14 @@ struct DebugView: View {
     // the app at all.
     private var footer: some View {
         HStack(spacing: 8) {
-            logButton("Transcript", model.tracePath)
-            Text("\u{00B7}").foregroundStyle(.tertiary)
+            // A Release build writes no transcript -- that file is the
+            // conversation itself -- so the row would name an empty path and
+            // copy nothing. Diagnostics carries no conversation content and
+            // ships everywhere.
+            if !model.tracePath.isEmpty {
+                logButton("Transcript", model.tracePath)
+                Text("\u{00B7}").foregroundStyle(.tertiary)
+            }
             logButton("Diagnostics", model.diagPath)
             Spacer()
         }
