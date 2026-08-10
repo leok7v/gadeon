@@ -311,7 +311,7 @@ func probeWrap(_ user: String) -> String {
         let n = min(a.count, b.count)
         var matches = 0, firstDiff = -1
         for i in 0 ..< n where a[i] == b[i] { matches += 1 }
-        for i in 0 ..< n where a[i] != b[i] { firstDiff = i; break }
+        for i in 0 ..< n where a[i] != b[i] && firstDiff < 0 { firstDiff = i }
         return (matches, n, firstDiff)
     }
 

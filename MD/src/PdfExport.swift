@@ -116,8 +116,7 @@ final class PDFRenderer {
             case .heading(let level, let text):
                 drawHeading(level: level, text: text)
             case .paragraph(let attr):
-                drawText(NSAttributedString(attr), font: bodyFont(),
-                         color: textColor)
+                drawText(attr, font: bodyFont(), color: textColor)
             case .code(let language, let text):
                 drawCode(text, language: language)
             case .quote(let blocks):
@@ -126,6 +125,8 @@ final class PDFRenderer {
                 drawList(items)
             case .table(let headers, let rows, let aligns):
                 drawTable(headers: headers, rows: rows, aligns: aligns)
+            case .math(let tex):
+                drawMath(tex)
             case .rule:
                 drawRule()
             case .image(let alt, let url, let width, _):
@@ -145,12 +146,17 @@ final class PDFRenderer {
             ?? CTFontCreateWithName("Helvetica-Bold" as CFString, size, nil)
         let bold = CTFontCreateCopyWithSymbolicTraits(font, size, nil,
             .traitBold, .traitBold) ?? font
-        drawText(NSAttributedString(text), font: bold, color: textColor)
+        drawText(text, font: bold, color: textColor)
     }
 
-    private func drawText(_ attr: NSAttributedString, font: CTFont,
+    // Takes the AttributedString rather than a converted one because the
+    // script level rides a custom key that NSAttributedString(_:) drops; the
+    // runs have to still be reachable once the fonts are settled.
+
+    private func drawText(_ attr: AttributedString, font: CTFont,
                           color: CGColor) {
-        let m = NSMutableAttributedString(attributedString: attr)
+        let m = NSMutableAttributedString(
+            attributedString: NSAttributedString(attr))
         let full = NSRange(location: 0, length: m.length)
         m.enumerateAttribute(.font, in: full, options: []) { v, range, _ in
             if v == nil {
@@ -167,7 +173,35 @@ final class PDFRenderer {
                 m.addAttribute(.foregroundColor, value: color, range: range)
             }
         }
+        applyScriptRuns(m, from: attr)
         flow(m)
+    }
+
+    // Centred while it fits, and shrunk to the column rather than clipped
+    // when it does not: a page cannot scroll sideways, so the only other
+    // answer is a formula running off the edge.
+
+    private func drawMath(_ tex: String) {
+        if let layout = fittedMath(tex) {
+            ensureSpace(layout.height + bodySize)
+            let slack = contentWidth - layout.width
+            let x = contentLeft + max(slack / 2, 0)
+            layout.draw(in: ctx, at: CGPoint(x: x, y: y), color: textColor)
+            y -= layout.height
+        } else {
+            drawText(TeX.render(tex, display: true),
+                     font: bodyFontItalic(), color: textColor)
+        }
+    }
+
+    private func fittedMath(_ tex: String) -> MathLayout? {
+        let wanted = TeX.displaySize(body: bodySize)
+        var result = TeX.layout(tex, size: wanted)
+        if let first = result, first.width > contentWidth, first.width > 0 {
+            let fitted = wanted * contentWidth / first.width
+            result = TeX.layout(tex, size: max(fitted, wanted * 0.5))
+        }
+        return result
     }
 
     private func flow(_ attr: NSAttributedString) {

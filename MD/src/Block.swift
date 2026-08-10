@@ -17,6 +17,11 @@ public enum Markdown {
         case list(items: [ListItem], tight: Bool)
         case table(headers: [String], rows: [[String]],
                    alignments: [Alignment])
+        // A $$...$$ display, carried as its TeX source. Inline $...$ stays
+        // inside the paragraph's AttributedString: only a display gets a
+        // block of its own, because only a display is typeset rather than
+        // spelled out in Unicode.
+        case math(String)
         case rule
         case image(alt: String, url: URL,
                    width: CGFloat?, height: CGFloat?)

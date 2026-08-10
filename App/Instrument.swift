@@ -92,14 +92,15 @@ final class MainThreadWatch: @unchecked Sendable {
 
     func start() {
         queue.async { [weak self] in
-            guard let self, !self.started else { return }
-            self.started = true
-            let t = DispatchSource.makeTimerSource(queue: self.queue)
-            t.schedule(deadline: .now() + .milliseconds(100),
-                       repeating: .milliseconds(100))
-            t.setEventHandler { [weak self] in self?.ping() }
-            self.timer = t
-            t.resume()
+            if let self, !self.started {
+                self.started = true
+                let t = DispatchSource.makeTimerSource(queue: self.queue)
+                t.schedule(deadline: .now() + .milliseconds(100),
+                           repeating: .milliseconds(100))
+                t.setEventHandler { [weak self] in self?.ping() }
+                self.timer = t
+                t.resume()
+            }
         }
     }
 

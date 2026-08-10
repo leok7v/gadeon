@@ -3,6 +3,38 @@ import UIKit
 
 extension DocumentText {
 
+    // UIKit has no attachment cell to draw through, so the formula is
+    // rasterized with the ink current when the document was built. A theme
+    // flip therefore wants the document rebuilt, which is what the transcript
+    // already does.
+
+    static func mathAttachment(_ layout: MathLayout) -> NSTextAttachment {
+        let attachment = NSTextAttachment()
+        let scale = UIScreen.main.scale
+        if let cg = layout.cgImage(scale: scale, padding: 4,
+                                   background: nil,
+                                   color: platformDefaultTextColor.cgColor) {
+            attachment.image = UIImage(cgImage: cg, scale: scale,
+                                       orientation: .up)
+        }
+        attachment.bounds = CGRect(x: 0, y: -layout.descent,
+                                   width: layout.width + 8,
+                                   height: layout.height)
+        return attachment
+    }
+
+    // What this builder actually lays out, not what the content would like:
+    // the tab stops are pinned to this whatever the view is, and cells
+    // truncate rather than overflow, so asking the surface to be wider than
+    // this would buy empty space and nothing else.
+    private static var tabStopExtent: CGFloat { 320 }
+
+    static func tableMinimumWidth(headers: [String], rows: [[String]],
+                                  style: MarkdownStyle) -> CGFloat {
+        let cols = max(headers.count, rows.map { r in r.count }.max() ?? 0)
+        return cols > 0 ? tabStopExtent : 0
+    }
+
     static func table(headers: [String], rows: [[String]],
                       alignments: [Markdown.Alignment], style: MarkdownStyle,
                       images: [URL: PlatformImage]) -> NSAttributedString {
@@ -11,7 +43,7 @@ extension DocumentText {
         if cols > 0 {
             let atomicId = UUID().uuidString
             let widths = TableMetrics.pointWidths(headers: headers, rows: rows,
-                                                  available: 320)
+                                                  available: tabStopExtent)
             var stops: [NSTextTab] = []
             var x: CGFloat = 0
             for (col, w) in widths.enumerated() {

@@ -49,6 +49,13 @@ enum HtmlExport {
             case .table(let headers, let rows, let aligns):
                 result = renderTable(headers: headers, rows: rows,
                                      aligns: aligns)
+            case .math(let tex):
+                // Unicode, not a picture. A rasterized formula would bake in
+                // one theme's ink, stop scaling with the page, and weigh more
+                // than the document around it; the substituter's text does
+                // none of that and still says what the formula says.
+                result = "<p style=\"\(mathStyle)\">"
+                    + "\(renderInline(TeX.render(tex, display: true)))</p>\n"
             case .rule:
                 result = "<hr style=\"\(ruleStyle)\">\n"
             case .image(let alt, let url, let w, let h):
@@ -84,6 +91,14 @@ enum HtmlExport {
             if intent.contains(.strikethrough) {
                 open.append("<del>")
                 close.insert("</del>", at: 0)
+            }
+            // Back to the tag the source wrote. The parser consumed it so the
+            // on-screen render could offset a baseline; here the medium says
+            // it natively and says it better.
+            if let level = run[ScriptAttribute.self] {
+                let tag = level > 0 ? "sup" : "sub"
+                open.append("<\(tag)>")
+                close.insert("</\(tag)>", at: 0)
             }
             out += open.joined() + segment + close.joined()
         }
@@ -133,7 +148,8 @@ enum HtmlExport {
             out += "<thead><tr style=\"\(rowHeaderStyle)\">\n"
             for i in 0..<n {
                 let cell = i < headers.count ? headers[i] : ""
-                out += "<th style=\"\(cellStyle(i, aligns, header: true))\">"
+                let style = cellStyle(i, of: n, aligns, header: true)
+                out += "<th style=\"\(style)\">"
                     + "\(inlineFromCell(cell))</th>\n"
             }
             out += "</tr></thead>\n"
@@ -145,7 +161,8 @@ enum HtmlExport {
             out += open + "\n"
             for i in 0..<n {
                 let cell = i < row.count ? row[i] : ""
-                out += "<td style=\"\(cellStyle(i, aligns, header: false))\">"
+                let style = cellStyle(i, of: n, aligns, header: false)
+                out += "<td style=\"\(style)\">"
                     + "\(inlineFromCell(cell))</td>\n"
             }
             out += "</tr>\n"
@@ -153,10 +170,15 @@ enum HtmlExport {
         return out + "</tbody>\n</table>\n"
     }
 
-    private static func cellStyle(_ col: Int,
+    // The last column carries no divider, or the table gains an outer right
+    // border no other edge has. Inline styles cannot express
+    // :not(:last-child), so the column index decides it here.
+
+    private static func cellStyle(_ col: Int, of count: Int,
                                   _ aligns: [Markdown.Alignment],
                                   header: Bool) -> String {
-        let base = header ? thStyle : tdStyle
+        let base = (header ? thStyle : tdStyle)
+            + (col < count - 1 ? colDividerStyle : "")
         let a = col < aligns.count ? aligns[col] : .none
         let text: String
         switch a {
@@ -260,10 +282,20 @@ enum HtmlExport {
         "border:none;border-top:1px solid rgba(128,128,128,0.3);margin:1em 0;"
     private static let tableStyle =
         "border-collapse:collapse;margin:0.5em 0;"
+    // 14px, not 10px: half an average character on each side, so the gutter
+    // between two columns grows by a full character. Plain px on purpose --
+    // calc() with a ch unit would express it exactly, but a paste sanitizer
+    // that rejects the function drops the whole declaration with it.
     private static let thStyle =
-        "padding:6px 10px;border-bottom:1px solid rgba(128,128,128,0.3);"
+        "padding:6px 14px;border-bottom:1px solid rgba(128,128,128,0.3);"
     private static let tdStyle =
-        "padding:6px 10px;border-bottom:1px solid rgba(128,128,128,0.12);"
+        "padding:6px 14px;border-bottom:1px solid rgba(128,128,128,0.12);"
+    // Lighter than the row rules so the grid reads as columns first;
+    // border-collapse on the table merges it with border-bottom.
+    private static let colDividerStyle =
+        "border-right:1px solid rgba(128,128,128,0.20);"
+    private static let mathStyle =
+        "text-align:center;font-style:italic;margin:0.8em 0;"
     private static let rowHeaderStyle = "background:rgba(128,128,128,0.14);"
     private static let rowShadeStyle = "background:rgba(128,128,128,0.07);"
     private static let listStyleTight = "margin:0.2em 0;padding-left:1.5em;"

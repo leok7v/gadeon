@@ -13,8 +13,7 @@ import SwiftUI
 // the cross-fade is an OPACITY, which the render server interpolates from a
 // single commit. That is ~32 state changes for the whole show. A
 // `TimelineView` or a `.symbolEffect` would instead redraw every display
-// refresh for as long as it ran, which is the shape that froze this app --
-// see the STANDING RULE in [[voice-turn-and-render-stalls]].
+// refresh for as long as it ran, which is the shape that froze this app.
 
 struct FilmStrip: View {
 

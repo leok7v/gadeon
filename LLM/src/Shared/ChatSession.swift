@@ -629,7 +629,7 @@ public actor ChatSession {
     // 71 MB free, and the vision tower asked for its first pipeline. The Metal
     // shader compiler is a separate XPC service, so it was jetsammed
     // mid-compile and the pipeline build trapped. Our own footprint claimed
-    // 1.9 GB of headroom throughout -- see [[gpu-weights-are-wired]].
+    // 1.9 GB of headroom throughout.
     //
     // Unlike endPriming this does NOT stop the prime, it waits for it: the
     // caller wants the engine next, not instead of.

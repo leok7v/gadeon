@@ -9,6 +9,33 @@ import SwiftUI
 
 enum TeX {
 
+    // The two engines meet here. KaTeX typesets a display wherever there is
+    // a graphics context to draw into; nil means it refused -- a macro it
+    // does not know, a construct outside its grammar -- and the caller falls
+    // back to render(_:display:), which spells the formula out in Unicode
+    // rather than showing nothing. Every surface without a context (HTML,
+    // plain text, the clipboard) skips this and takes the Unicode form.
+
+    static func layout(_ tex: String, size: CGFloat) -> MathLayout? {
+        var settings = MathSettings()
+        settings.displayMode = true
+        settings.fontSize = size
+        return try? KaTeX.layout(tex, settings: settings)
+    }
+
+    // Display maths is set larger than the prose around it, the way a TeX
+    // document does.
+    static func displaySize(body: CGFloat) -> CGFloat { body * 4 / 3 }
+
+    // Whether the WHOLE string is TeX the parser recognises: every token
+    // known, nothing left over. Parse only, no layout and no font, because
+    // this is asked speculatively about paragraphs that merely look like
+    // they might be formulas.
+
+    static func parses(_ tex: String) -> Bool {
+        (try? Parser.parse(tex)) != nil
+    }
+
     enum Segment {
         case text(String)
         case math(String, display: Bool)
@@ -282,6 +309,66 @@ enum TeX {
         return result
     }
 
+    // The plain-text answer to <sub>/<sup>, for the surfaces that have no
+    // baseline to offset: a monospaced table serialization, a character
+    // count, a clipboard paste. Every character or none -- a half-mapped run
+    // reads as a typo, so one unrepresentable letter sends the whole of it to
+    // parentheses, the same shape mapScript uses for TeX.
+
+    static func unicodeScript(_ s: String, superscript sup: Bool) -> String {
+        let map = sup ? superscriptMap : subscriptMap
+        let mapped = s.compactMap { c in map[c] }
+        var result = "(" + s + ")"
+        if s.isEmpty {
+            result = ""
+        } else if mapped.count == s.count {
+            result = String(mapped)
+        }
+        return result
+    }
+
+    // A body with no '<' in it is an INNERMOST pair, which is what makes one
+    // pass safe: "m<sub>DO<sub>2</sub></sub>" is real notation, and a pattern
+    // that let the body span a tag would pair the outer opener with the inner
+    // closer and strand the rest.
+    private static let scriptTagRE: NSRegularExpression? =
+        try? NSRegularExpression(pattern: #"<(sub|sup)>([^<]*)</\1>"#,
+                                 options: .caseInsensitive)
+
+    // Rewrites the tags in a RAW cell, for the table measurers and the
+    // monospaced serializer -- they see the markdown source, never the parsed
+    // runs, and would otherwise size a column to "m<sup>2</sup>". Repeated
+    // until it stops changing, so nesting unwinds inside out.
+
+    static func scriptsToUnicode(_ s: String) -> String {
+        var result = s
+        var unwinding = s.contains("<")
+        while unwinding {
+            let next = innermostScripts(result)
+            unwinding = next != result
+            result = next
+        }
+        return result
+    }
+
+    private static func innermostScripts(_ s: String) -> String {
+        var result = s
+        if let re = scriptTagRE {
+            let ns = s as NSString
+            let full = NSRange(location: 0, length: ns.length)
+            let m = NSMutableString(string: s)
+            for match in re.matches(in: s, range: full).reversed() {
+                let tag = ns.substring(with: match.range(at: 1))
+                let body = ns.substring(with: match.range(at: 2))
+                let sup = tag.lowercased() == "sup"
+                m.replaceCharacters(in: match.range,
+                                    with: unicodeScript(body, superscript: sup))
+            }
+            result = m as String
+        }
+        return result
+    }
+
     // Longest-first, then lexicographic, so equal-length keys replace in a
     // deterministic order.
     private static func replaceTokens(_ s: String) -> String {
@@ -290,8 +377,33 @@ enum TeX {
             a.key.count > b.key.count
                 || (a.key.count == b.key.count && a.key > b.key)
         }
-        for (k, v) in pairs { out = out.replacingOccurrences(of: k, with: v) }
+        for (k, v) in pairs { out = replaceToken(out, k, v) }
         return out
+    }
+
+    // A control word ends where a non-letter begins. Without that,
+    // "\newcommand" becomes "(not equal)wcommand" the moment \ne is
+    // substituted inside it -- which is exactly what a reader sees when KaTeX
+    // refuses a formula and this is all that is left. Keys that do not end in
+    // a letter have no boundary to respect.
+
+    private static func replaceToken(_ s: String, _ key: String,
+                                     _ value: String) -> String {
+        var result = s
+        if let last = key.last, last.isLetter {
+            let pattern = NSRegularExpression.escapedPattern(for: key)
+                        + "(?![A-Za-z])"
+            if let re = try? NSRegularExpression(pattern: pattern) {
+                let ns = s as NSString
+                result = re.stringByReplacingMatches(
+                    in: s, range: NSRange(location: 0, length: ns.length),
+                    withTemplate:
+                        NSRegularExpression.escapedTemplate(for: value))
+            }
+        } else {
+            result = s.replacingOccurrences(of: key, with: value)
+        }
+        return result
     }
 
     private static let tokenMap: [String: String] = [
@@ -360,7 +472,8 @@ enum TeX {
         "0": "\u{2070}", "1": "\u{00B9}", "2": "\u{00B2}", "3": "\u{00B3}",
         "4": "\u{2074}", "5": "\u{2075}", "6": "\u{2076}", "7": "\u{2077}",
         "8": "\u{2078}", "9": "\u{2079}", "+": "\u{207A}", "-": "\u{207B}",
-        "=": "\u{207C}", "(": "\u{207D}", ")": "\u{207E}", "a": "\u{1D43}",
+        "\u{2212}": "\u{207B}", "=": "\u{207C}", "(": "\u{207D}",
+        ")": "\u{207E}", "a": "\u{1D43}",
         "b": "\u{1D47}", "c": "\u{1D9C}", "d": "\u{1D48}", "e": "\u{1D49}",
         "f": "\u{1DA0}", "g": "\u{1D4D}", "h": "\u{02B0}", "i": "\u{2071}",
         "j": "\u{02B2}", "k": "\u{1D4F}", "l": "\u{02E1}", "m": "\u{1D50}",
@@ -374,7 +487,8 @@ enum TeX {
         "0": "\u{2080}", "1": "\u{2081}", "2": "\u{2082}", "3": "\u{2083}",
         "4": "\u{2084}", "5": "\u{2085}", "6": "\u{2086}", "7": "\u{2087}",
         "8": "\u{2088}", "9": "\u{2089}", "+": "\u{208A}", "-": "\u{208B}",
-        "=": "\u{208C}", "(": "\u{208D}", ")": "\u{208E}", "a": "\u{2090}",
+        "\u{2212}": "\u{208B}", "=": "\u{208C}", "(": "\u{208D}",
+        ")": "\u{208E}", "a": "\u{2090}",
         "e": "\u{2091}", "h": "\u{2095}", "i": "\u{1D62}", "j": "\u{2C7C}",
         "k": "\u{2096}", "l": "\u{2097}", "m": "\u{2098}", "n": "\u{2099}",
         "o": "\u{2092}", "p": "\u{209A}", "r": "\u{1D63}", "s": "\u{209B}",

@@ -301,9 +301,11 @@ public actor Engine {
         for prog in m.trunk {
             for (name, desc) in prog.modelDescription.inputDescriptionsByName
             where name.hasPrefix("conv") || name.hasPrefix("rec") {
-                if gs[name] != nil { continue }
-                let shape = desc.multiArrayConstraint!.shape.map { $0.intValue }
-                gs[name] = try Engine.zeros(shape)
+                if gs[name] == nil {
+                    let shape = desc.multiArrayConstraint!.shape
+                        .map { $0.intValue }
+                    gs[name] = try Engine.zeros(shape)
+                }
             }
         }
         self.gdnState = gs

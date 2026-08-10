@@ -67,6 +67,21 @@ public struct MarkdownTextView: View {
                     })
             }
     }
+
+    // The narrowest this document can be drawn before a table is asked for
+    // less room than its widest token needs. One surface holds everything, so
+    // a table cannot scroll on its own the way a block-rendered one does: a
+    // host that can afford the width should floor its frame at this, and one
+    // that cannot is choosing to let a table wrap hard.
+    //
+    // Zero for a document with no tables, which is most of them.
+
+    @MainActor
+    public static func minimumWidth(of document: Markdown.Document,
+                                    style: MarkdownStyle = .default)
+        -> CGFloat {
+        DocumentText.minimumWidth(of: document, style: style)
+    }
 }
 
 // The raw text on the SAME findable / selectable single surface as

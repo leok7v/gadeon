@@ -187,14 +187,16 @@ public final class Gemma4Audio {
                         for ic in 0..<channels {
                             for ky in 0..<3 {
                                 let iy = 2 * y + ky - 1
-                                if iy < 0 || iy >= height { continue }
                                 for kx in 0..<3 {
                                     let ix = 2 * x + kx - 1
-                                    if ix < 0 || ix >= width { continue }
-                                    let wi = ((oc * channels + ic) * 3 + ky)
-                                        * 3 + kx
-                                    acc += w[wi]
-                                        * h[(ic * height + iy) * width + ix]
+                                    let inside = iy >= 0 && iy < height &&
+                                        ix >= 0 && ix < width
+                                    if inside {
+                                        let wi = ((oc * channels + ic) * 3
+                                            + ky) * 3 + kx
+                                        acc += w[wi] * h[(ic * height + iy)
+                                            * width + ix]
+                                    }
                                 }
                             }
                         }

@@ -33,9 +33,11 @@ public struct GemmaTokenizer: Sendable {
     // Internal like Tokenizer's own gguf init: GGUF is a module-internal
     // type, so the public door is GemmaChat.
     init(gguf g: GGUF) throws {
-        guard let toks = g.strings("tokenizer.ggml.tokens") else {
+        let listed = g.strings("tokenizer.ggml.tokens")
+        if listed == nil {
             throw GGUFErr.parse("tokenizer.ggml.tokens missing")
         }
+        let toks = listed!
         pieces = toks
         types = g.ints("tokenizer.ggml.token_type") ?? []
         metaspace = g.string("tokenizer.ggml.metaspace") ?? "\u{2581}"

@@ -339,6 +339,9 @@ extension NativeText: NSViewRepresentable {
                     let hasCopy = id != nil && ts.attribute(
                         atomicCopyKey, at: range.location,
                         effectiveRange: nil) != nil
+                    let kind = id == nil ? nil : ts.attribute(
+                        atomicKindKey, at: range.location,
+                        effectiveRange: nil) as? String
                     if let id, hasCopy {
                         let gr = lm.glyphRange(forCharacterRange: range,
                                                actualCharacterRange: nil)
@@ -350,7 +353,17 @@ extension NativeText: NSViewRepresentable {
                         // tables, whose first row sits below cell padding).
                         let line = lm.lineFragmentUsedRect(
                             forGlyphAt: gr.location, effectiveRange: nil)
-                        let x = block.maxX + origin.x - 26
+                        // A code fence and a table start at the left
+                        // margin, so a button set just inside their right edge
+                        // lands in empty corner. A display is CENTRED, so that
+                        // same inset lands on the formula -- it has to go out
+                        // to the margin instead, which is where the eye looks
+                        // for it anyway.
+                        let right = kind == AtomicKind.math.rawValue
+                            ? lm.lineFragmentRect(forGlyphAt: gr.location,
+                                                  effectiveRange: nil).maxX
+                            : block.maxX
+                        let x = right + origin.x - copyButtonGutter
                         let y = line.minY + origin.y + (line.height - 22) / 2
                         let frame = NSRect(x: x, y: y, width: 22, height: 22)
                         let btn = copyButtons[id] ?? makeCopyButton(id)

@@ -98,7 +98,7 @@ enum Models {
             // vm-pageshortage while the machine held 3050 MB wired and 30 MB
             // free. E2B fits there only because the two embedding tables are
             // gathered on the CPU, so per_layer_token_embd's window is never
-            // bound and never wired. See [[gpu-weights-are-wired]].
+            // bound and never wired.
             //
             // The threshold is the tier the app COMPUTES, not the marketing
             // size, and the two disagree: an iPad16,1 reports 7.72 GiB and

@@ -306,7 +306,7 @@ MD/
 ## Coding discipline
 
 This lives in the `coreml.ui` repo, which carries the AGENTS discipline
-(`../AGENTS.md`, `../.agents/memory/cardinal-rules.md`). The
+(`../AGENTS.md`, `../okf/rules/cardinal-rules.md`). The
 implementation will hold to it: single entry / single exit, no invented
 `bool ok` flags, WHY-only comments, 79-column Swift, match neighbouring
 style, no new dependency. The `md.too` sources already read close to this,

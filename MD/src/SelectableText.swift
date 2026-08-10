@@ -3,8 +3,14 @@ import SwiftUI
 // Atomic units mark spans (a code block, a table, an image) that selection
 // should snap around instead of cutting through, in the single-surface view.
 enum AtomicKind: String {
-    case code, table, image
+    case code, table, image, math
 }
+
+// Where the copy overlay sets a button, measured in from the right edge of
+// the block it belongs to. A builder whose content is CENTRED has to reserve
+// this on both margins, or a block wide enough to fill its surface leaves the
+// button sitting on top of the content.
+let copyButtonGutter: CGFloat = 26
 
 let atomicKindKey = NSAttributedString.Key("MD.atomic.kind")
 let atomicIdKey = NSAttributedString.Key("MD.atomic.id")

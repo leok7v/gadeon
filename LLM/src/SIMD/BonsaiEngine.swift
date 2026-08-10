@@ -62,7 +62,7 @@ public final class BonsaiEngine {
     // next append). This is the mark/rewind + park/resume seam.
     // A parked conversation's bytes: the GDN recurrence whole (it cannot be
     // paged) and the KV pages. Format shared with the other engines through
-    // StateBytes. [[never-reprefill]]
+    // StateBytes.
 
     public func serialize(_ b: Bookmark) -> Data {
         var out = Data()
@@ -89,25 +89,28 @@ public final class BonsaiEngine {
     public func deserialize(_ data: Data) -> Bookmark? {
         let b = [UInt8](data)
         var p = 0
-        guard StateBytes.readHeader(b, &p) else { return nil }
-        let pos = StateBytes.getInt(b, &p)
-        var gdn: [Int: (conv: [Float], rec: [Float])] = [:]
-        for _ in 0..<StateBytes.getInt(b, &p) {
-            let il = StateBytes.getInt(b, &p)
-            let conv = StateBytes.getFloats(b, &p)
-            gdn[il] = (conv: conv, rec: StateBytes.getFloats(b, &p))
+        var mark: Bookmark? = nil
+        if StateBytes.readHeader(b, &p) {
+            let pos = StateBytes.getInt(b, &p)
+            var gdn: [Int: (conv: [Float], rec: [Float])] = [:]
+            for _ in 0..<StateBytes.getInt(b, &p) {
+                let il = StateBytes.getInt(b, &p)
+                let conv = StateBytes.getFloats(b, &p)
+                gdn[il] = (conv: conv, rec: StateBytes.getFloats(b, &p))
+            }
+            var kv: [Int: KVCache.Snapshot] = [:]
+            for _ in 0..<StateBytes.getInt(b, &p) {
+                let il = StateBytes.getInt(b, &p)
+                let len = StateBytes.getInt(b, &p)
+                let n = StateBytes.getInt(b, &p)
+                var kp: [[Float]] = [], vp: [[Float]] = []
+                for _ in 0..<n { kp.append(StateBytes.getFloats(b, &p)) }
+                for _ in 0..<n { vp.append(StateBytes.getFloats(b, &p)) }
+                kv[il] = KVCache.Snapshot(kPages: kp, vPages: vp, len: len)
+            }
+            mark = Bookmark(pos: pos, gdn: gdn, kv: kv)
         }
-        var kv: [Int: KVCache.Snapshot] = [:]
-        for _ in 0..<StateBytes.getInt(b, &p) {
-            let il = StateBytes.getInt(b, &p)
-            let len = StateBytes.getInt(b, &p)
-            let n = StateBytes.getInt(b, &p)
-            var kp: [[Float]] = [], vp: [[Float]] = []
-            for _ in 0..<n { kp.append(StateBytes.getFloats(b, &p)) }
-            for _ in 0..<n { vp.append(StateBytes.getFloats(b, &p)) }
-            kv[il] = KVCache.Snapshot(kPages: kp, vPages: vp, len: len)
-        }
-        return Bookmark(pos: pos, gdn: gdn, kv: kv)
+        return mark
     }
 
     public struct Bookmark: @unchecked Sendable {

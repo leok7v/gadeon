@@ -99,7 +99,7 @@ public final class Gemma4Backend: AgentBackend, @unchecked Sendable {
 
     // A parked conversation restores from BYTES, never from a forward pass.
     // The protocol default returns empty Data, which reads as a warm cache
-    // and is a cold one every time. [[never-reprefill]]
+    // and is a cold one every time.
 
     public func serializeState(_ state: any BackendState) async -> Data {
         var out = Data()
@@ -109,10 +109,11 @@ public final class Gemma4Backend: AgentBackend, @unchecked Sendable {
 
     public func deserializeState(_ data: Data) async throws
         -> any BackendState {
-        guard let b = engine.deserialize(data) else {
+        let b = engine.deserialize(data)
+        if b == nil {
             throw GGUFErr.parse("parked state is not this build's format")
         }
-        return State(bookmark: b)
+        return State(bookmark: b!)
     }
 
     // A pre-turn rollback point carries the state AND savedMark, so a

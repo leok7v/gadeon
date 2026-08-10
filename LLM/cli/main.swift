@@ -275,9 +275,11 @@ if let vlDir {
 } else {
     err("enter messages (Ctrl-D to end):\n")
     var isFirst = true
-    while let line = readLine(strippingNewline: true) {
-        if line.isEmpty { continue }
-        if line == "/quit" { break }
-        try await runTurn(line, first: isFirst); isFirst = false
+    var line = readLine(strippingNewline: true)
+    while let text = line, text != "/quit" {
+        if !text.isEmpty {
+            try await runTurn(text, first: isFirst); isFirst = false
+        }
+        line = readLine(strippingNewline: true)
     }
 }

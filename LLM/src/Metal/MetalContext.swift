@@ -83,7 +83,7 @@ public final class MetalContext {
     // fine cut is nearly free and buys nearly nothing HERE. It is kept
     // because a device under real pressure is a different regime (iOS was
     // measured releasing 1859 -> 801 MB the moment a prefill ended) and this
-    // is the only lever that could pay there. See [[gpu-weights-are-wired]].
+    // is the only lever that could pay there.
     // The buffers are views of one read-only mapping, so 32 of them cost 32
     // objects and nothing else.
     //
@@ -277,14 +277,12 @@ public final class MetalContext {
     // A cached compute pipeline for a named kernel.
     func pipeline(_ name: String) throws -> MTLComputePipelineState {
         var state = pipelines[name]
-        if state == nil {
-            guard let fn = library.makeFunction(name: name) else {
-                throw MetalErr.noFunction(name)
-            }
+        if state == nil, let fn = library.makeFunction(name: name) {
             let made = try device.makeComputePipelineState(function: fn)
             pipelines[name] = made
             state = made
         }
+        if state == nil { throw MetalErr.noFunction(name) }
         return state!
     }
 

@@ -100,13 +100,14 @@ func wavBytes(_ pcm: [Float], rate: Int) -> [UInt8] {
             exit(2)
         }
         let t0 = Date()
-        guard let speech = Speech() else {
+        let speech = Speech()
+        if speech == nil {
             err("speech engine unavailable (bundled resources missing)\n")
             exit(1)
         }
         let load = Date().timeIntervalSince(t0)
         let t1 = Date()
-        let pcm = speech.synthesize(text, voice: voice, speed: speed)
+        let pcm = speech!.synthesize(text, voice: voice, speed: speed)
         let synth = Date().timeIntervalSince(t1)
         if pcm.isEmpty {
             err("no audio produced\n")

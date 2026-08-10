@@ -1,5 +1,22 @@
 import Foundation
 
+// <sub> and <sup> survive Apple's inline markdown parser as literal text, and
+// there is no markdown spelling for either, so the tags are consumed here and
+// the level left on the run for each renderer to set however its medium
+// expresses a script: a baseline offset on screen and in the PDF, a real tag
+// in the HTML, a Unicode digit in plain text. The value is the direction,
+// +1 up and -1 down.
+//
+// A plain AttributedStringKey on purpose: it is read off attr.runs by every
+// renderer and never has to survive NSAttributedString(_:), which drops
+// custom keys outside a declared scope. applyScriptRuns bridges the two paths
+// that do need it on the NS side.
+
+enum ScriptAttribute: AttributedStringKey {
+    typealias Value = Int
+    static let name = "md.script"
+}
+
 // Batch parser. Adapted from md.too `src/MarkdownParser.swift`, extended
 // with per-column table alignment and an internal `blocks` seam the
 // streaming parser reuses so streaming and batch results cannot diverge.
@@ -48,6 +65,8 @@ extension Markdown {
             let line = lines[i]
             if isFence(line) {
                 out.append((start, consumeFenced(lines, &i)))
+            } else if isMathFence(line) {
+                out.append((start, consumeMath(lines, &i)))
             } else if isHeading(line) {
                 out.append((start, consumeHeading(lines, &i)))
             } else if isHR(line) {
@@ -145,6 +164,8 @@ extension Markdown {
         var out = hasMath ? inlineWithMath(segs)
                           : parseInlineMarkdown(normalized)
         applyUnderlineTags(&out)
+        applyScriptTags(&out, tag: "sup", level: 1)
+        applyScriptTags(&out, tag: "sub", level: -1)
         return out
     }
 
@@ -219,6 +240,31 @@ extension Markdown {
                                       with: sub)
                 } else {
                     a.removeSubrange(open)   // hide a partial tag streaming
+                }
+            } else {
+                keep = false
+            }
+        }
+    }
+
+    // Same shape as applyUnderlineTags: an unclosed opener is dropped rather
+    // than left on screen, since a stray "<sup>" is markup the reader never
+    // wrote and never wants to see.
+
+    static func applyScriptTags(_ a: inout AttributedString,
+                                tag: String, level: Int) {
+        let open = "<\(tag)>"
+        let close = "</\(tag)>"
+        var keep = true
+        while keep {
+            if let o = a.range(of: open, options: .caseInsensitive) {
+                let tail = a[o.upperBound...]
+                if let c = tail.range(of: close, options: .caseInsensitive) {
+                    var sub = a[o.upperBound..<c.lowerBound]
+                    sub[ScriptAttribute.self] = level
+                    a.replaceSubrange(o.lowerBound..<c.upperBound, with: sub)
+                } else {
+                    a.removeSubrange(o)
                 }
             } else {
                 keep = false
@@ -333,6 +379,45 @@ extension Markdown {
         }
         let language = lang.isEmpty ? nil : lang
         return .code(language: language, text: body.joined(separator: "\n"))
+    }
+
+    // Only a line that OPENS with $$ starts a display. A $$ met partway
+    // through a sentence belongs to that sentence and is left to the inline
+    // splitter, which is also what happens to every $...$. With math off the
+    // dollars are literal text and there is no display to open.
+
+    static func isMathFence(_ s: String) -> Bool {
+        mathEnabled && s.trimmedOuter().hasPrefix("$$")
+    }
+
+    // Accepts both spellings authors use: the whole thing on one line, and an
+    // opening $$ with the formula on the lines below. An unterminated display
+    // runs to the end of the document rather than swallowing the rest as
+    // prose.
+
+    private static func consumeMath(_ lines: [String],
+                                    _ i: inout Int) -> Block {
+        var body: [String] = []
+        var rest = String(lines[i].trimmedOuter().dropFirst(2))
+        var closed = false
+        if let end = rest.range(of: "$$", options: .backwards) {
+            rest = String(rest[..<end.lowerBound])
+            closed = true
+        }
+        if !rest.trimmedOuter().isEmpty { body.append(rest) }
+        i += 1
+        while i < lines.count, !closed {
+            let t = lines[i].trimmedOuter()
+            if let end = t.range(of: "$$") {
+                let head = String(t[..<end.lowerBound])
+                if !head.trimmedOuter().isEmpty { body.append(head) }
+                closed = true
+            } else {
+                body.append(lines[i])
+            }
+            i += 1
+        }
+        return .math(body.joined(separator: "\n").trimmedOuter())
     }
 
     static func isIndentedCode(_ s: String) -> Bool {
@@ -535,7 +620,7 @@ extension Markdown {
 
     static func isLazyContinuation(_ line: String) -> Bool {
         !(isHeading(line) || isHR(line) || isFence(line) ||
-          isQuoteStart(line) || isListStart(line))
+          isMathFence(line) || isQuoteStart(line) || isListStart(line))
     }
 
     static func leadingSpaces(_ s: String) -> Int {
@@ -738,13 +823,81 @@ extension Markdown {
             let line = lines[i]
             let blank = line.trimmedOuter().isEmpty
             let other = isHeading(line) || isHR(line) || isFence(line) ||
+                        isMathFence(line) ||
                         isTableStart(lines, i) || isQuoteStart(line) ||
                         isListStart(line) || isIndentedCode(line) ||
                         imageBlock(line) != nil
             if blank || other { done = true }
             else { body.append(line); i += 1 }
         }
-        return .paragraph(inline(body.joined(separator: "\n")))
+        let raw = body.joined(separator: "\n")
+        return bareMath(raw) ?? .paragraph(inline(raw))
+    }
+
+    // A converter lifting an equation out of a PDF writes the TeX with
+    // nothing around it, and the paragraph then reads as a wall of
+    // backslashes. Markdown has no opinion about this, so the test has to be
+    // strict enough that prose can never pass it: the paragraph must OPEN
+    // with a control word, and the whole of it must parse -- every token
+    // recognised, no unknown command, nothing left over. A sentence that
+    // merely mentions \frac fails on its first ordinary word, and a Windows
+    // path fails because \\ is not a control word.
+
+    private static func bareMath(_ raw: String) -> Block? {
+        var result: Block? = nil
+        if mathEnabled, opensWithControlWord(raw), !hasProseWord(raw),
+           TeX.parses(raw) {
+            result = .math(raw)
+        }
+        return result
+    }
+
+    // Parsing cleanly is not enough on its own. In maths, neighbouring
+    // letters are separate variables multiplied together, so "\alpha is the
+    // first letter" parses perfectly -- as alpha times i times s and so on --
+    // and would be typeset as a formula. A run of three or more letters is
+    // prose wearing a backslash.
+    //
+    // Letters inside braces are exempt: that is where \text{} keeps its
+    // words, and where the converters put them. Letters belonging to a
+    // control word are exempt for the obvious reason.
+
+    private static func hasProseWord(_ raw: String) -> Bool {
+        var depth = 0
+        var run = 0
+        var found = false
+        var inCommand = false
+        for ch in raw {
+            let namesCommand = inCommand && ch.isLetter
+            if ch == "\\" {
+                inCommand = true
+                run = 0
+            } else if !namesCommand {
+                inCommand = false
+                if ch == "{" {
+                    depth += 1
+                    run = 0
+                } else if ch == "}" {
+                    depth = max(depth - 1, 0)
+                    run = 0
+                } else if ch.isLetter, ch.isASCII, depth == 0 {
+                    run += 1
+                    if run >= 3 { found = true }
+                } else {
+                    run = 0
+                }
+            }
+        }
+        return found
+    }
+
+    private static func opensWithControlWord(_ raw: String) -> Bool {
+        var result = false
+        let t = raw.trimmedLeading()
+        if t.hasPrefix("\\"), let after = t.dropFirst().first {
+            result = after.isLetter
+        }
+        return result
     }
 }
 

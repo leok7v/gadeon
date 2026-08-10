@@ -62,12 +62,15 @@ public final class Microphone: @unchecked Sendable {
         if !running {
             let input = engine.inputNode
             let native = input.outputFormat(forBus: 0)
-            guard native.sampleRate > 0,
-                  let want = AVAudioFormat(
-                    commonFormat: .pcmFormatFloat32, sampleRate: rate,
-                    channels: 1, interleaved: false) else {
+            let made: AVAudioFormat? = native.sampleRate > 0
+                ? AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                sampleRate: rate, channels: 1,
+                                interleaved: false)
+                : nil
+            if made == nil {
                 throw Failure.unavailable("no input format")
             }
+            let want = made!
             converter = AVAudioConverter(from: native, to: want)
             // A hardware-sized buffer: the gate holds its own hop remainder,
             // so the block size the tap happens to use changes nothing.

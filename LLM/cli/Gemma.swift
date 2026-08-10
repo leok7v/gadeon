@@ -730,7 +730,8 @@ private struct GemmaAttachments {
     let wire = try chat.audioWire()
     let mel = Gemma4Mel(chat.melConfig)
     let rate = Double(mel.cfg.sampleRate)
-    guard await Microphone.permission() else {
+    let allowed = await Microphone.permission()
+    if !allowed {
         throw GemmaCLIError.msg("microphone access was refused")
     }
     let gate = SpeechGate(rate: rate, maxSeconds: wire.maxSeconds)
@@ -912,12 +913,13 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
     let data = try Data(contentsOf: URL(fileURLWithPath: file))
     // A unified checkpoint has no tower, so its cut is the MERGED one: the
     // 48-pixel block is the soft token itself.
-    let cut = chat.model.hasVisionTower
+    let patched = chat.model.hasVisionTower
         ? patch.patches(data)
         : patch.merged(data, softTokens: patch.maxSoftTokens)
-    guard let cut else {
+    if patched == nil {
         throw GemmaCLIError.msg("could not decode \(file)")
     }
+    let cut = patched!
     let real = cut.pos.filter { p in p.0 >= 0 }.count
     err("[see] \(file) -> \(real) patches of \(cut.pos.count)\n")
     // The engine leads on the GPU arm: it owns the mapping the tower binds
@@ -1060,9 +1062,10 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
         let frame = chat.model.hasVisionTower
             ? patch.patches(img, budget: budget)
             : patch.merged(img, softTokens: film.softTokensPerFrame)
-        guard let cut = frame else {
+        if frame == nil {
             throw GemmaCLIError.msg("frame \(i) would not patchify")
         }
+        let cut = frame!
         let out = vit(cut.pixels, cut.pos)
         feats.append(contentsOf: out.proj)
         perFrame = out.count
@@ -1142,9 +1145,11 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
         "vision.position_ids.npy"))
     let p = try Gemma4Patchify(chat.model)
     let data = try Data(contentsOf: URL(fileURLWithPath: image))
-    guard let got = p.patches(data) else {
+    let patched = p.patches(data)
+    if patched == nil {
         throw GemmaCLIError.msg("could not decode \(image)")
     }
+    let got = patched!
     let n = wantPos.values.count / 2
     var posHits = 0
     var realWant = 0
@@ -1387,8 +1392,11 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
     if !useRef {
         let patch = try Gemma4Patchify(chat.model)
         let data = try Data(contentsOf: URL(fileURLWithPath: image))
-        guard let cut = patch.merged(data, softTokens: patch.maxSoftTokens)
-        else { throw GemmaCLIError.msg("could not cut \(image)") }
+        let merged = patch.merged(data, softTokens: patch.maxSoftTokens)
+        if merged == nil {
+            throw GemmaCLIError.msg("could not cut \(image)")
+        }
+        let cut = merged!
         mine = try Gemma4UnifiedMedia(chat.model)
             .image(pixels: cut.pixels, pos: cut.pos).flatMap { r in r }
     }
@@ -1397,8 +1405,8 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
     // is what the reference stored.
     let empty = [[Float]](repeating: [], count: probe.count)
     var got = [[[Float]]](repeating: empty, count: nLayer + 1)
-    var attn = [[[Float]]](repeating: empty, count: nLayer)
-    var mlp = [[[Float]]](repeating: empty, count: nLayer)
+    let attn = [[[Float]]](repeating: empty, count: nLayer)
+    let mlp = [[[Float]]](repeating: empty, count: nLayer)
     let slot = Dictionary(uniqueKeysWithValues:
         probe.enumerated().map { i, p in (p, i) })
     // The BATCHED path, because it is the only one that can express a vision
@@ -1493,7 +1501,6 @@ private func span(_ begin: Int32, _ token: Int32, _ end: Int32,
 // Park a conversation to bytes and bring it back. The ONE check that an
 // empty serializeState cannot pass: restore must reproduce the same next
 // token WITHOUT a forward pass, and must do it in disk-read time.
-// [[never-reprefill]]
 
 @MainActor private func gemmaParkGate(_ chat: GemmaChat,
                                       _ metal: Bool) async throws {

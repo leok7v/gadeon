@@ -41,7 +41,7 @@ public final class BonsaiBackend: AgentBackend, @unchecked Sendable {
         if let s = state as? State { engine.restore(s.bookmark) }
     }
 
-    // Bytes, not a forward pass. [[never-reprefill]]
+    // Bytes, not a forward pass.
 
     public func serializeState(_ state: any BackendState) async -> Data {
         var out = Data()
@@ -51,10 +51,11 @@ public final class BonsaiBackend: AgentBackend, @unchecked Sendable {
 
     public func deserializeState(_ data: Data) async throws
         -> any BackendState {
-        guard let b = engine.deserialize(data) else {
+        let b = engine.deserialize(data)
+        if b == nil {
             throw GGUFErr.parse("parked state is not this build's format")
         }
-        return State(bookmark: b)
+        return State(bookmark: b!)
     }
 
     // A pre-turn rollback point carries the state AND savedMark, so a rollback

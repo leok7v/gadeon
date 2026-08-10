@@ -39,13 +39,14 @@ final class Counter: @unchecked Sendable {
 }
 let traceCounter = Counter()
 func traceWrite(_ obj: [String: Any]) {
-    guard let traceURL,
-          let data = try? JSONSerialization.data(withJSONObject: obj),
-          let handle = try? FileHandle(forWritingTo: traceURL) else { return }
-    handle.seekToEndOfFile()
-    handle.write(data)
-    handle.write(Data("\n".utf8))
-    try? handle.close()
+    if let traceURL,
+       let data = try? JSONSerialization.data(withJSONObject: obj),
+       let handle = try? FileHandle(forWritingTo: traceURL) {
+        handle.seekToEndOfFile()
+        handle.write(data)
+        handle.write(Data("\n".utf8))
+        try? handle.close()
+    }
 }
 
 @MainActor
@@ -431,9 +432,10 @@ func runLongDoc(_ user: String) async throws {
         for turn in turnArgs { await runBonsai(turn) }
     } else {
         err("enter messages (Ctrl-D to end):\n")
-        while let line = readLine(strippingNewline: true) {
-            if line == "/quit" { break }
-            if !line.isEmpty { await runBonsai(line) }
+        var line = readLine(strippingNewline: true)
+        while let text = line, text != "/quit" {
+            if !text.isEmpty { await runBonsai(text) }
+            line = readLine(strippingNewline: true)
         }
     }
     exit(0)

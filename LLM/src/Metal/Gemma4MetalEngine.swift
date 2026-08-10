@@ -117,7 +117,7 @@ public final class Gemma4MetalEngine {
     // references it, so what ONE buffer asks for is what a split can bound.
     // Against MetalContext.minWindows a layer reads 26-102 MB windows, so one
     // layer per buffer references 78 MB where the whole chunk on one buffer
-    // references 714. See [[gpu-weights-are-wired]].
+    // references 714.
     //
     // WHAT IT ACTUALLY BUYS, macOS, and it is not what that arithmetic says:
     // sampling vm_stat's wired count around a prefill from outside the
@@ -432,7 +432,7 @@ public final class Gemma4MetalEngine {
     // command buffer references it, wired memory is charged to no process,
     // and per_layer_token_embd is 1260 of this model's 2541 MB with a window
     // to itself. Never binding that window is what keeps it out of the wired
-    // set. See [[gpu-weights-are-wired]].
+    // set.
     //
     // The write is safe before the encoder for the reason the soft-token seam
     // already relies on: shared storage, and the previous commit waited on.
@@ -1031,17 +1031,20 @@ public final class Gemma4MetalEngine {
     public func deserialize(_ data: Data) -> Parked? {
         let b = [UInt8](data)
         var p = 0
-        guard StateBytes.readHeader(b, &p) else { return nil }
-        let pos = StateBytes.getInt(b, &p)
-        var kv: [Int: [(k: [Float], v: [Float])]] = [:]
-        for _ in 0..<StateBytes.getInt(b, &p) {
-            let il = StateBytes.getInt(b, &p)
-            _ = StateBytes.getInt(b, &p)
-            let k = StateBytes.getFloats(b, &p)
-            let v = StateBytes.getFloats(b, &p)
-            kv[il] = [(k: k, v: v)]
+        var parked: Parked? = nil
+        if StateBytes.readHeader(b, &p) {
+            let pos = StateBytes.getInt(b, &p)
+            var kv: [Int: [(k: [Float], v: [Float])]] = [:]
+            for _ in 0..<StateBytes.getInt(b, &p) {
+                let il = StateBytes.getInt(b, &p)
+                _ = StateBytes.getInt(b, &p)
+                let k = StateBytes.getFloats(b, &p)
+                let v = StateBytes.getFloats(b, &p)
+                kv[il] = [(k: k, v: v)]
+            }
+            parked = Parked(pos: pos, kv: kv)
         }
-        return Parked(pos: pos, kv: kv)
+        return parked
     }
 
     // Install a parked conversation: refill the pools position by position
@@ -1049,23 +1052,24 @@ public final class Gemma4MetalEngine {
     public func adopt(_ parked: Parked) {
         reset()
         for (il, blobs) in parked.kv {
-            guard let pool = kv[il], let blob = blobs.first else { continue }
-            let n = blob.k.count / pool.kvDim
-            for i in 0..<n {
-                let tail = pool.tailForAppend()
-                let kd = tail.k.contents()
-                    .assumingMemoryBound(to: Float16.self)
-                    + tail.slot * pool.kvDim
-                let vd = tail.v.contents()
-                    .assumingMemoryBound(to: Float16.self)
-                    + tail.slot * pool.kvDim
-                for c in 0..<pool.kvDim {
-                    kd[c] = Float16(blob.k[i * pool.kvDim + c])
-                    vd[c] = Float16(blob.v[i * pool.kvDim + c])
+            if let pool = kv[il], let blob = blobs.first {
+                let n = blob.k.count / pool.kvDim
+                for i in 0..<n {
+                    let tail = pool.tailForAppend()
+                    let kd = tail.k.contents()
+                        .assumingMemoryBound(to: Float16.self)
+                        + tail.slot * pool.kvDim
+                    let vd = tail.v.contents()
+                        .assumingMemoryBound(to: Float16.self)
+                        + tail.slot * pool.kvDim
+                    for c in 0..<pool.kvDim {
+                        kd[c] = Float16(blob.k[i * pool.kvDim + c])
+                        vd[c] = Float16(blob.v[i * pool.kvDim + c])
+                    }
+                    pool.commitAppend()
                 }
-                pool.commitAppend()
+                pool.refreshTable()
             }
-            pool.refreshTable()
         }
         pos = parked.pos
     }
@@ -1198,7 +1202,7 @@ public final class Gemma4MetalBackend: AgentBackend, @unchecked Sendable {
 
     // A parked conversation restores from BYTES, never from a forward pass.
     // The protocol default returns empty Data, which reads as a warm cache
-    // and is a cold one every time. [[never-reprefill]]
+    // and is a cold one every time.
 
     public func serializeState(_ state: any BackendState) async -> Data {
         var out = Data()
@@ -1208,10 +1212,11 @@ public final class Gemma4MetalBackend: AgentBackend, @unchecked Sendable {
 
     public func deserializeState(_ data: Data) async throws
         -> any BackendState {
-        guard let p = engine.deserialize(data) else {
+        let parked = engine.deserialize(data)
+        if parked == nil {
             throw GGUFErr.parse("parked state is not this build's format")
         }
-        return p
+        return parked!
     }
 
     struct Turn: BackendState {

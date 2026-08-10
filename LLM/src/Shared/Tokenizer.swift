@@ -100,9 +100,11 @@ public struct Tokenizer: Sendable {
     // are the special tokens (their piece string IS their bytes); NORMAL(1) are
     // byte-level-BPE pieces (mapped through the gpt2 byte<->unicode table).
     init(gguf g: GGUF) throws {
-        guard let tokens = g.strings("tokenizer.ggml.tokens") else {
+        let listed = g.strings("tokenizer.ggml.tokens")
+        if listed == nil {
             throw GGUFErr.parse("tokenizer.ggml.tokens missing")
         }
+        let tokens = listed!
         let merges = g.strings("tokenizer.ggml.merges") ?? []
         let types = g.ints("tokenizer.ggml.token_type") ?? []
 

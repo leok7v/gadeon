@@ -2132,29 +2132,30 @@ import UniformTypeIdentifiers
             heard.clear()
             heardSeconds = 0
             Task { @MainActor in
-                guard await Microphone.permission() else {
-                    flashHUD("Microphone access is off")
-                    return
-                }
-                AudioSession.beginRecording()
-                do {
-                    try mic.start { [heard] block in
-                        heard.captured(block.count)
-                        heard.observe(block)
-                        heard.add(gate.push(block))
+                if await Microphone.permission() {
+                    AudioSession.beginRecording()
+                    do {
+                        try mic.start { [heard] block in
+                            heard.captured(block.count)
+                            heard.observe(block)
+                            heard.add(gate.push(block))
+                        }
+                        self.mic = mic
+                        self.gate = gate
+                        listening = true
+                        micPhrases?.cancel()
+                        micPhrases = phraseCycler()
+                        watchForEndOfTurn()
+                        Diag.shared.report(
+                            "[mic] listening at \(Int(rate)) Hz "
+                            + AudioSession.describe())
+                    } catch {
+                        AudioSession.endRecording()
+                        Diag.shared.report("[mic] FAILED to start: \(error)")
+                        flashHUD("\(error)")
                     }
-                    self.mic = mic
-                    self.gate = gate
-                    listening = true
-                    micPhrases?.cancel()
-                    micPhrases = phraseCycler()
-                    watchForEndOfTurn()
-                    Diag.shared.report("[mic] listening at \(Int(rate)) Hz "
-                        + AudioSession.describe())
-                } catch {
-                    AudioSession.endRecording()
-                    Diag.shared.report("[mic] FAILED to start: \(error)")
-                    flashHUD("\(error)")
+                } else {
+                    flashHUD("Microphone access is off")
                 }
             }
         }

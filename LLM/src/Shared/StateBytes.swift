@@ -15,7 +15,7 @@ enum StateBytes {
     // empty-Data default would otherwise deserialize to pos 0 with no KV and
     // SUCCEED -- the session would believe it was primed and run with no
     // system prefix at all. So a state file names itself, and anything that
-    // does not is refused and re-cooked. [[never-reprefill]]
+    // does not is refused and re-cooked.
     static let magic: [UInt8] = Array("GDNS".utf8)
     static let version = 1
 

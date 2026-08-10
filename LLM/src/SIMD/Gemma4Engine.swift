@@ -233,19 +233,22 @@ public final class Gemma4Engine {
     public func deserialize(_ data: Data) -> Bookmark? {
         let b = [UInt8](data)
         var p = 0
-        guard StateBytes.readHeader(b, &p) else { return nil }
-        let pos = StateBytes.getInt(b, &p)
-        var kv: [Int: GemmaKV.Snapshot] = [:]
-        for _ in 0..<StateBytes.getInt(b, &p) {
-            let il = StateBytes.getInt(b, &p)
-            let first = StateBytes.getInt(b, &p)
-            let rows = StateBytes.getInt(b, &p)
-            var k: [[Float]] = [], v: [[Float]] = []
-            for _ in 0..<rows { k.append(StateBytes.getFloats(b, &p)) }
-            for _ in 0..<rows { v.append(StateBytes.getFloats(b, &p)) }
-            kv[il] = GemmaKV.Snapshot(k: k, v: v, first: first)
+        var mark: Bookmark? = nil
+        if StateBytes.readHeader(b, &p) {
+            let pos = StateBytes.getInt(b, &p)
+            var kv: [Int: GemmaKV.Snapshot] = [:]
+            for _ in 0..<StateBytes.getInt(b, &p) {
+                let il = StateBytes.getInt(b, &p)
+                let first = StateBytes.getInt(b, &p)
+                let rows = StateBytes.getInt(b, &p)
+                var k: [[Float]] = [], v: [[Float]] = []
+                for _ in 0..<rows { k.append(StateBytes.getFloats(b, &p)) }
+                for _ in 0..<rows { v.append(StateBytes.getFloats(b, &p)) }
+                kv[il] = GemmaKV.Snapshot(k: k, v: v, first: first)
+            }
+            mark = Bookmark(pos: pos, kv: kv)
         }
-        return Bookmark(pos: pos, kv: kv)
+        return mark
     }
 
     public struct Bookmark: @unchecked Sendable {
@@ -496,7 +499,7 @@ public final class Gemma4Engine {
     // [block.0, block.1) overlap and their union is the contiguous
     // [lo, max(pos + 1, block.1)). The window still bounds it from below, so
     // an image longer than the window is cut exactly as HF's AND cuts it.
-    // An empty block reduces this to the plain causal range. [[vision-block]]
+    // An empty block reduces this to the plain causal range.
     private func attend(_ q: [Float], _ store: GemmaKV, _ il: Int,
                         pos: Int, block: (Int, Int), hd: Int, nH: Int,
                         nKV: Int) -> [Float] {

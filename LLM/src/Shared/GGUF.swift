@@ -35,25 +35,69 @@ struct GGUFTensor {
     var count: Int { dims.reduce(1, *) }
 }
 
-final class GGUF {
+// The descriptor and the pages, owned as an object of their own so that a
+// parse which throws still frees them.
+//
+// A class initializer that throws BEFORE every stored property is set never
+// runs that class's deinit, and the parse below throws in exactly that
+// window: `meta` and `tensors` are still unassigned. What does happen is
+// that the properties already initialized are released, and this deinit is
+// one of them.
+private final class GGUFMapping {
+
+    let base: UnsafeRawPointer
+    let size: Int
     private let fd: Int32
-    let map: UnsafeRawPointer
-    let mapSize: Int
+
+    init(path: String) throws {
+        let opened = open(path, O_RDONLY)
+        var st = stat()
+        var pages: UnsafeMutableRawPointer? = nil
+        var failure = ""
+        if opened < 0 {
+            failure = "open \(path)"
+        } else if fstat(opened, &st) != 0 {
+            failure = "fstat"
+        } else {
+            pages = mmap(nil, Int(st.st_size), PROT_READ, MAP_PRIVATE,
+                         opened, 0)
+            if pages == nil || pages == MAP_FAILED {
+                pages = nil
+                failure = "mmap"
+            }
+        }
+        if let pages {
+            fd = opened
+            size = Int(st.st_size)
+            base = UnsafeRawPointer(pages)
+        } else {
+            if opened >= 0 { close(opened) }
+            throw GGUFErr.io(failure)
+        }
+    }
+
+    deinit {
+        munmap(UnsafeMutableRawPointer(mutating: base), size)
+        close(fd)
+    }
+}
+
+final class GGUF {
+    private let mapping: GGUFMapping
     let meta: [String: GGUFValue]
     let tensors: [String: GGUFTensor]
 
-    init(path: String) throws {
-        fd = open(path, O_RDONLY)
-        guard fd >= 0 else { throw GGUFErr.io("open \(path)") }
-        var st = stat()
-        guard fstat(fd, &st) == 0 else { close(fd); throw GGUFErr.io("fstat") }
-        mapSize = Int(st.st_size)
-        guard let p = mmap(nil, mapSize, PROT_READ, MAP_PRIVATE, fd, 0),
-              p != MAP_FAILED else { close(fd); throw GGUFErr.io("mmap") }
-        map = UnsafeRawPointer(p)
+    var map: UnsafeRawPointer { mapping.base }
+    var mapSize: Int { mapping.size }
 
-        var c = Cursor(base: map, limit: mapSize)
-        guard c.u32() == 0x4655_4747 else { throw GGUFErr.parse("bad magic") } // "GGUF" LE
+    init(path: String) throws {
+        let mapped = try GGUFMapping(path: path)
+        mapping = mapped
+        let map = mapped.base
+
+        var c = Cursor(base: map, limit: mapped.size)
+        // "GGUF" LE
+        if c.u32() != 0x4655_4747 { throw GGUFErr.parse("bad magic") }
         _ = c.u32()                                   // version (3)
         let nTensors = Int(c.u64())
         let nKV = Int(c.u64())
@@ -86,9 +130,11 @@ final class GGUF {
         var tensors: [String: GGUFTensor] = [:]
         tensors.reserveCapacity(nTensors)
         for r in raws {
-            guard let ty = GGUFType(rawValue: r.type) else {
+            let found = GGUFType(rawValue: r.type)
+            if found == nil {
                 throw GGUFErr.parse("unknown ggml type \(r.type) for \(r.name)")
             }
+            let ty = found!
             let n = r.dims.reduce(1, *)
             let bytes = GGUF.rowByteCount(ty, n)
             tensors[r.name] = GGUFTensor(
@@ -96,11 +142,6 @@ final class GGUF {
                 base: map + dataStart + r.off, byteCount: bytes)
         }
         self.tensors = tensors
-    }
-
-    deinit {
-        munmap(UnsafeMutableRawPointer(mutating: map), mapSize)
-        close(fd)
     }
 
     // total byte count for `n` elements of a given ggml type
