@@ -14,7 +14,10 @@ let package = Package(
         .testTarget(
             name: "MDTests",
             dependencies: ["MD"],
-            path: "tests"
+            path: "tests",
+            // Read from source through #filePath, not from a bundle, so
+            // regenerating it rewrites the file the diff shows.
+            exclude: ["katex-golden.txt"]
         ),
     ]
 )

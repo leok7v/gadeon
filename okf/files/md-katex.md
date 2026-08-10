@@ -20,6 +20,6 @@ shows up in no diff. `MD/tests/KaTeXGoldenTests.swift` is the gate.
 Carried in from another project, and it now obeys the house rules rather
 than claiming the exemption it used to. Four divergences from upstream must
 survive a re-import: the font resolves through Bundle.module, the value types
-carry Sendable, the entry point holds a lock across a whole layout, and the
+carry Sendable, layout AND draw hold one lock over the shared font, and the
 file is single-exit throughout.
 See `two-engines-for-one-formula` and `a-layout-engine-can-obey-the-rules`.
