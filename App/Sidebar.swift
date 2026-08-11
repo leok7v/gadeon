@@ -27,6 +27,7 @@ struct Sidebar: View {
     let onOpen: (UUID) -> Void
     let onNewChat: () -> Void
     let onSettings: () -> Void
+    let onRename: (ConversationStore.Convo) -> Void
 
     @State private var armedDelete: UUID?
     @State private var disarmTask: Task<Void, Never>?
@@ -133,12 +134,20 @@ struct Sidebar: View {
         .padding(24)
     }
 
+    // A phone's List row carries far more padding than a Mac's, so the same
+    // two lines of text stand in twice the height and a screenful holds five
+    // conversations. nil keeps the desktop's own defaults, which are right.
+    private var rowInsets: EdgeInsets? {
+        isOS ? EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8) : nil
+    }
+
     private func history(_ items: [ConversationStore.Convo]) -> some View {
         List {
             if ConversationSearch.active(query) {
                 ForEach(items) { convo in
                     historyRow(convo)
                         .listRowBackground(Color.clear)
+                        .listRowInsets(rowInsets)
                         .deleteDisabled(model.busy)
                 }
                 .onDelete { offsets in delete(offsets, in: items) }
@@ -148,6 +157,7 @@ struct Sidebar: View {
                         ForEach(group.items) { convo in
                             historyRow(convo)
                                 .listRowBackground(Color.clear)
+                                .listRowInsets(rowInsets)
                                 .deleteDisabled(model.busy)
                         }
                         .onDelete { offsets in
@@ -159,6 +169,13 @@ struct Sidebar: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
+        .modifier(TightSections())
+    }
+
+    // The conversation on screen, which is the live one once it has been
+    // committed and a reopened one from the moment it is opened.
+    private func isCurrent(_ convo: ConversationStore.Convo) -> Bool {
+        convo.id == model.currentConversationId
     }
 
     private func historyRow(_ convo: ConversationStore.Convo) -> some View {
@@ -193,7 +210,20 @@ struct Sidebar: View {
                 }
             }
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(isCurrent(convo) ? Color.accentColor.opacity(0.15)
+                                     : .clear,
+                    in: RoundedRectangle(cornerRadius: 7))
         .animation(.easeInOut(duration: 0.15), value: armedDelete)
+        // Right-click on macOS, long-press on iOS, from one modifier.
+        // Rename is offered mid-turn where Open and Delete are not: a title
+        // touches neither the engine nor the live transcript.
+        .contextMenu {
+            Button { onRename(convo) } label: {
+                Label("Rename\u{2026}", systemImage: "pencil")
+            }
+        }
     }
 
     private var trashHelp: String {
@@ -268,8 +298,12 @@ struct Sidebar: View {
     private func row(_ convo: ConversationStore.Convo) -> some View {
         let reason = ConversationSearch.active(query)
             ? ConversationSearch.reason(convo, query) : nil
+        let current = isCurrent(convo)
         return VStack(alignment: .leading, spacing: 2) {
-            Text(convo.title).lineLimit(1)
+            Text(convo.title)
+                .lineLimit(1)
+                .fontWeight(current ? .semibold : .regular)
+                .foregroundStyle(current ? Color.accentColor : .primary)
             Text(reason ?? Sidebar.when(convo.updated))
                 .appFont(.caption)
                 .foregroundStyle(.secondary)
@@ -289,7 +323,7 @@ struct Sidebar: View {
     }
 
     private var footer: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 18) {
             Picker("Theme", selection: $theme) {
                 ForEach(AppTheme.allCases) { option in
                     Image(systemName: option.icon).tag(option)

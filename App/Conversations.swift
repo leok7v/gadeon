@@ -45,6 +45,22 @@ extension ChatModel {
         }
     }
 
+    // `updated` is deliberately not bumped: a rename must not reorder the
+    // list under the hand that is using it.
+    //
+    // Setting `generatedTitle` for the live conversation does two jobs. It
+    // is what commitCurrent prefers, and it is also the gate maybeGenerate
+    // Title reads, so a name the user chose is never replaced by one the
+    // model invents a turn later.
+    func renameConversation(_ id: UUID, to title: String) {
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty, var convo = ConversationStore.shared.load(id) {
+            convo.title = name
+            ConversationStore.shared.save(convo)
+            if id == currentConversationId { generatedTitle = name }
+        }
+    }
+
     // Order matters: id/messages must clear before newChat(), or its own
     // exit-commit re-saves the conversation just deleted.
     func deleteConversation(_ id: UUID) {

@@ -82,6 +82,7 @@ struct ContentView: View {
     @State private var optimizingPhrase = Whimsical.current(.optimizing)
     @State private var downloadingPhrase = Whimsical.current(.downloading)
     @State private var sidebarOpen = false
+    @State private var renaming: ConversationStore.Convo?
     @State private var findActive = false
     @State private var findController = MarkdownFindController()
     @State private var findQuery = ""
@@ -136,6 +137,7 @@ struct ContentView: View {
                                      trailing: trailingButtons))
                 .disabled(sidebarOpen)
             drawer
+            renameOverlay
         }
         // Hidden: only the Cmd+N shortcut matters, and it has to survive the
         // top-bar button being disabled while the drawer is open.
@@ -232,12 +234,30 @@ struct ContentView: View {
             Sidebar(model: model, theme: $model.theme,
                     onClose: closeSidebar, onOpen: openConversation,
                     onNewChat: openNewChat,
-                    onSettings: openSettings)
+                    onSettings: openSettings,
+                    onRename: { convo in renaming = convo })
                 .frame(width: 300 * model.textScale)
                 .frame(maxHeight: .infinity)
                 .background(.bar)
                 .transition(.move(edge: .leading))
                 .zIndex(2)
+        }
+    }
+
+    // Above the drawer it was opened from, and over the whole window rather
+    // than the sidebar's column, so the soft keyboard cannot push it out of
+    // view on a phone.
+    @ViewBuilder
+    private var renameOverlay: some View {
+        if let convo = renaming {
+            RenameDialog(title: convo.title,
+                         onCommit: { name in
+                             model.renameConversation(convo.id, to: name)
+                             renaming = nil
+                         },
+                         onCancel: { renaming = nil })
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .zIndex(3)
         }
     }
 
