@@ -1,7 +1,7 @@
 import Foundation
 import Metal
 
-let modernGPU: Bool = {
+let apple7orBetter: Bool = {
     MTLCreateSystemDefaultDevice()?.supportsFamily(.apple7) ?? false
 }()
 
@@ -44,7 +44,7 @@ enum Models {
         let gb = installedGB
         var list: [String] = []
         if isOS {
-            if gb >= 4 && modernGPU && offersSmall(gb) {
+            if gb >= 4 && apple7orBetter && offersSmall(gb) {
                 list.append("Qwen3.5-0.8B")
             }
             if gb >= 6 { list.append("QwenPaw-Flash-2B") }
