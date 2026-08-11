@@ -31,6 +31,25 @@ final class MathAttachmentCell: NSTextAttachmentCell {
         fatalError("MathAttachmentCell is not decodable")
     }
 
+    // The formula as a PDF page, for a copy. Rendered on demand and kept,
+    // so building a document costs nothing and only a copy pays -- and it is
+    // real bytes by the time the pasteboard sees them, never a promise the
+    // app has to still be alive to honour.
+    private var pdfData: Data?
+    private var pdfDark = false
+
+    // Testing hook: drop the cached page so the other theme can be asked
+    // for without building a second document.
+    func forget() { pdfData = nil }
+
+    func pdf(dark: Bool) -> Data? {
+        if pdfData == nil || pdfDark != dark {
+            pdfData = mathPDF(layout, dark: dark)
+            pdfDark = dark
+        }
+        return pdfData
+    }
+
     override func cellSize() -> NSSize { extent }
 
     // The formula sits on the text baseline like a very tall glyph, so its
@@ -39,15 +58,129 @@ final class MathAttachmentCell: NSTextAttachmentCell {
         NSPoint(x: 0, y: -descent)
     }
 
+    // A formula has no line breaks to give: it is one run of glyphs at fixed
+    // geometry, so a surface narrower than its natural width does not reflow
+    // it -- TextKit lays it out at full size and the right end is CLIPPED.
+    // Measured: at a 240pt container a 285pt formula still draws 285pt wide.
+    //
+    // This is the one place the available width is known. TextKit offers it
+    // before layout, so the formula is scaled to fit here and drawn at that
+    // scale. Small and whole beats large and cut in half. A page has the same
+    // problem and PdfExport answers it the same way.
+
+    // Asked more than once per layout, so it answers from the width offered
+    // and remembers nothing between calls.
+    override func cellFrame(for textContainer: NSTextContainer,
+                            proposedLineFragment lineFrag: NSRect,
+                            glyphPosition position: NSPoint,
+                            characterIndex charIndex: Int) -> NSRect {
+        let fitted = DocumentText.mathFit(natural: extent,
+                                          available: lineFrag.width)
+        return NSRect(origin: .zero, size: fitted)
+    }
+
     override func draw(withFrame cellFrame: NSRect, in controlView: NSView?) {
         if let ctx = NSGraphicsContext.current?.cgContext {
-            let origin = CGPoint(x: cellFrame.minX + Self.inset,
-                                 y: cellFrame.minY)
-            layout.draw(in: ctx, at: origin,
+            // The frame is whatever cellFrame(for:...) asked for, so the
+            // scale is read back off it rather than recomputed from a width
+            // this method is never told.
+            let scale = extent.width > 0 ? cellFrame.width / extent.width : 1
+            ctx.saveGState()
+            ctx.translateBy(x: cellFrame.minX, y: cellFrame.minY)
+            ctx.scaleBy(x: scale, y: scale)
+            layout.draw(in: ctx, at: CGPoint(x: Self.inset, y: 0),
                         color: NSColor.textColor.cgColor,
                         flipped: controlView?.isFlipped ?? true)
+            ctx.restoreGState()
         }
     }
+}
+
+// An alpha mask that is opaque in the middle and fades to nothing within
+// `feather` of every edge. Stepped rather than blurred: CoreGraphics has no
+// blur, and a ramp of inset rounded rects is deterministic, costs nothing at
+// this size, and is what makes the patch edgeless on all four sides.
+//
+// A radial gradient cannot do this. Its fade is a circle, so on a box wider
+// than it is tall the top and bottom edges are still fully opaque while only
+// the corners soften -- which is the hard-edged card this replaces.
+private func featherMask(_ size: CGSize, feather: CGFloat) -> CGImage? {
+    let w = Int(size.width.rounded(.up))
+    let h = Int(size.height.rounded(.up))
+    var result: CGImage? = nil
+    if w > 0, h > 0,
+       let ctx = CGContext(data: nil, width: w, height: h,
+                           bitsPerComponent: 8, bytesPerRow: 0,
+                           space: CGColorSpaceCreateDeviceGray(),
+                           bitmapInfo: CGImageAlphaInfo.none.rawValue) {
+        ctx.setFillColor(CGColor(gray: 0, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: size.width, height: size.height))
+        let steps = 24
+        for step in 0...steps {
+            let part = CGFloat(step) / CGFloat(steps)
+            // Smaller AND brighter each step: the rim stays black, the
+            // inside reaches white. Ramping the inset the other way makes
+            // the last fill cover the whole box and nothing fades.
+            let inset = feather * part
+            let rect = CGRect(x: inset, y: inset,
+                              width: size.width - inset * 2,
+                              height: size.height - inset * 2)
+            if rect.width > 0, rect.height > 0 {
+                ctx.setFillColor(CGColor(gray: part, alpha: 1))
+                ctx.fill(rect)
+            }
+        }
+        result = ctx.makeImage()
+    }
+    return result
+}
+
+// A formula as a PDF page, for the pasteboard. Vector rather than a raster so
+// it stays crisp wherever it lands and prints properly.
+//
+// `dark` comes from the VIEW being copied from, never from the process: the
+// system appearance says nothing about a theme forced in Settings, and asking
+// it produced a dark patch for every copy on a dark Mac however the app was
+// set.
+func mathPDF(_ layout: MathLayout, dark: Bool,
+             padding: CGFloat = 14) -> Data? {
+    let data = NSMutableData()
+    var box = CGRect(x: 0, y: 0, width: layout.width + padding * 2,
+                     height: layout.height + padding * 2)
+    var result: Data? = nil
+    // 0.07 rather than a lighter grey: a dark document is nearer black
+    // than the app's own transcript is, and a patch lighter than the page
+    // reads as a card where a slightly darker one disappears.
+    let paper: CGFloat = dark ? 0.07 : 0.98
+    let ink: CGFloat = dark ? 0.95 : 0.05
+    if let consumer = CGDataConsumer(data: data),
+       let ctx = CGContext(consumer: consumer, mediaBox: &box, nil) {
+        ctx.beginPDFPage(nil)
+        // Paper under the ink, fading to nothing at every rim. Pasted into a
+        // document of the SAME theme the patch disappears and the formula
+        // reads as native text; pasted into the opposite one it is a soft
+        // patch that keeps the formula legible instead of black on black.
+        // The fade occupies the PADDING band exactly, so the formula sits
+        // on paper at full opacity and only the margin dissolves. A wider
+        // feather eats into the formula's own margin and greys the glyphs.
+        if let mask = featherMask(box.size, feather: padding) {
+            ctx.saveGState()
+            ctx.clip(to: box, mask: mask)
+            ctx.setFillColor(CGColor(gray: paper, alpha: 1))
+            ctx.fill(box)
+            ctx.restoreGState()
+        }
+        // `at` is the TOP-LEFT of the bounding box and draw subtracts the
+        // ascent, so the top edge is padding + height in this y-up page.
+        // Passing the descent instead put the baseline below the media
+        // box and cut every formula off.
+        layout.draw(in: ctx, at: CGPoint(x: padding, y: padding + layout.height),
+                    color: CGColor(gray: ink, alpha: 1))
+        ctx.endPDFPage()
+        ctx.closePDF()
+        result = data as Data
+    }
+    return result
 }
 
 extension DocumentText {

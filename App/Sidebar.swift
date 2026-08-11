@@ -1,6 +1,5 @@
 import SwiftUI
 
-// App-level appearance, chosen in the sidebar and applied at the root.
 enum AppTheme: String, CaseIterable, Identifiable {
     case system, light, dark
     var id: String { rawValue }
@@ -20,11 +19,6 @@ enum AppTheme: String, CaseIterable, Identifiable {
     }
 }
 
-// The menu sidebar, shown as an overlay drawer sliding in from the leading
-// edge. Search + read-only conversation history (swipe to delete) when there
-// is any, a quiet hint when there is not, and Theme + Settings pinned at the
-// bottom (the thumb zone). Selecting a conversation opens it read-only.
-
 struct Sidebar: View {
 
     let model: ChatModel
@@ -34,18 +28,12 @@ struct Sidebar: View {
     let onNewChat: () -> Void
     let onSettings: () -> Void
 
-    // The conversation whose trash was tapped (macOS): its row shows an inline
-    // red Delete to confirm -- the same two-step feel as the iOS swipe -- and
-    // auto-disarms after a beat. Only one row is armed at a time.
     @State private var armedDelete: UUID?
     @State private var disarmTask: Task<Void, Never>?
     @State private var query = ""
 
     private var hasHistory: Bool { !ConversationStore.shared.list.isEmpty }
 
-    // Ranking is not free, so it happens ONCE per body evaluation and the
-    // result is handed down rather than recomputed by each part that needs
-    // it.
     var body: some View {
         let items = shown
         return VStack(spacing: 0) {
@@ -67,11 +55,6 @@ struct Sidebar: View {
         }
     }
 
-    // The conversations the list is showing: all of them, or the ones the
-    // query answers. Search NARROWS this list rather than opening a view of
-    // its own -- the row a hit produces is the row that was already there,
-    // so finding a conversation and picking one out of the list are the same
-    // gesture rather than two.
     private var shown: [ConversationStore.Convo] {
         let store = ConversationStore.shared
         return ConversationSearch.active(query)
@@ -107,11 +90,6 @@ struct Sidebar: View {
         .padding(.top, 12)
     }
 
-    // The sidebar's compose action: start a fresh conversation and close the
-    // drawer (onNewChat) -- the same one-tap "pick a destination" as opening a
-    // conversation row, so it is not a stray duplicate of the top-bar button
-    // (which is disabled while the drawer is open). Accent-tinted to read as
-    // the primary action; disabled mid-reply like the top-bar New Chat.
     private var newChatRow: some View {
         Button(action: onNewChat) {
             Label("New Chat", systemImage: "square.and.pencil")
@@ -155,10 +133,6 @@ struct Sidebar: View {
         .padding(24)
     }
 
-    // Deleting the open chat starts a fresh one (deleteConversation).
-    // Filtered results are ordered by how WELL they match, so the date
-    // sections would cut across that order and claim a grouping the list no
-    // longer has; a filtered list is flat.
     private func history(_ items: [ConversationStore.Convo]) -> some View {
         List {
             if ConversationSearch.active(query) {
@@ -187,10 +161,6 @@ struct Sidebar: View {
         .scrollContentBackground(.hidden)
     }
 
-    // A tap opens the conversation; the trailing trash removes it. macOS has no
-    // swipe-to-delete, so the trash IS the delete affordance there; iOS keeps
-    // its swipe (onDelete) and needs no button. The trash routes through the
-    // confirm alert unless the user turned confirmation off in Settings.
     private func historyRow(_ convo: ConversationStore.Convo) -> some View {
         HStack(spacing: 6) {
             Button { armedDelete = nil; onOpen(convo.id) } label: { row(convo) }
@@ -226,34 +196,18 @@ struct Sidebar: View {
         .animation(.easeInOut(duration: 0.15), value: armedDelete)
     }
 
-    // A running turn OWNS the engine and writes into the live transcript, and
-    // deleting the conversation it belongs to restarts the session under it.
-    // So the whole list stops offering delete for as long as one runs: the
-    // encode, the prefill and the reply are one turn to the person waiting,
-    // and a trash that works on some rows and not others reads as a fault.
-    //
-    // Disabled rather than hidden, so the row keeps its shape and the tooltip
-    // answers what a dead control otherwise leaves open. iOS has no tooltip
-    // and no room for one, so there the swipe simply refuses to arm
-    // (deleteDisabled) instead of opening onto a button that does nothing.
     private var trashHelp: String {
         model.busy ? "Available once this turn has finished"
                    : "Delete conversation"
     }
 
-    // Opening one is gated for a sharper reason than deleting. The running
-    // turn holds an INDEX into the live transcript and keeps appending to it;
-    // swapping that transcript for a reopened conversation does not stop the
-    // turn, it redirects it, so the tokens land in whatever message now sits
-    // at that index. The reader watches one conversation while another is
-    // written into it.
+    // A running turn holds an index into the live transcript; opening
+    // another conversation would redirect it there instead of stopping it.
     private var rowHelp: String {
         model.busy ? "Available once this turn has finished"
                    : "Open this conversation"
     }
 
-    // macOS: the first trash click arms the row (inline red Delete); confirm
-    // deletes. With confirmation off, the click deletes outright.
     private func requestDelete(_ convo: ConversationStore.Convo) {
         if model.confirmDeleteConversation {
             armedDelete = convo.id
@@ -269,8 +223,6 @@ struct Sidebar: View {
         model.deleteConversation(convo.id)
     }
 
-    // Drop the armed state after a few seconds so a stray red Delete does not
-    // linger in the list.
     private func scheduleDisarm(_ id: UUID) {
         disarmTask?.cancel()
         disarmTask = Task { @MainActor in
@@ -286,6 +238,7 @@ struct Sidebar: View {
     }
 
     // The list is already newest-first, so a stable bucketing keeps order.
+
     private static func groups(_ list: [ConversationStore.Convo]) -> [Group] {
         let cal = Calendar.current
         let now = Date()
@@ -312,10 +265,6 @@ struct Sidebar: View {
         return result
     }
 
-    // The second line answers "why is this row here". Ordinarily that is when
-    // it was last touched; under a filter whose match is NOT in the title it
-    // is the matching text instead, so a hit on the body does not read as an
-    // unexplained row.
     private func row(_ convo: ConversationStore.Convo) -> some View {
         let reason = ConversationSearch.active(query)
             ? ConversationSearch.reason(convo, query) : nil
@@ -330,8 +279,9 @@ struct Sidebar: View {
         .contentShape(Rectangle())
     }
 
-    // Snapshot the ids before deleting: deleting mutates the store's list, so
-    // holding onto the offsets would index a shifting array.
+    // Snapshot the ids before deleting: it mutates the store's list, so
+    // the offsets would otherwise index a shifting array.
+
     private func delete(_ offsets: IndexSet,
                         in items: [ConversationStore.Convo]) {
         let ids = offsets.map { i in items[i].id }
@@ -360,4 +310,5 @@ struct Sidebar: View {
         let f = RelativeDateTimeFormatter()
         return f.localizedString(for: date, relativeTo: Date())
     }
+
 }

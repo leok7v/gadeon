@@ -2,25 +2,14 @@ import PDFKit
 import QuickLook
 import SwiftUI
 
-// An attached document in the transcript: the file it was, and how much text
-// came out of it. Tapping opens the document itself in Quick Look, which is
-// one API on both platforms and shows a PDF the way any other app would.
-//
-// The size is labelled "of text" ON PURPOSE. A PDF is a picture of a page to
-// a reader and a page of Markdown to this model -- it never saw the layout,
-// the figures, or anything the extraction dropped. A page thumbnail beside a
-// bare filename would quietly claim otherwise, so the row says what was
-// actually read, in passing, without a disclaimer.
-
 struct DocChip: View {
+
     let doc: ChatModel.DocRef
     @State private var page: CGImage?
     @State private var previewing: URL?
 
     private var name: String { doc.url.lastPathComponent }
 
-    // A file that is no longer there is named rather than offered: the same
-    // answer a clip gives when its path has gone stale.
     private var present: Bool {
         FileManager.default.fileExists(atPath: doc.url.path)
     }
@@ -62,13 +51,9 @@ struct DocChip: View {
         let kb = Double(doc.bytes) / 1024
         let shown = kb < 1 ? String(format: "%.0f bytes", Double(doc.bytes))
                            : String(format: "%.1f KB", kb)
-        // The cut is named because the model answered from a PREFIX, and
-        // nothing else in the turn would ever say so.
         return shown + " of text" + (doc.short ? ", truncated" : "")
     }
 
-    // A PDF shows its own first page; everything else shows a glyph, since
-    // an office file has no page to render without laying it out first.
     @ViewBuilder
     private var cover: some View {
         if let page {
@@ -90,16 +75,14 @@ struct DocChip: View {
         }
     }
 
-    // Rendered once per row, off the first page only. Drawn into a CGContext
-    // rather than asked for a thumbnail, because PDFKit's thumbnail is an
-    // NSImage here and a UIImage there while a context is the same on both.
-    // A missing or unreadable file simply yields nothing and the glyph
-    // stands in.
+    // Drawn into a CGContext rather than PDFKit's own thumbnail API: that
+    // returns an NSImage on macOS and a UIImage on iOS, a context is the
+    // same on both.
+
     private static func firstPage(_ url: URL) -> CGImage? {
         var out: CGImage? = nil
-        // The document is bound to a local: a page whose PDFDocument has
-        // already been released cannot draw, and PDFKit says so at runtime
-        // rather than at compile time.
+        // PDFDocument is bound to a local: a page whose document has
+        // already been released cannot draw.
         if url.pathExtension.lowercased() == "pdf",
            let file = PDFDocument(url: url), let page = file.page(at: 0) {
             let box = page.bounds(for: .mediaBox)

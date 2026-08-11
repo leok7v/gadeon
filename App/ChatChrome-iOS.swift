@@ -1,8 +1,7 @@
 import SwiftUI
 
-// iOS top bar as a plain HStack inset, NOT a NavigationSplitView, whose
-// compact mode injects a back chevron and a grouped toolbar pill. macOS twin
-// uses the native window toolbar.
+// Not NavigationSplitView: its compact mode injects a back chevron and a
+// grouped toolbar pill.
 
 struct ChatChrome<Leading: View, Center: View, Trailing: View>: ViewModifier {
     let leading: Leading

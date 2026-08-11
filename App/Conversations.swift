@@ -5,21 +5,10 @@ import LLM
 import MD
 import UniformTypeIdentifiers
 
-// Read-only conversation history: project the live transcript to the store's
-// Codable shape and back. Only the DISPLAY transcript is persisted (text +
-// reasoning + tool rounds + tiny JPEG thumbnails) -- never the KV/GDN state, so
-// a saved chat is KB and reopening it is view-only (continuation is a later
-// opt-in). The store itself is ConversationStore.swift.
-
 extension ChatModel {
 
-    // Persist the live conversation when it is worth keeping: a real exchange
-    // (at least one user turn + a reply) carrying more than trivial text. A
-    // read-only view is already saved, so it never re-commits, and the title is
-    // set once (a re-commit only refreshes the transcript + timestamp).
-    // TODO(ctx-gate): gate on lastMetrics.ctx > ~150 tokens once the ctx is
-    // tracked synchronously; the char count is a cheap stand-in that still skips
-    // "Hi"/"Hello".
+    // TODO(ctx-gate): gate on lastMetrics.ctx instead of the char-count
+    // stand-in.
     func commitCurrent() {
         let chars = messages.reduce(0) { sum, m in sum + m.text.count }
         let worth = !readOnly && messages.count >= 2 && chars > 200
@@ -30,8 +19,6 @@ extension ChatModel {
             let now = Date()
             let convo = ConversationStore.Convo(
                 id: id,
-                // The generated title overrides a stored instant one; absent
-                // that, keep whatever was already saved.
                 title: generatedTitle ?? prior?.title ?? conversationTitle(),
                 created: prior?.created ?? now,
                 updated: now,
@@ -41,13 +28,9 @@ extension ChatModel {
         }
     }
 
-    // Open a saved conversation read-only: commit the live one first, then swap
-    // the transcript in without touching the session (New Chat later resets the
-    // engine, so the stale KV is harmless).
-    // A BACKSTOP behind the sidebar's disabled rows, not the visible gate: a
-    // turn in flight holds an index into `messages` and goes on appending to
-    // it, so swapping the transcript here would redirect the reply into the
-    // conversation just opened rather than stopping it.
+    // `!busy` guards a turn in flight: it holds an index into `messages`
+    // and keeps appending, so swapping the transcript here would redirect
+    // the reply into the conversation just opened.
     func openConversation(_ id: UUID) {
         commitCurrent()
         if !busy, let convo = ConversationStore.shared.load(id) {
@@ -62,14 +45,8 @@ extension ChatModel {
         }
     }
 
-    // Delete a saved conversation; if it is the one on screen, start fresh.
-    //
-    // Forget WHICH conversation this was, and its transcript, before starting
-    // that fresh one. New Chat commits the outgoing conversation on its way
-    // out, and with the id still set that writes the one just deleted
-    // straight back -- it survives its own deletion and returns to the
-    // sidebar. Emptying the transcript first is what makes the commit decline
-    // to save anything.
+    // Order matters: id/messages must clear before newChat(), or its own
+    // exit-commit re-saves the conversation just deleted.
     func deleteConversation(_ id: UUID) {
         ConversationStore.shared.delete(id)
         if id == currentConversationId {
@@ -82,8 +59,6 @@ extension ChatModel {
         sweepAttachments()
     }
 
-    // A reopened (read-only) chat is now gone, so drop back to a live one; a
-    // live chat forgets its saved copy (the next commit re-creates it).
     func clearAllConversations() {
         ConversationStore.shared.deleteAll()
         currentConversationId = nil
@@ -91,20 +66,12 @@ extension ChatModel {
         sweepAttachments()
     }
 
-    // A kept document exists only so the conversation citing it can offer it
-    // back, so one that nothing cites is garbage. Deleting a conversation is
-    // when that becomes true, and sweeping the WHOLE directory then -- rather
-    // than only the paths that conversation held -- also collects what no
-    // per-delete hook could reach: a turn rolled back, a quit before the
-    // commit, anything an older build left behind.
+    // A live conversation and pending attachments are cited too, so a
+    // same-session file is not swept before it is saved.
     //
-    // The live transcript and the pending attachments are cited too. A file
-    // kept THIS session is referenced by no saved conversation yet, and
-    // deleting some other chat must not take it.
-    //
-    // Matched on FILENAME, not on path: the name carries a UUID and is unique
-    // by construction, while the container's absolute path is not ours to
-    // count on across an install.
+    // Matched on FILENAME, not path: the name carries a UUID and is
+    // unique by construction; the container's path is not stable across
+    // an install.
     func sweepAttachments() {
         var cited = Set<String>()
         for convo in ConversationStore.shared.list {
@@ -130,9 +97,6 @@ extension ChatModel {
         }
     }
 
-    // The whole conversation assembled into one Markdown document for the
-    // transcript tools (copy / export / share). Built through a MarkdownStream
-    // so no internal parse entrypoint is needed from the app target.
     var transcriptDocument: Markdown.Document {
         let stream = MarkdownStream()
         for m in messages {
@@ -142,18 +106,8 @@ extension ChatModel {
         return stream.finish()
     }
 
-    // A short title for an export filename: the conversation's own title.
     var transcriptTitle: String { conversationTitle() }
 
-    // The model-generated title once made; else the first turn that carries
-    // WORDS, trimmed to a short line; else a timestamp.
-    //
-    // A dictated turn shows "Spoken, 1.9s" -- a stand-in for speech that
-    // cannot be shown -- and an attachment-only turn shows nothing at all.
-    // Naming a conversation after either says what the user DID rather than
-    // what it was about, and every voice conversation ends up with the same
-    // name. The reply is the better fallback there: it is about the subject
-    // even when the question was spoken.
     func conversationTitle() -> String {
         var title = generatedTitle ?? ""
         if title.isEmpty {
@@ -184,18 +138,11 @@ extension ChatModel {
 
     // ---- Message <-> stored projection --------------------------------
 
-    // A clip that lives INSIDE the app bundle is stored by name under a
-    // marker, never by path. The bundle moves on every install and update, so
-    // an absolute path into it is stale by the next build -- the video sample
-    // would degrade to its own filename on a transcript from yesterday, which
-    // is exactly the case the fallback exists to cover rather than to cause.
-    //
-    // Detected by prefix rather than by naming the sample, so any bundled
-    // resource a later turn attaches travels the same way.
+    // Stored by NAME under this marker, never by path: the bundle's path
+    // changes on every install/update.
     private static let bundleMark = "bundle:"
-    // A kept attachment is stored by NAME under its own marker for the same
-    // reason: the Data container's absolute path is not ours to count on
-    // across an install, and the name already carries a UUID.
+    // Stored by NAME under this marker too: the Data container's path is
+    // not stable across an install either.
     private static let storeMark = "store:"
 
     private static var storeRoot: String {
@@ -212,10 +159,8 @@ extension ChatModel {
         return out
     }
 
-    // What identifies ONE kept document under the store: the directory it
-    // sits in. A document kept before those directories existed is a bare
-    // file there instead, and answers with its own name, so both forms sweep
-    // by the same rule.
+    // The top-level name under `storeRoot` identifies one kept document,
+    // whether it is a directory or (an older) bare file.
     private static func topName(_ url: URL) -> String? {
         var out: String? = nil
         if url.path.hasPrefix(storeRoot) {
@@ -225,10 +170,8 @@ extension ChatModel {
         return out
     }
 
-    // A bundled name that no longer resolves (the resource was dropped from a
-    // later build) becomes a bare relative URL: it cannot exist, so the view
-    // names it instead of playing it -- which is the honest answer, and
-    // better than the row vanishing from a saved transcript.
+    // A bundled resource no longer present resolves to a URL that cannot
+    // exist; the view names it rather than failing to play it.
     private static func restoredURL(_ stored: String) -> URL {
         var out = URL(fileURLWithPath: stored)
         if stored.hasPrefix(bundleMark) {
@@ -261,9 +204,9 @@ extension ChatModel {
             })
     }
 
-    // Rebuild a display Message from its stored projection. The Markdown docs
-    // are sealed from the text so a reopened turn renders exactly like a live
-    // one; tool-round ids are re-indexed (the display never needs the originals).
+    // Docs are sealed from the raw text so a reopened turn renders like a
+    // live one; tool-round ids are re-indexed since the display never
+    // needs the originals.
     private static func restored(_ s: ConversationStore.Msg) -> Message {
         var m = Message(fromUser: s.fromUser, text: s.text)
         m.reasoning = s.reasoning

@@ -114,6 +114,31 @@ final class MathTypesetTests: XCTestCase {
         }
     }
 
+    // A command that expands to NOTHING is matched whatever its case: a
+    // small model writes \RIGHT for \right often enough, and TeX's own
+    // case sensitivity would leave the word RIGHT shouted into the middle
+    // of the formula. Only reached once the parser has refused the input.
+    func testAMiscasedNoOpCommandStillVanishes() {
+        for source in [#"\left(\sum_i a_i\right)"#,
+                       #"\LEFT(\sum_i a_i\RIGHT)"#,
+                       #"\Left(\sum_i a_i\Right)"#] {
+            let out = String(TeX.render(source, display: true).characters)
+            XCTAssertFalse(out.lowercased().contains("right"), out)
+            XCTAssertFalse(out.lowercased().contains("left"), out)
+            XCTAssertTrue(out.contains("\u{2211}"), out)
+        }
+    }
+
+    // Case folding is ONLY for the no-ops. A command that expands to
+    // something keeps TeX's case sensitivity, so a mis-cased one degrades to
+    // its bare word rather than quietly becoming a symbol nobody wrote.
+    func testAMiscasedRealCommandIsNotFolded() {
+        let out = String(TeX.render(#"\ALPHA + \beta"#, display: true)
+                            .characters)
+        XCTAssertTrue(out.contains("ALPHA"), out)
+        XCTAssertTrue(out.contains("\u{03B2}"), out)
+    }
+
     func testScriptTagsBecomeRunsAndUnicode() {
         let doc = Markdown.parse("m<sup>2</sup> and H<sub>2</sub>O")
         guard case .paragraph(let attr) = doc.items[0].block else {

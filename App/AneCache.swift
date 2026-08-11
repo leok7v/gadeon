@@ -3,38 +3,18 @@ import Foundation
 import LLM
 import os
 
-// Keeper of the ANE compile cache (Library/Caches/<bundle-id>/
-// com.apple.e5rt.e5bundlecache). The system never garbage-collects inside an
-// OS-build namespace, so superseded model revisions and interrupted compiles
-// accumulate gigabytes of dead compiled programs. The cache's keys are
-// opaque -- model.milhash is not a hash of any file we hold, and warm hits
-// leave no filesystem trace -- so ownership is tracked by OBSERVATION: diff
-// the entry list around each set's build and persist the claim per set and
-// OS build. GC deletes only unclaimed, aged entries, and only once every
-// installed (non-GGUF) set holds a non-empty claim, so it can never delete
-// state it has not accounted for. The launch survey log doubles as the
-// instrumentation for the per-install cold-compile investigation: it prints
-// the cache root (exposing the data-container UUID) and the entry delta
-// since the previous launch.
 final class AneCache: @unchecked Sendable {
 
     static let shared = AneCache()
 
-    // Purge-survival strategy, selected by ANE_CACHE_MODE (set it in the Xcode
-    // scheme to A/B without a rebuild). The daemon writes the bundle APFS-
-    // PURGEABLE, so another Neural Engine client's memory pressure reclaims it
-    // and the next launch recompiles (the 4GB-phone "Optimizing after Maps"
-    // report). A warm reload is trusted ONLY when the on-disk bundle is the
-    // exact inode+blocks the daemon wrote: a copy, a clonefile, and even an
-    // in-place content rewrite each recompile (measured). A HARDLINK is the
-    // one operation that preserves both inode number and blocks -- and it
-    // warm-loads even after the cache dir entry is removed and relinked.
+    // The daemon writes the cache bundle APFS-PURGEABLE, so another Neural
+    // Engine client's memory pressure can reclaim it. A warm reload is trusted
+    // ONLY when the on-disk bundle is the exact inode+blocks the daemon wrote,
+    // and a hardlink is the one operation preserving both (a copy, a clonefile
+    // and an in-place content rewrite each recompile).
     //  .hardlink  (DEFAULT) shadow every fresh entry with a hardlink in
     //             non-purgeable app data on compile; relink from the shadow
     //             before the first load when a purge unlinked the cache entry.
-    //             Defeats an UNLINK-style reclaim (the inode survives via the
-    //             shadow); a data-block purge shares the shadow's blocks and
-    //             degrades to a normal recompile, no worse than off.
     //  .off       no shadow (set ANE_CACHE_MODE=disable to opt out).
     enum CacheMode: String { case off, hardlink }
     static let cacheMode: CacheMode = {
@@ -48,19 +28,12 @@ final class AneCache: @unchecked Sendable {
     private let log = Logger(subsystem: "io.github.leok7v.gadeon",
                              category: "anecache")
 
-    // The key cache events, made impossible to miss: os_log at notice with the
-    // whole line public (no <private> redaction), AND a stderr write so it
-    // lands in Xcode's debug console regardless of Console.app level filters.
-    // stderr write is the iOS-safe contentsOf form (the Data: form raises an
-    // uncatchable ObjC exception on iOS).
     private func report(_ s: String, file: String = #fileID, line: Int = #line) {
         Diag.shared.report(s, file: file, line: line)
     }
 
     private let lock = NSLock()
     private var launched = false
-    // Entry list captured when a download begins, so programs the primer
-    // compiles WHILE the set still streams land inside the ownership diff.
     private var preDownload: Set<String>?
     private var migrated: Bool?
 
@@ -72,9 +45,10 @@ final class AneCache: @unchecked Sendable {
         var first: [String: Double] = [:]
     }
 
-    // Entry list before the set's compiles start; the once-per-launch survey
-    // (restore experiment + GC + log) runs first. Call on the build task
+    // A warm hit leaves no filesystem trace, so ownership is tracked by
+    // diffing the entry list around each set's build. Call on the build task
     // BEFORE the engine's first MLModel touch.
+
     func buildBegan() -> Set<String> {
         lock.lock()
         let first = !launched
@@ -86,13 +60,10 @@ final class AneCache: @unchecked Sendable {
         return early ?? entries()
     }
 
-    // Whether the data container moved since the previous launch -- true
-    // after every Xcode install and every App Store update. The e5 cache
-    // keys bind to a per-container identity nothing app-side can pin
-    // (model paths, the cache location, and the executable path were all
-    // stabilized and installs STILL compiled cold), so a migration means
-    // the coming build recompiles: the app shows the honest Optimizing
-    // screen instead of a stuck-looking "Loading".
+    // The e5 cache keys bind to a per-container identity nothing app-side can
+    // pin, so a migration -- every Xcode install, every App Store update --
+    // means the coming build recompiles.
+
     func containerMigrated() -> Bool {
         lock.lock()
         if migrated == nil {
@@ -107,8 +78,9 @@ final class AneCache: @unchecked Sendable {
         return out
     }
 
-    // A download is starting: capture the entry list now, before the primer
-    // compiles any of the streaming set's programs.
+    // The primer compiles the set's programs while it still streams, so the
+    // ownership baseline has to be captured here rather than at buildBegan.
+
     func downloadBegan() {
         lock.lock()
         let first = !launched
@@ -121,8 +93,9 @@ final class AneCache: @unchecked Sendable {
         lock.unlock()
     }
 
-    // The set finished its full build: everything that appeared since
-    // `before` is this set's claim; members that vanished are dropped.
+    // Everything that appeared since `before` is this set's claim; members
+    // that vanished are dropped.
+
     func buildEnded(setDir: URL, before: Set<String>) {
         let key = setKey(setDir)
         let after = entries()
@@ -130,19 +103,12 @@ final class AneCache: @unchecked Sendable {
         if let build = osBuild() {
             lock.lock()
             var claims = loadClaims(build)
-            // A completed build owns every live entry no OTHER set claims.
-            // The diff alone cannot say that: `fresh` is empty on a warm
-            // launch, so anything compiled by a run that DIED before
-            // buildEnded -- a jetsam, a load failure that retried, a kill
-            // during the minutes-long prefill trunk -- stays unclaimed
-            // forever, and GC deletes it one minAge later. Measured on the
-            // 12 mini: 4 claimed of 42 live across three warm launches, with
-            // the other 38 waiting on the hour to expire. Adoption is
-            // self-correcting where the diff is not: the worst case is one
-            // set adopting a neighbour's orphan and that neighbour paying a
-            // single recompile if it is uninstalled, against a GUARANTEED
-            // recompile of the whole trunk otherwise. `old` and `fresh` stay
-            // in: they hold a claim on an entry a sibling set shares.
+            // A completed build also owns every live entry no OTHER set
+            // claims: `fresh` is empty on a warm launch, so anything compiled
+            // by a run that DIED before buildEnded would stay unclaimed
+            // forever and GC would delete it one minAge later. `old` and
+            // `fresh` stay in the union: they hold a claim on an entry a
+            // sibling set shares.
             let old = Set(claims.sets[key] ?? [])
             let others = Set(claims.sets.filter { $0.key != key }
                 .values.flatMap { names in names })
@@ -157,11 +123,8 @@ final class AneCache: @unchecked Sendable {
         }
     }
 
-    // ---- once-per-launch survey: restore experiment, GC, instrumentation --
-
     private func launchSurvey() {
         let root = cacheRoot()
-        // Verifiable at a glance each launch (see report()).
         report("mode=\(AneCache.cacheMode.rawValue) root \(root.path)")
         report("state dir \(stateDir().path)")
         if AneCache.cacheMode == .hardlink {
@@ -169,33 +132,23 @@ final class AneCache: @unchecked Sendable {
         }
         if let build = osBuild() {
             let dir = root.appendingPathComponent(build)
-            // iOS regenerates the Data container on every install and carries
-            // the old cache forward, but its entries are keyed to the old
-            // absolute path -- the daemon re-keys and recompiles regardless.
-            // Left alone they pile up (measured 42 -> 153 entries / 1.5 GB, and
-            // the daemon's per-compile scan slowed to 24s). On a migration the
-            // whole cache AND its shadow are provably dead, so drop them before
-            // compiling; the compile is cold either way. macOS containers never
+            // iOS carries the old cache forward across an install, but its
+            // entries are keyed to the old absolute path and the daemon
+            // re-keys and recompiles regardless, so on a migration the cache
+            // and its shadow are provably dead. macOS containers never
             // migrate and are never wiped here.
             if isOS && containerMigrated() {
                 let mb = directoryBytes(dir) >> 20
                 try? FileManager.default.removeItem(at: dir)
                 try? FileManager.default.removeItem(at: shadowDir(build))
-                // The claim names the dead cache's entries, and iOS carries
-                // Application Support across the install while the cache
-                // re-keys -- so it survives as a list of names that can never
-                // exist again. Left behind it does active harm: it is
-                // non-empty, so the gate reads as satisfied and arms GC over
-                // a cache being rebuilt from scratch, and purgeSet targets
-                // its phantom names instead of falling back to a full drop
-                // (observed: "dropped 16 entries" that deleted nothing).
+                // Application Support survives the install while the cache
+                // re-keys, so the claim would survive as names that can never
+                // exist again: non-empty, it opens the GC gate over a cache
+                // being rebuilt and points purgeSet at phantom entries.
                 try? FileManager.default.removeItem(at: claimsURL(build))
                 report("migration: dropped \(mb) MB dead cache + shadow "
                     + "(re-keyed to a new container path)")
             }
-            // The relink is NOT here: on a fresh install the cache dir does not
-            // exist yet, so restoreFromShadow runs later -- after a priming
-            // compile has made the daemon create+own it.
             let names = entries(dir)
             let fresh = updateSeen(names, build)
             let mb = directoryBytes(dir) >> 20
@@ -203,8 +156,6 @@ final class AneCache: @unchecked Sendable {
                 survey \(build): \(names.count) entries \(mb) MB, \
                 \(fresh) new since last launch
                 """)
-            // Shadow state independent of a build, so a purge shows as live
-            // shrinking while the shadow still holds the blocks (or not).
             if AneCache.cacheMode == .hardlink {
                 let sdir = shadowDir(build)
                 let sn = entries(sdir).count
@@ -215,23 +166,15 @@ final class AneCache: @unchecked Sendable {
             collect(dir, build, names)
             if AneCache.cacheMode == .hardlink { pruneStaleShadows(build) }
         } else {
-            // Idle keeper means no claims, no GC and no shadow: every launch
-            // recompiles from scratch, so this must be visible on a device.
             report("OS build not parsed; cache keeper IDLE")
         }
     }
 
-    // Drop claims whose set is no longer on disk. HubFetch.prune() removes the
-    // superseded {oldsha} tree when a catalog revision moves, but its claim
-    // outlives it, and GC unions EVERY claim -- installed or not -- so those
-    // entries become permanently unreclaimable. Measured on the Mac after the
-    // 4B was repointed at the MTP repo: a 20-entry claim for the dead revision
-    // pinning 913 MB that nothing could ever free. This is the counterpart to
-    // adopting live entries in buildEnded: adoption stops GC deleting what a
-    // set still uses, and this stops claims outliving the set that made them.
-    // Guarded on a NON-EMPTY store, so a store that is momentarily unreadable
-    // prunes nothing rather than unclaiming the whole cache and feeding it to
-    // GC.
+    // GC unions EVERY claim, installed or not, so a claim outliving its set
+    // pins its entries permanently. Guarded on a NON-EMPTY store: a store that
+    // is momentarily unreadable must prune nothing rather than unclaim the
+    // whole cache.
+
     private func pruneDeadClaims(_ build: String) {
         let fm = FileManager.default
         let store = Bundle.modelStore()
@@ -257,9 +200,9 @@ final class AneCache: @unchecked Sendable {
         }
     }
 
-    // Drop shadow-<build> dirs for every OS build but the current one: the
-    // cache re-keys wholesale on an OS update, so an old build's shadow can
-    // only pin dead blocks. Mirrors the cache's own stale-OS-build self-prune.
+    // The cache re-keys wholesale on an OS update, so a previous build's
+    // shadow can only pin dead blocks.
+
     private func pruneStaleShadows(_ current: String) {
         let fm = FileManager.default
         let kids = (try? fm.contentsOfDirectory(
@@ -270,18 +213,11 @@ final class AneCache: @unchecked Sendable {
         }
     }
 
-    // Delete entries that are unclaimed by every installed set, previously
-    // seen (not born this hour), and old enough that no compile can still be
-    // writing them -- and only when the claim gate is open.
     private func collect(_ dir: URL, _ build: String, _ names: Set<String>) {
         lock.lock()
         let claims = loadClaims(build)
         let seen = loadSeen(build)
         lock.unlock()
-        // The orphan count rides on BOTH paths: entries this set compiled but
-        // no longer claims are what GC deletes, so a claim that stops covering
-        // the cache shows up here as a rising number before the next launch
-        // pays to recompile them.
         let orphans = names.subtracting(
             Set(claims.sets.values.flatMap { names in names })).count
         if let hold = gateClosed(claims) {
@@ -301,9 +237,8 @@ final class AneCache: @unchecked Sendable {
                    now - mtime > AneCache.minAge {
                     bytes += directoryBytes(url)
                     try? fm.removeItem(at: url)
-                    // Drop the entry's hardlink shadow with it, so the shadow
-                    // never outlives the cache entry and holds its blocks after
-                    // the last real copy is gone.
+                    // The shadow must not outlive its entry: it would hold the
+                    // blocks after the last real copy is gone.
                     try? fm.removeItem(
                         at: shadowDir(build).appendingPathComponent(name))
                     deleted += 1
@@ -314,10 +249,10 @@ final class AneCache: @unchecked Sendable {
         }
     }
 
-    // The gate: every installed, complete, non-GGUF catalog set must hold a
-    // non-empty claim (a warm build diffs to nothing and proves no
-    // ownership, so its set keeps the gate closed until it compiles cold
-    // once). Returns the reason the gate is closed, or nil when open.
+    // Every installed, complete, non-GGUF set must hold a non-empty claim
+    // before GC may run: a warm build diffs to nothing and proves no
+    // ownership, so its set holds the gate closed until it compiles cold once.
+
     private func gateClosed(_ claims: Claims) -> String? {
         var result: String? = nil
         let store = Bundle.modelStore()
@@ -332,39 +267,28 @@ final class AneCache: @unchecked Sendable {
         return result
     }
 
-    // ---- hardlink shadow: survive an unlink-style purge ------------------
+    // Hardlink every live entry not yet shadowed, AFTER the build finishes, so
+    // a cache compiled before the mode was on is seeded in the same pass as
+    // this build's fresh entries.
 
-    // Shadow the COMPLETE cache AFTER the build finishes: hardlink every live
-    // entry file not yet in the shadow. Running it here (not before the load)
-    // both seeds a model compiled before the mode was on and captures this
-    // build's fresh entries, in one place, against a finished cache. `mirror`
-    // links only the missing files, so a warm rebuild that added nothing is a
-    // no-op.
     private func shadowLive(_ build: String) {
         let live = cacheRoot().appendingPathComponent(build)
         let shadow = shadowDir(build)
         let t0 = Date()
-        // refresh: a recompile writes a NEW inode at an existing path (a purge
-        // that emptied the shadow, an OS re-pin), and a link-if-missing mirror
-        // would keep the stale inode forever -- so re-link where the inodes
-        // differ, healing the shadow to the daemon's current file.
+        // refresh: a recompile writes a NEW inode at an existing path, and a
+        // link-if-missing mirror would keep the stale one forever.
         let linked = mirror(from: live, to: shadow, refresh: true,
                             label: "shadow")
         excludeFromBackup(shadow)
         let ms = Int(Date().timeIntervalSince(t0) * 1000)
         let shadowMB = directoryBytes(shadow) >> 20
         let liveMB = directoryBytes(live) >> 20
-        // shadow == live proves the hardlinks carry the compiled blocks; shadow
-        // << live means the cross-container link is landing empty.
         report("shadow saved: +\(linked) file(s) in \(ms) ms "
             + "(shadow \(shadowMB) MB vs live \(liveMB) MB) "
             + "from \(live.path) to \(shadow.path)")
         sampleShadowLink(live: live, shadow: shadow)
     }
 
-    // Log one shadow file against its live counterpart -- inode + size on both
-    // sides. A real hardlink shares the inode AND the size; a mismatched inode
-    // or a 0-byte sample means the cross-container link is not sharing blocks.
     private func sampleShadowLink(live: URL, shadow: URL) {
         let fm = FileManager.default
         var sample: URL? = nil
@@ -389,10 +313,9 @@ final class AneCache: @unchecked Sendable {
         (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
     }
 
-    // Drop a set's cache entries AND their shadows so the next build recompiles
-    // clean -- the recovery for a load that failed on a corrupt or stale
-    // relinked bundle. Uses the set's claim to target only its entries; an
-    // unclaimed set (never seeded) falls back to the whole OS-build dir.
+    // The set's claim targets only its entries; an unclaimed set (never
+    // seeded) has nothing to target and falls back to the whole OS-build dir.
+
     func purgeSet(_ setDir: URL) {
         if let build = osBuild() {
             let key = setKey(setDir)
@@ -418,28 +341,21 @@ final class AneCache: @unchecked Sendable {
         }
     }
 
-    // Relink the shadow's preserved entries into the cache dir. Called from the
-    // build task AFTER a priming compile has made the daemon create+own the dir
-    // (a fresh install has nothing to restore into until then), and BEFORE the
-    // full model load, so the daemon warm-hits the restored inodes on lookup.
+    // Call from the build task AFTER a priming compile has made the daemon
+    // create the cache dir (a fresh install has nothing to restore into until
+    // then), and BEFORE the full model load.
+
     func restoreFromShadow() {
         if AneCache.cacheMode == .hardlink, let build = osBuild() {
             relinkIfCold(cacheRoot().appendingPathComponent(build), build)
         }
     }
 
-    // Restore any cache file the daemon has not (re)written by relinking the
-    // surviving inode from the shadow. A warm launch finds the files present
-    // and relinks nothing; a shadow file emptied by a data-block purge relinks
-    // empty and the daemon recompiles it, exactly as with no shadow.
     private func relinkIfCold(_ live: URL, _ build: String) {
         let shadow = shadowDir(build)
         if FileManager.default.fileExists(atPath: shadow.path) {
             let shadowMB = directoryBytes(shadow) >> 20
             let restored = mirror(from: shadow, to: live, label: "relink")
-            // Always report: shadow size tells whether it held real blocks to
-            // restore (0 MB = the hardlinks never carried content), and the
-            // restore count whether they landed in the fresh cache.
             report("relink: shadow \(shadowMB) MB, restored \(restored) "
                 + "file(s) from \(shadow.path) to \(live.path)")
         }
@@ -447,19 +363,18 @@ final class AneCache: @unchecked Sendable {
 
     // Hardlink every regular file under `from` whose counterpart under `to` is
     // MISSING (or, with refresh, points at a DIFFERENT inode), creating parent
-    // dirs; returns the count linked. link(2) shares the inode, so this never
-    // copies bytes and is idempotent (matching counterparts are skipped).
-    // refresh=false (restore direction) never clobbers a present live file with
-    // a stale shadow; refresh=true (shadow direction) heals a drifted inode.
+    // dirs; returns the count linked. refresh=false (restore direction) never
+    // clobbers a present live file with a stale shadow; refresh=true (shadow
+    // direction) heals a drifted inode.
+
     private func mirror(from: URL, to: URL, refresh: Bool = false,
                         label: String = "") -> Int {
         let fm = FileManager.default
         var count = 0
         // The enumerator yields symlink-STANDARDIZED child URLs (iOS resolves
-        // /var -> /private/var), while `from` may be the raw /var form from
-        // cacheRoot(); slicing the raw-length prefix off a standardized child
-        // mangles every relative path and scatters the links to a sibling of
-        // `to`. Slice both in the same standardized form so the prefix matches.
+        // /var -> /private/var) while `from` may be the raw form: slice both
+        // in the same standardized form, or every relative path mangles and
+        // the links scatter to a sibling of `to`.
         let base = from.standardizedFileURL.path
         let walk = fm.enumerator(at: from,
             includingPropertiesForKeys: [.isRegularFileKey])
@@ -470,11 +385,10 @@ final class AneCache: @unchecked Sendable {
             let dst = URL(fileURLWithPath: to.path + rel)
             let present = fm.fileExists(atPath: dst.path)
             let stale = refresh && present && inode(src) != inode(dst)
-            // Restore recovery: an in-place purge can leave the live file
-            // PRESENT but emptied (smaller than the shadow's full copy) rather
-            // than unlinking it; replace it from the shadow. A content-bearing
-            // live file is never clobbered (the daemon's is authoritative), and
-            // a shared inode reads equal sizes, so it fires only on real drift.
+            // An in-place purge can leave the live file PRESENT but emptied
+            // rather than unlinking it. A shared inode reads equal sizes, so
+            // this fires only on real drift and never clobbers a
+            // content-bearing live file, which is authoritative.
             let truncated = !refresh && present
                 && fileBytes(dst) < fileBytes(src)
             if regular, !present || stale || truncated {
@@ -485,10 +399,6 @@ final class AneCache: @unchecked Sendable {
                                         withIntermediateDirectories: true)
                 if link(src.path, dst.path) == 0 {
                     count += 1
-                    // Per-file forensics: WHY it relinked (missing/truncated/
-                    // stale), and a real hardlink makes dst share src's inode
-                    // AND size; a shared==false or 0-byte dst means the link
-                    // did not carry the compiled blocks.
                     if !label.isEmpty {
                         let si = inode(src), di = inode(dst)
                         report("\(label) \(why) \(rel): src inode \(si) "
@@ -501,16 +411,15 @@ final class AneCache: @unchecked Sendable {
         return count
     }
 
-    // The file's inode number (0 if unreadable), for the refresh comparison.
+    // 0 when unreadable.
+
     private func inode(_ url: URL) -> UInt64 {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         return (attrs?[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
     }
 
-    // ---- paths + state ---------------------------------------------------
+    // iOS and the sandboxed macOS app use the bundle-id-nested cache dir.
 
-    // Prefer the bundle-id-nested cache dir (what iOS and the sandboxed
-    // macOS app actually use); the bare sibling only when it alone exists.
     private func cacheRoot() -> URL {
         let fm = FileManager.default
         let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -524,6 +433,7 @@ final class AneCache: @unchecked Sendable {
     }
 
     // "23F84" from "Version 26.x (Build 23F84)"; nil disables the keeper.
+
     private func osBuild() -> String? {
         let s = ProcessInfo.processInfo.operatingSystemVersionString
         var result: String? = nil
@@ -543,13 +453,9 @@ final class AneCache: @unchecked Sendable {
         return base
     }
 
-    // The shadow lives in the Data container's Application Support, same volume
-    // as the e5 cache it hardlinks (so link(2) never crosses volumes) and not
-    // purged like Caches. Its whole job is surviving an IN-PLACE cache purge
-    // (same install, same path), so it need not outlive the container -- and
-    // the Data container is preserved across upgrade installs anyway. Was the
-    // app-group container, dropped: iOS 16/26 spuriously regenerates it, and
-    // nothing here needs a group container.
+    // Same volume as the e5 cache it hardlinks, so link(2) never crosses
+    // volumes, and not purged like Caches.
+
     private func shadowRoot() -> URL {
         stateDir().appendingPathComponent("anecache-shadow", isDirectory: true)
     }
@@ -559,8 +465,8 @@ final class AneCache: @unchecked Sendable {
                                             isDirectory: true)
     }
 
-    // Set identity for claims: <model dir>/<revision leaf> -- unique across
-    // catalog sets and stable across launches.
+    // Claim key: <model dir>/<revision leaf> -- stable across launches.
+
     private func setKey(_ setDir: URL) -> String {
         setDir.deletingLastPathComponent().lastPathComponent
             + "/" + setDir.lastPathComponent
@@ -577,9 +483,8 @@ final class AneCache: @unchecked Sendable {
             .contentsOfDirectory(atPath: dir.path)) ?? [])
     }
 
-    // Record first-seen stamps; returns how many entries are new since the
-    // previous launch. Vanished entries drop out so the file cannot grow
-    // without bound.
+    // Vanished entries drop out, so the file cannot grow without bound.
+
     private func updateSeen(_ names: Set<String>, _ build: String) -> Int {
         lock.lock()
         var seen = loadSeen(build)
@@ -598,9 +503,6 @@ final class AneCache: @unchecked Sendable {
         seen.first = next
         saveSeen(seen, build)
         lock.unlock()
-        // Entries present last launch but gone now = evicted (an in-place
-        // purge, the case the shadow defends). Name them: the relink lines that
-        // follow should restore exactly these.
         let vanished = prior.subtracting(names).sorted()
         if !vanished.isEmpty {
             report("survey: \(vanished.count) entries VANISHED since last "

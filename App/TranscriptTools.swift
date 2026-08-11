@@ -3,9 +3,10 @@ import MD
 import SwiftUI
 import UniformTypeIdentifiers
 
-// A prepared export's bytes for SwiftUI's .fileExporter (the macOS Save
-// panel). Write-only: the transcript is never read back from a file.
+// Write-only: the transcript is never read back from a file.
+
 private struct ExportFile: FileDocument {
+
     static let readableContentTypes: [UTType] = []
     static let writableContentTypes: [UTType] = [.pdf, .html]
     let data: Data
@@ -16,13 +17,8 @@ private struct ExportFile: FileDocument {
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: data)
     }
-}
 
-// The transcript actions as a row of title-bar glyph buttons, revealed by the
-// trailing chevron: Plain Text toggle, Find, Copy, Share, (macOS) Download,
-// and For Nerds. Share and Download are the only dropdowns (PDF|HTML), so no
-// per-format chevrons. A row of glyphs reads better in the bar than a single
-// nested menu.
+}
 
 struct TranscriptActions: View {
 
@@ -30,18 +26,12 @@ struct TranscriptActions: View {
     let title: String
     @Binding var renderMarkdown: Bool
     let onFind: () -> Void
-    // nil hides the trace button entirely. It rides with the status line:
-    // both are the diagnostic surface, and offering the numbers is the same
-    // decision as offering what produced them.
     let onDebug: (() -> Void)?
     @State private var pdfURL: URL?
     @State private var htmlURL: URL?
-    // The Save panel (macOS): the picked format's bytes + type + suggested
-    // name, armed by the Download menu.
     @State private var exportFile: ExportFile?
     @State private var exportType: UTType = .pdf
     @State private var showExporter = false
-    // Brief checkmark after a copy, matching the in-block copy buttons.
     @State private var copied = false
     @State private var copiedReset: Task<Void, Never>?
 
@@ -68,9 +58,6 @@ struct TranscriptActions: View {
             }
             .menuIndicator(.hidden)
             .help("Share as PDF or HTML")
-            // Download = save the file to a chosen location, distinct from the
-            // system share sheet. macOS only: on iOS the Share sheet already
-            // offers Save to Files, so a second control would be redundant.
             if !isOS {
                 Menu {
                     saveRow("Save as PDF", pdfURL, .pdf)
@@ -81,10 +68,6 @@ struct TranscriptActions: View {
                 .menuIndicator(.hidden)
                 .help("Save as PDF or HTML")
             }
-            // Last, and deliberately behind the chevron: the trace is a
-            // developer surface, and it belongs with the other things done TO
-            // a transcript rather than beside Settings, which is where a user
-            // goes to change how the app behaves.
             if let onDebug {
                 Button(action: onDebug) {
                     Image(systemName: "ladybug")
@@ -98,7 +81,6 @@ struct TranscriptActions: View {
                       defaultFilename: sanitizedFilename(title)) { _ in }
     }
 
-    // A Save row for one format; disabled until its export has been prepared.
     @ViewBuilder
     private func saveRow(_ label: String, _ url: URL?,
                          _ type: UTType) -> some View {
@@ -171,4 +153,5 @@ struct TranscriptActions: View {
         }
         return result
     }
+
 }

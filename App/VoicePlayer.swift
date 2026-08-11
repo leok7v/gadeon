@@ -2,65 +2,30 @@ import AVFoundation
 import Foundation
 import LLM
 
-// Synthesis + playback for the speaking session: text segments in, sound out,
-// in order, with a stop that takes effect immediately.
-//
-// Synthesis runs on its own serial queue -- Speech.synthesize is synchronous
-// and holds an arena for the length of one call, so it must never be entered
-// twice at once and must never block the main thread (a sentence is tens to
-// hundreds of milliseconds of arithmetic).
-//
-// Playback is a player node fed scheduled buffers rather than a file player:
-// consecutive sentences then abut with no gap and no temporary file, and stop
-// is a node call rather than a wait.
-
 final class VoicePlayer: @unchecked Sendable {
 
     // How many sentences may be synthesized ahead of the one being spoken.
     // Enough that playback never waits on the engine, few enough that a
     // barge-in throws away almost nothing.
-    private static let readAhead = 2
 
+    private static let readAhead = 2
     private let engine = AVAudioEngine()
     private let node = AVAudioPlayerNode()
     private let format: AVAudioFormat
     private let synthQueue = DispatchQueue(label: "gadeon.tts.synth",
                                            qos: .userInitiated)
     private let lock = NSLock()
-    // The transport calls a LISTENER makes -- stop, pause, resume -- run here
-    // rather than on the caller. AVAudioPlayerNode.stop() blocks until the
-    // render thread has drained, so calling it from the main actor makes a
-    // user-interactive thread wait on an audio thread at default priority:
-    // the inversion the Thread Performance Checker flags as a hang risk, on
-    // the very path the Stop button takes.
-    //
-    // Scheduling does NOT come through here, and that is a trade rather than a
-    // clean win: synthQueue is userInitiated, so `schedule`'s play() inverts
-    // the same way this queue exists to prevent. It stays there because the
-    // epoch test under `lock` is what orders a schedule against a stop -- a
-    // stop that wins the lock leaves the schedule stale so it never reaches
-    // the node -- and moving those calls here would put that ordering on a
-    // queue hop instead.
-    //
-    // Default QoS, deliberately, and NOT a higher class: `stop()` waits on an
-    // audio helper thread that runs at default, so any queue above that only
-    // moves the inversion one level down rather than removing it. Nothing is
-    // drawing while this runs, and the decision it carries out was already
-    // taken under the lock, so the work genuinely is not user-initiated.
-    //
-    // The `qos:` argument is what makes that true and cannot be dropped: a
-    // queue built without one is UNSPECIFIED, not default, and an async block
-    // then inherits the SUBMITTER's class. Every caller here is @MainActor, so
-    // the bare queue ran node.stop() at user-initiated and re-created the very
-    // inversion this queue exists to remove.
+
+    // Transport calls (stop/pause/resume) run here, off the main actor:
+    // AVAudioPlayerNode.stop() blocks until the render thread drains.
+    // `qos: .default` cannot be dropped -- a queue built without one is
+    // UNSPECIFIED and inherits the submitter's class.
+
     private let nodeQueue = DispatchQueue(label: "gadeon.tts.node",
                                           qos: .default)
     private var speech: Speech?
-    // Each queued segment carries a TAG the player never interprets. The
-    // caller uses it to say which piece of its own text this sound is, which
-    // is the only way anything above can know where the voice has got to --
-    // and keeping it opaque is what stops transcript geometry from reaching
-    // an audio queue.
+    // Each segment's tag is opaque here; the caller uses it to track which
+    // piece of its own text is playing.
     private var pending: [(text: String, tag: Int)] = []
     // The tags of buffers handed to the node, oldest first: the head is what
     // is audible now.
@@ -81,12 +46,8 @@ final class VoicePlayer: @unchecked Sendable {
     // Told the tag of whatever is audible now, or nil for silence.
     var onSpeaking: (@Sendable (Int?) -> Void)?
 
-    // Speech is a 4 GB feature. The KittenTTS weights and the audio engine are
-    // more than a 3 GB phone has beside a resident model: an iPhone SE 2nd
-    // generation running E2B is jetsammed by them. Refusing to build here is
-    // the whole gate -- `VoiceSession.available` is `player != nil`, so the
-    // Settings pane and the composer's speaker both disappear off this one
-    // decision rather than each testing the memory themselves.
+    // 4 GB avoids jetsam from KittenTTS plus the audio engine alongside a
+    // resident model.
     static let speechFloorGB = 4
 
     init?() {
@@ -102,9 +63,9 @@ final class VoicePlayer: @unchecked Sendable {
         }
     }
 
-    // The engine is built on first use, off the main thread: loading the
-    // weights is tens of milliseconds and there is no reason to pay it at
-    // launch for a user who never turns speech on.
+    // Built lazily off the main thread: loading the weights is tens of
+    // milliseconds, paid only if speech is used.
+
     private func ready() -> Speech? {
         lock.lock()
         let have = speech
@@ -126,17 +87,10 @@ final class VoicePlayer: @unchecked Sendable {
         return inFlight > 0 || scheduled > 0 || !pending.isEmpty
     }
 
-    // Every state change gets a line. Nothing in this path used to report at
-    // all, so a voice that went quiet left no record of WHERE it stopped --
-    // synthesis, scheduling, or the node -- and each looks the same from
-    // outside. A handful of lines per sentence, against the decode path's
-    // ~86 a second, so the cost that ruled logging out there does not apply.
     private func log(_ what: @autoclosure () -> String) {
         Diag.shared.report("[tts] " + what())
     }
 
-    // The counters behind every decision here, so a line says what the player
-    // believed at that moment rather than only what it did.
     private func counts() -> String {
         lock.lock()
         defer { lock.unlock() }
@@ -156,8 +110,6 @@ final class VoicePlayer: @unchecked Sendable {
         }
     }
 
-    // Silence now: drop what is queued, forget what is being synthesized,
-    // and stop the node mid-buffer.
     func stop() {
         lock.lock()
         pending.removeAll()
@@ -166,9 +118,9 @@ final class VoicePlayer: @unchecked Sendable {
         isPaused = false
         playing.removeAll()
         lock.unlock()
-        // The STATE above is what makes a stop immediate -- nothing new is
-        // scheduled once the epoch moves -- so silencing the node a queue hop
-        // later costs no correctness.
+        // The epoch bump above makes this immediate -- nothing new schedules
+        // once it moves -- so silencing the node a queue hop later costs no
+        // correctness.
         nodeQueue.async { [weak self] in
             self?.node.stop()
             self?.node.reset()
@@ -200,9 +152,7 @@ final class VoicePlayer: @unchecked Sendable {
         log("resume | \(counts())")
     }
 
-    // Take one pending segment if there is room, synthesize it off-thread and
-    // schedule the result. Re-entered on every completion, so the queue
-    // drains without a timer.
+    // Re-entered on every completion, so the queue drains without a timer.
     private func pump(voice: String, speed: Float) {
         lock.lock()
         let room = inFlight + scheduled < VoicePlayer.readAhead
@@ -240,13 +190,9 @@ final class VoicePlayer: @unchecked Sendable {
     }
 
     // The claim on `scheduled` is taken in the SAME lock as the staleness
-    // test, and that is the whole point of this shape: `render` tested `mark`
-    // and then let go of the lock, so a stop can land in the gap. A count
-    // raised after one can never be lowered again -- `finished` refuses a
-    // stale mark -- and the node it was queued on has just been reset, so
-    // while paused the buffer never plays back and never completes either.
-    // `isActive` then stays true with nothing left to play, which the UI shows
-    // as a voice that is speaking forever in silence.
+    // test: `render` tests `mark` and releases the lock, so a stop can
+    // land in the gap this closes.
+
     private func schedule(_ pcm: [Float], tag: Int, mark: Int, voice: String,
                           speed: Float) {
         let frames = AVAudioFrameCount(pcm.count)
@@ -276,8 +222,6 @@ final class VoicePlayer: @unchecked Sendable {
         pump(voice: voice, speed: speed)
     }
 
-    // The head of `playing` is what is audible, so a completion retires it and
-    // whatever was queued behind it becomes the voice's current place.
     private func finished(mark: Int, voice: String, speed: Float) {
         lock.lock()
         if mark == epoch && scheduled > 0 { scheduled -= 1 }
@@ -299,13 +243,9 @@ final class VoicePlayer: @unchecked Sendable {
         }
     }
 
-    // The engine keeps running between sentences on purpose: starting it per
-    // sentence costs a hardware route change, which is audible as a click.
-    //
-    // The decision is taken here and the two hardware calls are handed to
-    // nodeQueue: this is reached from a @MainActor task, and deactivating an
-    // audio session on the main thread is the same blocking-call-on-a-drawing-
-    // thread the transport calls above avoid.
+    // The engine keeps running between sentences on purpose -- restarting
+    // it per sentence is audible as a click.
+
     func idle() {
         lock.lock()
         let quiet = inFlight == 0 && scheduled == 0 && pending.isEmpty
@@ -330,4 +270,5 @@ final class VoicePlayer: @unchecked Sendable {
         lock.unlock()
         onSpeaking?(head)
     }
+
 }

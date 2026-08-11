@@ -2,28 +2,20 @@ import Foundation
 import LLM
 import MD
 
-// Debug instrumentation, wired once at launch: MD render timing flows into the
-// shared Diag log, and a background watchdog measures how long the MAIN QUEUE
-// goes undrained -- the direct signal for the "view flashes black" stall,
-// timed independently of which sub-op blocked it. Both are frame-budget /
-// threshold gated, so a smooth session is silent.
-
 enum Instrument {
+
     // Wall-clock zero for the debug view's timestamps.
     static let launched = Date()
 
     static func install() -> Bool {
-        // Fix that zero HERE. It is a lazy static, and the debug view may not
-        // be opened for minutes -- reading it first from there would date the
-        // launch to whenever someone tapped the ladybug.
+        // Forces the lazy static now; a first read from the debug view,
+        // opened minutes later, would date the launch late.
         _ = launched
         MarkdownDiag.report = { s in Diag.shared.report(s) }
         MainThreadWatch.shared.start()
         Footprint.watch()
-        // LLM reports through this because it cannot reach App directly. The
-        // detail twin -- one line per prefill chunk, per downloaded file --
-        // is left NIL unless asked for, so the cost of a silenced channel is
-        // a nil check at the call site rather than a formatted string.
+        // LLM reports through this closure since it cannot import App
+        // directly; the detail twin stays nil unless asked for.
         Diag.memory = { tag in Footprint.report(tag) }
         if DiagGate.memWatch {
             Diag.memoryDetail = { tag in Footprint.report(tag) }
@@ -31,12 +23,11 @@ enum Instrument {
         return true
     }
 
-    // Time a main-actor span, reporting to Diag only when it overruns a frame
-    // (12ms) -- the same frame-budget gate as MarkdownDiag, for App-side hot
-    // spots (the incremental parse, the doc snapshot).
+    // Reports only when a span overruns the 12ms frame budget.
+
     @discardableResult
     static func timed<T>(_ label: @autoclosure () -> String,
-                         over: Double = 12, _ body: () -> T) -> T {
+                            over: Double = 12, _ body: () -> T) -> T {
         let t0 = DispatchTime.now()
         let result = body()
         let ms = Double(DispatchTime.now().uptimeNanoseconds
@@ -47,10 +38,10 @@ enum Instrument {
         return result
     }
 
-    // Count SwiftUI body re-evaluations per label and log the rate once a
-    // second, so a per-token re-render storm surfaces as "N evals in ~1.0s".
     @MainActor private static var beats: [String: (n: Int, at: Date)] = [:]
+
     // A line in the shared diagnostics from a file that does not import LLM.
+
     static func note(_ text: String) { Diag.shared.report(text) }
 
     @MainActor static func beat(_ label: String) {
@@ -68,19 +59,13 @@ enum Instrument {
     }
 }
 
-// Pings the main QUEUE on a steady background timer and reports the round-trip
-// latency: while the queue is not being drained the ping runs late by exactly
-// that long, so a stall surfaces as one "[hang] ... Nms" line. Only stalls past
-// the threshold are logged.
-//
-// The queue and the THREAD are different subjects, and the line names the one
-// it measures. A run loop parked inside one long CoreAnimation commit starves
-// dispatch blocks while AppKit keeps delivering events, so "the queue was
-// starved for a minute" can be true while "the thread was blocked" is not --
-// a 60s stall has been logged with the app writing its own button presses
-// through the middle of it. The CPU figure separates the two cases worth
-// telling apart: near zero means main was waiting on something outside this
-// process, and a figure near the stall itself means our own code is hot.
+// Pings the main QUEUE, not the thread: a run loop stuck in one long
+// CoreAnimation commit starves dispatch while AppKit keeps delivering
+// events, so "queue starved" and "thread blocked" are different claims.
+// The CPU figure tells them apart -- near zero means main waited on
+// something outside this process, near the stall itself means our own
+// code is hot.
+
 final class MainThreadWatch: @unchecked Sendable {
 
     static let shared = MainThreadWatch()
@@ -104,19 +89,16 @@ final class MainThreadWatch: @unchecked Sendable {
         }
     }
 
-    // Every ping queued DURING a block runs when it ends, so one stall
-    // arrives as a descending run of them -- 888, 789, 689, ... one line per
-    // 100 ms it lasted. Reported raw, a single 888 ms stall reads as seven
-    // stalls, and a reader counting lines overstates it sevenfold. Only the
-    // first of a burst is a measurement; every later one was already in
-    // flight when it was reported, so `sent` before the last report is
-    // exactly the test for "same block".
+    // Every ping queued during a block runs when it ends, so `sent` before
+    // the last report is the test for "same block" -- only the first of a
+    // burst is a measurement.
+
     private var drained = DispatchTime.now().uptimeNanoseconds
 
-    // A send right to the main thread, and the CPU it had burned when the
-    // last ping landed. Both are only ever touched from the block below,
-    // which runs on main -- which is also what makes mach_thread_self() name
-    // the right thread. The right is held for the process, never released.
+    // Touched only from the block below, which runs on main -- also what
+    // makes mach_thread_self() name the right thread. The send right is
+    // held for the process, never released.
+
     private var mainThread: mach_port_t = 0
     private var mainCPUms = 0.0
 
@@ -127,19 +109,18 @@ final class MainThreadWatch: @unchecked Sendable {
             let ms = Double(now.uptimeNanoseconds
                 - sent.uptimeNanoseconds) / 1e6
             if let self {
-                if self.mainThread == 0 { self.mainThread = mach_thread_self() }
+                if self.mainThread == 0 {
+                    self.mainThread = mach_thread_self()
+                }
                 let cpu = MainThreadWatch.cpuMs(self.mainThread)
-                // Pings queued during a stall all run when it ends, oldest
-                // first, so the one that reports it is also the one whose
-                // baseline predates the stall -- the delta covers exactly the
-                // starved span.
+                // Baseline predates the stall, so `burned` covers exactly
+                // the starved span.
                 let burned = cpu - self.mainCPUms
                 self.mainCPUms = cpu
                 if ms >= MainThreadWatch.thresholdMs,
                    sent.uptimeNanoseconds >= self.drained {
-                    // `drained` still advances with the switch off, or the
-                    // burst collapsing that makes one stall read as one line
-                    // would come back wrong the moment it is switched on.
+                    // Must advance even with the gate off, or the burst
+                    // collapse misfires the moment it is switched on.
                     self.drained = now.uptimeNanoseconds
                     if DiagGate.hang {
                         Diag.shared.report(String(format:
@@ -165,11 +146,14 @@ final class MainThreadWatch: @unchecked Sendable {
         }
         var ms = 0.0
         if kr == KERN_SUCCESS {
-            ms = Double(info.user_time.seconds
-                        + info.system_time.seconds) * 1000
-                + Double(info.user_time.microseconds
-                         + info.system_time.microseconds) / 1000
+            let user_s    = info.user_time.seconds
+            let user_us   = info.user_time.microseconds
+            let system_s  = info.system_time.seconds
+            let system_us = info.system_time.microseconds
+            ms = Double(user_s + system_s) * 1000 +
+                 Double(user_us + system_us) / 1000
         }
         return ms
     }
+
 }

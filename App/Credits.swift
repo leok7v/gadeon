@@ -1,32 +1,19 @@
 import Foundation
 
-// Who made what this app is built from, under which terms, and what we
-// changed about it.
-//
-// The `changed` line is not courtesy. Apache-2.0 section 5(b) obliges anyone
-// distributing a modified work to carry prominent notices saying so, and
-// every model listed here IS modified -- repacked, converted or ported. The
-// app would be in breach shipping them silently, however generous the licence.
-//
-// Terms are stated per entry rather than assumed from the family: they were
-// read off each upstream's own metadata, and one generation of the same model
-// can differ from the next (gemma-3 ships gated under Google's own terms
-// where gemma-4 is Apache-2.0 and ungated).
-
 struct Credit: Identifiable {
     let name: String
     let author: String
     let terms: String
     let source: String
     let changed: String
-
     var id: String { name }
     var link: URL? { URL(string: source) }
 }
 
 enum Credits {
 
-    // The app itself, first: what a reader is looking at before the parts.
+    // Apache-2.0 5(b) requires this notice on every modified model below.
+
     static let app = Credit(
         name: "Gadeon",
         author: "leok7v",

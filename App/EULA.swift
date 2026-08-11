@@ -1,10 +1,5 @@
 import SwiftUI
 
-// The binding legal agreement, shown FIRST (before the AI-mistakes
-// disclaimer). Accept stays disabled until the reader scrolls to the end,
-// which the agreement itself states is the condition of acceptance. Accepting
-// starts the mandatory 0.8B download so it overlaps the disclaimer read.
-
 struct EULAView: View {
 
     let onAgree: () -> Void
@@ -24,12 +19,9 @@ struct EULAView: View {
                 .frame(maxWidth: 640)
                 .frame(maxWidth: .infinity)
             }
-            // Enable Accept once the visible rect's bottom edge reaches the
-            // content end. visibleRect already accounts for the scroll view's
-            // safe-area insets, so it trips at the true bottom; the raw
-            // contentOffset + containerSize form under-counts by the top inset
-            // and only crosses on overscroll. A doc short enough to need no
-            // scroll starts already at the bottom.
+            // visibleRect accounts for safe-area insets and trips at the true
+            // bottom; contentOffset + containerSize under-counts by the top
+            // inset and only crosses on overscroll.
             .onScrollGeometryChange(for: Bool.self) { geo in
                 geo.visibleRect.maxY >= geo.contentSize.height - 24
             } action: { _, bottom in
@@ -47,8 +39,6 @@ struct EULAView: View {
         }
     }
 
-    // The agreement split into paragraphs, each parsed for inline markdown
-    // (bold / italic), so the VStack spacing carries the paragraph breaks.
     private static let paragraphs: [AttributedString] = agreement
         .components(separatedBy: "\n\n")
         .map { part in

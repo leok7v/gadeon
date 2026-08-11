@@ -12,17 +12,13 @@ import UniformTypeIdentifiers
         let id = UUID()
         let name: String
         let content: String
-        // Where the file itself is, so the transcript can offer it back. The
-        // TEXT is what the turn carries; this is only for the reader.
+        // For the reader only. `content` is what the turn carries.
         let url: URL?
-        // Whether the budget cut it. Recorded rather than inferred: the
-        // budget can be raised later, and that would not un-cut what an
-        // earlier turn already sent.
+        // Recorded, never inferred: raising the budget later cannot un-cut
+        // what an earlier turn already sent.
         let short: Bool
     }
 
-    // A document as the TRANSCRIPT needs it: the file to offer back, and how
-    // much text came out of it.
     struct DocRef: Hashable {
         let url: URL
         let bytes: Int
@@ -33,38 +29,30 @@ import UniformTypeIdentifiers
         let id = UUID()
         let name: String
         let data: Data
-        // A small EXIF-upright preview decoded ONCE at attach (chip thumbnail),
-        // so the chip does not re-decode per render. iOS photo-library picks all
-        // arrive named "image", so the preview is the only way to tell several
-        // attached photos apart.
+        // Decoded ONCE at attach, so the chip does not re-decode per render.
         let thumbnail: CGImage?
     }
 
-    // An attached sound or video. Kept as a URL rather than bytes: a clip is
-    // orders of magnitude larger than a picture, only the decode needs it,
-    // and holding a video in memory for the life of a conversation is how an
-    // app gets jetsammed.
+    // A URL, never bytes: holding a video in memory for the life of a
+    // conversation is how an app gets jetsammed, and only the decode wants it.
     struct ClipAttachment: Identifiable {
         let id = UUID()
         let name: String
         let url: URL
         let isVideo: Bool
-        // A frame for the chip; nil for sound, which has no picture.
+        // nil for sound, which has no picture.
         let thumbnail: CGImage?
 
-        // A video carries BOTH its frames and its own soundtrack. The
-        // library keeps them apart so a caller can order them; a person
-        // dropping a movie means picture AND sound, and a clip whose speech
-        // never reaches the model produces exactly the answer it gave for
-        // the zoo video -- "I only have a series of still images".
+        // A video carries BOTH its frames and its own soundtrack, which the
+        // library keeps apart so a caller can order them.
         func spans(_ media: Gemma4Media,
                    onFrame: (@Sendable (VideoPeek) -> Void)? = nil)
             async throws -> [(ContentPart, SoftSpan)] {
             var out: [(ContentPart, SoftSpan)] = []
             if isVideo {
-                // Scaled HERE, on the thread that decoded it: the frame the
-                // encoder hands over is a source-resolution bitmap and is
-                // released the moment this returns.
+                // Scaled HERE, on the decoding thread: the frame handed over
+                // is a source-resolution bitmap released the moment this
+                // returns.
                 var seen = 0
                 out.append((.video, try await media.video(url: url) {
                     img, _ in
@@ -74,9 +62,8 @@ import UniformTypeIdentifiers
                     }
                     seen += 1
                 }))
-                // A silent clip is ordinary, and a soundtrack past the
-                // model's ceiling should cost the SOUND rather than the
-                // whole attachment.
+                // A soundtrack past the model's ceiling costs the SOUND, not
+                // the whole attachment.
                 for heard in (try? await media.audio(url: url)) ?? [] {
                     out.append((.audio, heard))
                 }
@@ -89,15 +76,13 @@ import UniformTypeIdentifiers
         }
     }
 
-    // One tool round of an assistant turn, a row in the transcript's tool
-    // strip. `result` is the exact string the model received back as the
-    // tool response; nil while the tool is still running (the row shimmers).
     struct ToolRound: Identifiable {
         let id: Int                  // round number within the turn
         let emitted: String          // the name the model asked for
         let label: String            // display name (resolved tool, or emitted)
         let symbol: String           // SF Symbol for the row glyph
         let args: String             // key: "value" summary of the call params
+        // The exact string the model received back; nil while it runs.
         var result: String?
     }
 
@@ -105,55 +90,30 @@ import UniformTypeIdentifiers
         let id = UUID()
         let fromUser: Bool
         var text: String
-        // Display previews of the turn's attached images (EXIF-upright,
-        // decoded once at send, bounded size), so the transcript SHOWS
-        // what was sent instead of a bare "@name" reference.
         var images: [CGImage] = []
-        // The turn's attached VIDEOS, so the transcript can play back what
-        // the model was shown -- with its sound, which no still can carry.
-        //
-        // The PATH is persisted, never the bytes: a conversation is kilobytes
-        // and a phone clip is tens of megabytes. A path can go stale -- a
-        // picker's temporary copy, a security scope, or the app bundle moving
-        // on update -- so the view tests the file and falls back to naming it.
+        // The PATH, never the bytes: a conversation is kilobytes and a phone
+        // clip is tens of megabytes. A path can go stale, so the view tests
+        // the file and names it rather than offering it.
         var clips: [URL] = []
-        // The turn's attached DOCUMENTS. A .txt arrives as itself, while a
-        // PDF or an office file was read into Markdown first, and the size
-        // recorded here is of that TEXT -- which is the honest thing to show,
-        // since text is the whole of what the model was given. A page image
-        // never reached it.
-        //
-        // Same path-not-bytes rule as clips, for the same reasons.
+        // Same path-not-bytes rule as clips. The size recorded is of the
+        // TEXT taken from the file, which is the whole of what the model got.
         var docs: [DocRef] = []
-        // The turn's tool rounds, appended live as the session runs them, so
-        // the transcript shows which tools ran with what arguments -- the
-        // "did it even call the tool" debugging surface.
         var toolRounds: [ToolRound] = []
-        // The assistant turn's <think> stream, shown in a collapsed grey
-        // disclosure above the answer. Empty for user turns and when
-        // reasoning-effort is off.
         var reasoning = ""
-        // A user turn whose text is a STAND-IN rather than words: a
-        // dictated turn shows "Spoken, 1.9s" because the speech itself
-        // cannot be shown. Nothing that names the conversation may come
-        // from one.
+        // The text is a STAND-IN rather than words: a dictated turn shows
+        // "Spoken, 1.9s". Nothing that names the conversation may come from
+        // one.
         var placeholder = false
-        // The runaway loop breaker ended this turn with NO committed answer
-        // (it fired mid-think); the transcript explains itself instead of
-        // showing silence.
         var loopStopped = false
-        // Markdown snapshots the transcript renders when the Markdown toggle
-        // is on, maintained beside the raw strings so plain-text rendering,
-        // copy, and rollback stay untouched. The streams are reference types
-        // whose sealed blocks never re-parse; only the open block does.
+        // The streams are reference types whose sealed blocks never
+        // re-parse; only the open block does.
         var answerDoc = Markdown.Document.empty
         var reasoningDoc = Markdown.Document.empty
         let answerStream = MarkdownStream()
         let reasoningStream = MarkdownStream()
     }
 
-    // How an attached image is fed to the model (Settings). Host-side policy,
-    // independent of the tower's baked grid.
+    // Host-side policy, independent of the tower's baked grid.
     enum VisionMode: String, CaseIterable, Identifiable {
         case tile, fit
         var id: String { rawValue }
@@ -173,35 +133,22 @@ import UniformTypeIdentifiers
     static let defaultSystemPrompt = "You are a helpful assistant."
 
     var messages: [Message] = []
-    // A reopened past conversation is READ-ONLY: the transcript is shown, the
-    // composer is hidden, and no session/KV is touched (continuation is a later
-    // opt-in). currentConversationId names the live-or-open conversation for the
-    // history store; nil until the first turn is committed. Logic lives in
-    // Conversations.swift.
+    // A reopened conversation touches no session or KV: the transcript is
+    // shown and the composer hidden.
     var readOnly = false
     var currentConversationId: UUID?
-    // The model-generated title for the live conversation once made; nil until
-    // then, when conversationTitle falls back to the first user message.
     var generatedTitle: String?
-    // Appearance (the sidebar theme control), persisted; applied at the root.
     var theme: AppTheme = {
         AppTheme(rawValue:
             UserDefaults.standard.string(forKey: "theme") ?? "") ?? .system
     }() {
         didSet { UserDefaults.standard.set(theme.rawValue, forKey: "theme") }
     }
-    // Text size, as NOTCHES either side of what this device already gives
-    // rather than as an absolute size. Someone reading on a borrowed phone set
-    // to xLarge wants everything a step smaller than THAT; an absolute stop
-    // would throw their accessibility setting away. Zero is the device's own
-    // size, which is also what an absent default reads as.
-    //
-    // A multiplier of ours and NOT a dynamicTypeSize shift, which is the
-    // obvious answer and does nothing on macOS: the environment value arrives
-    // (rendered, it reports accessibility3) and both Font.body and
-    // @ScaledMetric stay exactly where they were, because AppKit has no
-    // content size category for them to read. On iOS the system's own Dynamic
-    // Type still works underneath and this multiplies on top of it.
+    // NOTCHES either side of what the device already gives, so zero is its
+    // own size and an absent default reads the same. A multiplier of ours
+    // rather than a dynamicTypeSize shift, which does nothing on macOS:
+    // AppKit has no content size category for Font.body or @ScaledMetric to
+    // read.
     var textZoom: Int = ChatModel.clampZoom(
         UserDefaults.standard.integer(forKey: "textZoom")) {
         didSet { UserDefaults.standard.set(textZoom, forKey: "textZoom") }
@@ -212,25 +159,19 @@ import UniformTypeIdentifiers
         min(max(notches, -zoomLimit), zoomLimit)
     }
 
-    // A notch is a tenth: 0.8 to 1.2 across the five stops. Far enough at the
-    // ends to be worth reaching for, near enough that no layout has to be
-    // redrawn to survive them.
+    // A notch is a tenth: 0.8 to 1.2 across the five stops.
     var textScale: CGFloat { ChatModel.zoomScale(textZoom) }
 
     static func zoomScale(_ notch: Int) -> CGFloat {
         1 + CGFloat(notch) / 10
     }
 
-    // The stop a free-running scale lands on, for the pinch. Bounded before
-    // it is converted: a two-finger fling can report a ratio of any size, and
-    // the whole ladder spans 1.5.
+    // Bounded before it is converted: a two-finger fling reports a ratio of
+    // any size, where the whole ladder spans 1.5.
     static func zoomNotch(nearest scale: CGFloat) -> Int {
         clampZoom(Int(((min(max(scale, 0.5), 2) - 1) * 10).rounded()))
     }
 
-    // The pinch applies nothing until the fingers lift, and there is no
-    // control on screen to watch, so this flash is the only thing saying it
-    // heard the gesture at all.
     func flashZoom(_ notch: Int) {
         flashHUD("Zoom \(Int(ChatModel.zoomScale(notch) * 100))%")
     }
@@ -244,57 +185,33 @@ import UniformTypeIdentifiers
     func resetZoom() { textZoom = 0 }
 
     var input = ""
-    // Insertion point (UTF-16 offset into input), synced from the editor so a
-    // dropped or picked file's reference lands at the caret.
+    // UTF-16 offset into `input`, synced from the editor so a dropped file's
+    // reference lands at the caret.
     var caret = 0
-    // Pending images for the NEXT turn (VL), up to maxImages. Non-empty -> the
-    // composer shows a chip per image and Send runs the vision path, not the
-    // text session. Each is referenced inline by its unique "@name", like docs.
     var attachedImages: [ImageAttachment] = []
-    // Attached .txt/.md docs for the next turn: shown as chips, referenced
-    // inline as "@name", and substituted into the prompt in place at send.
     var attachedDocs: [Doc] = []
     // Files being read into Markdown right now. A drop is accepted the moment
     // it starts, and only the text arrives late.
     private(set) var converting = 0
-    // Sound / video for the next turn, on a model that takes them. Referenced
-    // inline as "@name" exactly like images and docs, so one composer gesture
-    // covers every kind.
     var attachedClips: [ClipAttachment] = []
     var status = "loading model..."
-    // Servable: a built session AND the whole compile finished (build makes
-    // the session before the warmup/carry compiles complete, so the session
-    // alone is not enough).
+    // A built session is NOT enough: build makes it before the warmup and
+    // carry compiles finish.
     var ready: Bool { session != nil && !compiling }
-    // The in-flight generation IS the busy state; no parallel flag to keep
-    // in sync with it.
     var busy: Bool { genTask != nil }
 
-    // The video frame the model is looking at right now, already scaled to
-    // composer size on the thread that decoded it. ONLY FilmStrip reads it,
-    // so a new frame re-evaluates that one view and leaves the transcript
-    // alone -- which is the whole reason it lives here rather than being
-    // pushed into the composer's own state.
+    // ONLY FilmStrip reads this, so a new frame re-evaluates that one view
+    // and leaves the transcript alone.
     var lookingAt: VideoPeek?
-    // Whether frames are still coming. It goes false when the encode ends,
-    // which is where the ~30s prefill begins -- the strip fades the last
-    // frame out from there rather than holding it for the rest of the wait.
-    //
-    // A SIGNAL rather than the view noticing frames stopped: "nothing has
-    // arrived recently" needs a timer whose deadline races the next arrival,
-    // and the encoder already knows exactly when it is done.
+    // Raised by the encoder, which knows when it is done; "nothing arrived
+    // recently" would need a timer racing the next arrival.
     var watching = false
-    // Anything the user is WAITING THROUGH: the prompt being ingested, tokens
-    // arriving, a reply still being read, the microphone open. Wider than
-    // `busy`, which ends with the last token while the voice reads on.
+    // Wider than `busy`, which ends with the last token while the voice
+    // reads on.
     var inTurn: Bool { busy || listening || speech.engaged }
 
-    // The last turn was SPOKEN and nothing has been typed since: the
-    // conversation is still a voice one, so the transport stays up with the
-    // microphone offered rather than collapsing to a composer the speaker is
-    // not using. Offered, not opened -- a microphone that reopens itself is
-    // how one gets left on, and the room it would open into is the one the
-    // reply just played into.
+    // Offered, never opened: a microphone that reopens itself gets left on,
+    // and the room it would open into is the one the reply just played into.
     var voiceReady: Bool {
         lastTurnSpoken && canAttachAudio && !busy && !listening
             && !speech.engaged && input.isEmpty
@@ -303,19 +220,11 @@ import UniformTypeIdentifiers
     private(set) var lastTurnSpoken = false
     var statsLabel = ""             // the status line's one line of numbers
 
-    // The loaded model's own shape, read from its files at build; nil until
-    // one is loaded.
+    // Read from the model's own files at build; nil until one is loaded.
     private(set) var modelShape: ModelShape?
 
-    // What the status line says before a turn has run, where every number
-    // would read zero. The model's own shape is the interesting thing at that
-    // moment, and it is all fact rather than flavour.
-    //
-    // PARTS, not one string, because each weight is drawn behind its own SF
-    // Symbol and an emoji standing in for those reads as a toy beside a
-    // technical line. It also fixes an off-by-one the words used to carry: a
-    // single marker in front of three numbers labels only the group, leaving
-    // the reader to work out which number is which tower.
+    // Parts rather than one string: each weight is drawn behind its own SF
+    // Symbol.
     struct Tower: Identifiable {
         let id: Int
         let symbol: String
@@ -333,10 +242,6 @@ import UniformTypeIdentifiers
         return out
     }
 
-    // `waveform.path` and not a microphone: the microphone is the composer's
-    // record button, and one glyph meaning both "record" and "the audio tower
-    // weighs this" is a glyph meaning neither. `eye` is what Settings already
-    // calls this model's ability to see.
     private static func towerSymbol(_ name: String) -> String {
         var out = "text.alignleft"
         if name == "vision" {
@@ -347,10 +252,6 @@ import UniformTypeIdentifiers
         return out
     }
 
-    // The facts that are not sizes. Separated in the view by a dot rather
-    // than by an arrow or a colon: an arrow claims the context feeds the
-    // width and a colon claims the width belongs to it, and neither is true
-    // of two independent numbers.
     var modelFacts: [String] {
         var out: [String] = []
         if let shape = modelShape {
@@ -364,73 +265,52 @@ import UniformTypeIdentifiers
         return out
     }
 
-    // 131,072 reads slower than 128K, and a context length is a round binary
-    // number, so the short form is EXACT here rather than an approximation.
-    // Anything that is not gets its digits.
+    // The short form is EXACT, not an approximation: anything that is not a
+    // round binary number keeps its digits.
     private static func tokens(_ n: Int) -> String {
         n >= 1024 && n % 1024 == 0 ? "\(n / 1024)K" : n.formatted(.number)
     }
 
-    // Weights in the unit that carries the information. A tenth of a gigabyte
-    // is 100 MB of detail, and the projections a unified checkpoint uses
-    // INSTEAD of towers weigh single-digit megabytes -- both round to "0.0 GB".
+    // A unified checkpoint's projections weigh single-digit megabytes, which
+    // in gigabytes would round to "0.0 GB".
     private static func weight(_ bytes: Int) -> String {
         let gb = Double(bytes) / 1_073_741_824
         return gb >= 1 ? String(format: "%.1f GB", gb)
                        : String(format: "%.0f MB",
                                 Double(bytes) / 1_048_576)
     }
-    // The speaking half of a voice conversation. Owns its own persisted
-    // settings and its playback; the chat only tells it what arrived.
     let speech = VoiceSession()
-    // The microphone is open. Drives the composer button's state; the turn
-    // itself only starts once it closes.
+    // The microphone is open; the turn starts only once it closes.
     var listening = false
-    // Speech CAPTURED so far this session, in seconds. Shown while listening
-    // because a rotating phrase only proves the app is awake -- this is the
-    // one number that answers the question the speaker is actually asking,
-    // which is whether their words reached anything at all.
+    // Speech CAPTURED so far this session, which is not the time the
+    // microphone has been open: the pauses are already gone.
     var heardSeconds = 0.0
-    // The gate has a speech run OPEN right now, and how far over its bar the
-    // voice is sitting. Drives the ring around the microphone, so what it
-    // reacts to is what will actually be sent rather than whatever the room
-    // is doing.
+    // A speech run is OPEN, and how far over the gate's bar the voice sits.
     var hearingSpeech = false
     var speechLevel = 0.0
-    // Prefill is running (before the first decoded token): the ingest stage,
-    // which the transcript quip and status bar draw a phrase from.
+    // Before the first decoded token.
     var prefilling = false
-    // A tool (wikipedia_query) is running / its result is being ingested: the
-    // "consulting" stage (library whimsy). Set by the session's onTool, cleared
-    // when the answer begins to stream.
+    // A tool is running or its result is being ingested. Set by the session's
+    // onTool, cleared when the answer begins to stream.
     var consulting = false
-    // Two distinct phrases, refreshed together while a reply runs, one per
-    // surface that can show a phrase at once: thinkStatus is the transcript's
-    // working line and thinkLabel the reasoning disclosure header.
+    // One per surface that can show a phrase at once: the transcript's
+    // working line and the reasoning disclosure header.
     var thinkStatus = "Thinking"
     var thinkLabel = "Thinking"
-    // First-run onboarding, two persisted gates around an explicit
-    // download-consent panel: the legal EULA, then -- once Download is tapped
-    // on the consent panel -- the AI-mistakes disclaimer, which the download
-    // overlaps. The App Store requires that consent before any fetch begins.
     var eulaAccepted = UserDefaults.standard.bool(forKey: "eulaAccepted")
     var accepted = UserDefaults.standard.bool(forKey: "disclaimerAccepted")
-    // Selected model (persisted), sanitized to one this platform ships (a 2B
-    // choice saved on the Mac must not stick when the defaults land on a
-    // phone).
+    // Sanitized to a model this platform ships: a choice saved on a Mac must
+    // not stick when the defaults land on a phone.
     private static func startModel() -> String {
         let saved = UserDefaults.standard.string(forKey: "modelName")
             ?? Models.start
         return Models.all.contains(saved) ? saved : Models.start
     }
     var modelName: String = ChatModel.startModel()
-    // Download-on-demand state (the bundle ships no weights). downloadName !=
-    // nil surfaces the consent panel; downloading drives the progress view;
-    // done/total come from HubFetch. Cleared once the set is verified on disk.
+    // Non-nil surfaces the consent panel; cleared once the set is verified.
     var downloadName: String? = nil
     var downloading = false
-    // Bytes downloaded / total bytes (HubFetch reports live byte progress), so
-    // the bar + ETA track real throughput, not a file count.
+    // BYTES, not a file count, so the bar and ETA track real throughput.
     var downloadDone: Int64 = 0
     var downloadTotal: Int64 = 0
 
@@ -438,17 +318,14 @@ import UniformTypeIdentifiers
         downloadTotal > 0 ? Double(downloadDone) / Double(downloadTotal) : 0
     }
 
-    // "7.3 of 7.8 GB": prose "of", one unit -- the bar already shows the
-    // percent, so absolute bytes are the information the numbers add.
     var downloadCounter: String {
         String(format: "%.1f of %.1f GB",
                Double(downloadDone) / 1_000_000_000,
                Double(downloadTotal) / 1_000_000_000)
     }
 
-    // A trimmed-empty prompt is not sendable, which is why this is not just
-    // !input.isEmpty: a field holding only spaces must leave Send disabled
-    // and must let a stray Return do nothing.
+    // Trimmed, not just !input.isEmpty: a field holding only spaces must
+    // leave Send disabled and a stray Return doing nothing.
 
     var canSend: Bool {
         let text = input.trimmingCharacters(
@@ -460,11 +337,8 @@ import UniformTypeIdentifiers
 
     var typing: Bool { !input.isEmpty }
 
-    // A heads-up before a heavy turn: rough prefill tokens for the pending
-    // attachments (docs ~4 chars/token; each image the tower's per-image run),
-    // with a duration once a turn has measured the prefill rate. nil until the
-    // estimate is large enough to be a noticeable wait. The number is a FLOOR --
-    // it counts trunk prefill, not the per-tile tower encode.
+    // A FLOOR: it counts trunk prefill at roughly 4 chars a token, not the
+    // per-tile tower encode. nil below a noticeable wait.
     var attachmentWarning: String? {
         let docTokens = attachedDocs.reduce(0) { $0 + $1.content.utf8.count / 4 }
         let total = attachedImages.count * perImageTokens + docTokens
@@ -477,40 +351,29 @@ import UniformTypeIdentifiers
         return result
     }
 
-    // Whether the ACTIVE model can see images, read from the backend after
-    // each build (a CoreML set with a tower; the GGUF/Metal 27B says no
-    // until its vision splice lands). Gates the attach button, image drops,
-    // and the vision send path, so an unsupported model never dead-ends.
+    // The CoreML tile path. Re-read from the backend after each build.
     private(set) var modelSupportsVision = false
 
-    // Whether the ACTIVE model takes tower features directly (gemma-4's
-    // image / clip / video soft tokens). A DIFFERENT capability from
-    // modelSupportsVision, which promises the CoreML tile path: no backend
-    // offers both, and the two feed different send paths.
+    // Tower features taken directly (gemma-4's soft tokens). A DIFFERENT
+    // capability from modelSupportsVision: no backend offers both, and the
+    // two feed different send paths.
     private(set) var modelSupportsSoftTokens = false
-    // The soft-token model's attachment encoder, held for the session so its
-    // vision and audio towers are built once. nil for every other backend.
+    // Held for the session so the vision and audio towers are built once.
     @ObservationIgnored var media: Gemma4Media?
 
-    // What the composer may offer, asked ONCE per modality rather than by
-    // naming a backend. Images ride either path; sound and video exist only
-    // on the soft-token one.
     var canAttachImages: Bool {
         modelSupportsVision || modelSupportsSoftTokens
     }
     var canAttachAudio: Bool { modelSupportsSoftTokens }
-    // One video per turn, so the picker stops offering them once there is
-    // one rather than accepting a file it will silently drop.
+    // One video per turn: the picker stops offering them rather than
+    // accepting a file it would silently drop.
     var canAttachVideo: Bool {
         modelSupportsSoftTokens
             && !attachedClips.contains { c in c.isVideo }
     }
 
-    // What the open panel accepts, so the picker offers exactly what the
-    // model can take rather than letting a user choose a file that will be
-    // silently ignored. Docs ride every model, and so do the formats that
-    // become one: a PDF or an office file is read into Markdown before it is
-    // attached, which needs no tower and no vision.
+    // Docs ride every model, and so do the formats that become one: a PDF or
+    // an office file is read into Markdown before it is attached.
     var attachableTypes: [UTType] {
         var out: [UTType] = [.plainText, .pdf]
         out += Docs2md.readable.compactMap { ext in
@@ -527,8 +390,6 @@ import UniformTypeIdentifiers
             || !attachedDocs.isEmpty
     }
 
-    // The glyph shows what is ALREADY attached, so the button reads as state
-    // rather than only as an action.
     var attachGlyph: String {
         var out = "plus"
         if !attachedClips.isEmpty {
@@ -552,26 +413,18 @@ import UniformTypeIdentifiers
         return out
     }
 
-    // Whether the ACTIVE model reasons at all, asked of its own chat template
-    // at session build (templateSupportsThinking). A model whose generation
-    // prompt bakes a closed empty <think> never thinks, so the lightbulb, the
-    // Settings switch and the thinking budget are all inert and say so.
+    // Asked of the model's own chat template at session build: one whose
+    // generation prompt bakes a closed empty <think> never thinks.
     private(set) var modelSupportsThinking = true
 
-    // The user's Thinking preference AND the model's ability to act on it.
-    // Everything that actually drives a turn reads THIS, so a non-reasoning
-    // model cannot be put into a state the engine will ignore.
+    // Everything that drives a turn reads THIS, so a non-reasoning model
+    // cannot be put into a state the engine will ignore.
     var thinkingActive: Bool { thinking && modelSupportsThinking }
 
-    // The 0.8B regresses when tiled (it drowns in vision tokens -- worse output
-    // AND ~2GB RSS), so it always fits one tile; iOS runs only the 0.8B. The
-    // larger macOS-only models get the tile/fit toggle.
     var allowsTiling: Bool {
         !isOS && modelName != Models.fallback && modelSupportsVision
     }
 
-    // Sized from the catalog by the pending download's name -- the two were
-    // only ever set together, so the name alone carries the state.
     var downloadSizeText: String {
         let bytes = downloadName.flatMap { name in
             ModelCatalog.source(name)?.bytes
@@ -580,11 +433,8 @@ import UniformTypeIdentifiers
                                          countStyle: .file)
     }
 
-    // Compile ("optimize for this device") progress: compileDoneLoC
-    // accumulates each program's model.mil LoC as it finishes its ANE compile
-    // (Engine's onCompiledLoC), against compileTotalLoC computed up front.
-    // `compiling` drives the blocking Optimizing view; it clears when the
-    // whole set is ready.
+    // Measured in each program's model.mil LoC as it finishes its ANE
+    // compile, against a total computed up front.
 
     var compiling = false
     var compileDoneLoC = 0
@@ -594,25 +444,15 @@ import UniformTypeIdentifiers
             ? min(1.0, Double(compileDoneLoC) / Double(compileTotalLoC)) : 0
     }
 
-    // Non-nil when the set could not be built on this device: an older Neural
-    // Engine can reject the trunk's compile ("Unable to build plan"). Surfaces
-    // a clear message + Retry instead of an endless spinner.
     var loadError: String? = nil
 
-    // True only when this set has never finished compiling on this install
-    // (the slow one-time ANE compile). A later launch, with the OS's compile
-    // cache warm, shows a brief "Loading" instead of the "Optimizing, may take
-    // a while" copy. Defaults true so the first frame errs toward the
-    // reassuring message.
+    // Defaults true, so the first frame errs toward the reassuring copy.
     var firstCompile = true
 
-    // Two-tier network access, split by WHAT LEAVES THE DEVICE. `wikipedia`
-    // gates the Wikimedia-only tools (article lookup matched on-device +
-    // today's headlines; nothing typed is ever sent). `webAccess` gates the
-    // open-web tools (search / fetch / weather; the model's search terms and
-    // IP-derived location go out). Both default ON (useful out of the box);
-    // the toolbar button cycles airplane -> book -> globe, Settings holds
-    // the two switches for fine control.
+    // Two tiers, split by WHAT LEAVES THE DEVICE. `wikipedia` gates the
+    // Wikimedia-only tools, whose lookup is matched on-device so nothing
+    // typed is sent. `webAccess` gates search, fetch and weather, where the
+    // model's search terms and an IP-derived location do go out.
     var wikipedia = true
     var webAccess = true
 
@@ -634,14 +474,10 @@ import UniformTypeIdentifiers
         }
     }
 
-    // A centered flash that dissolves on its own and nothing can click:
-    // either a toggle confirmation (Thinking / access tier), since iOS has no
-    // hover help and a state flip has to be said out loud, or the
-    // acknowledgement a spoken turn opens with.
     struct Flash: Equatable {
         let text: String
-        // Larger, for the flash a user is WAITING on rather than one
-        // confirming something they just did with their own hand.
+        // Larger, for a flash the user is WAITING on rather than one
+        // confirming something they just did.
         let prominent: Bool
     }
 
@@ -658,8 +494,6 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Swap the live session's runner so a tier change takes effect next
-    // turn, like Thinking.
     func setAccess(wikipedia wiki: Bool, web: Bool) {
         wikipedia = wiki
         webAccess = web
@@ -667,27 +501,20 @@ import UniformTypeIdentifiers
         let r = toolRunner
         Task { await s?.setTools(r) }
     }
-    // Reasoning-effort. Default on: the model reasons in <think> and the app
-    // shows a collapsed grey disclosure of it above each answer.
     var thinking = true
-    // Editable system prompt (Settings), persisted. Applied only when the
-    // session is (re)built -- model load and New Chat -- never mid-turn, so it
-    // cannot mismatch a live KV prefix.
+    // Applied only when the session is rebuilt, never mid-turn, so it cannot
+    // mismatch a live KV prefix.
     var systemPrompt: String = UserDefaults.standard
         .string(forKey: "systemPrompt") ?? ChatModel.defaultSystemPrompt {
         didSet {
             UserDefaults.standard.set(systemPrompt, forKey: "systemPrompt")
-            // Every model's precooked prefix bakes the prompt; an edit makes
-            // them all stale, so free the disk now (the stamps would reject
-            // them anyway).
+            // Every precooked prefix bakes the prompt, so an edit makes them
+            // all stale.
             ChatModel.wipePrecook()
         }
     }
-    // Image handling (Settings), persisted PER MODEL: tile vs fit. Read by
-    // sendVision for the larger models; the 0.8B always fits (see
-    // allowsTiling). The default differs by model: a tiled image on the 9B /
-    // 27B costs minutes of tower encode + prefill, so they default to Fit;
-    // the 2B/4B afford tiles (measured better OCR).
+    // Persisted PER MODEL: a tiled image on the 9B or 27B costs minutes of
+    // tower encode and prefill, so those default to Fit.
     private static func visionKey(_ name: String) -> String {
         "visionMode.\(name)"
     }
@@ -706,9 +533,8 @@ import UniformTypeIdentifiers
                                       forKey: Self.visionKey(modelName))
         }
     }
-    // Markdown transcript rendering (Settings > View), persisted. The docs
-    // are maintained regardless of the toggle, so flipping it re-renders past
-    // turns too.
+    // The docs are maintained regardless of the toggle, so flipping it
+    // re-renders past turns too.
     var renderMarkdown: Bool = UserDefaults.standard
         .object(forKey: "renderMarkdown") as? Bool ?? true {
         didSet {
@@ -716,9 +542,7 @@ import UniformTypeIdentifiers
                                       forKey: "renderMarkdown")
         }
     }
-    // Ask before deleting a conversation from the sidebar trash (Settings,
-    // persisted). Default on; the iOS swipe-to-delete is its own confirmation,
-    // so this gates only the macOS trash button.
+    // Gates only the macOS trash: the iOS swipe is its own confirmation.
     var confirmDeleteConversation: Bool = UserDefaults.standard
         .object(forKey: "confirmDeleteConversation") as? Bool ?? true {
         didSet {
@@ -726,45 +550,31 @@ import UniformTypeIdentifiers
                                       forKey: "confirmDeleteConversation")
         }
     }
-    // The status line under the composer (Settings / macOS View menu),
-    // persisted. Default off: the whimsical "working" line lives in the
-    // transcript, so the numbers are there for whoever wants them.
     var statusLine: Bool = UserDefaults.standard.bool(forKey: "statusLine") {
         didSet { UserDefaults.standard.set(statusLine, forKey: "statusLine") }
     }
-    // Settings is shown in-view (like the disclaimer), gated by this flag.
     var showSettings = false
-    // Session debug view (the Option-hold ladybug), routed in-view the same
-    // way. The trace behind it is ALWAYS recording -- drill-in is
-    // retroactive, after something already went wrong.
+    // The trace behind it is ALWAYS recording: drill-in is retroactive.
     var showDebug = false
     var traceEvents: [TraceEvent] = []
-    // NOT built in a Release build. This file is the session's own CONTENT --
-    // rendered prompts, raw decodes, tool results, which is to say the user's
-    // conversation -- and a shipped app has no business writing that to their
-    // disk, however purgeable Caches is. Debug keeps it, which is the loop it
-    // exists for. Constructed rather than merely silenced, because
-    // Diag.startRun creates the folder and archives the previous run before a
-    // single line is written.
+    // NOT built in a Release build: this file is the session's own content,
+    // which is to say the user's conversation. Constructed rather than
+    // silenced, because Diag.startRun creates the folder and archives the
+    // previous run before a single line is written.
     private let traceFile: TraceFile? = debugBuild ? TraceFile() : nil
-    // Wires MD render timing into Diag + starts the main-thread hang watchdog,
-    // once, at model construction.
     private let instrument = Instrument.install()
     var tracePath: String { traceFile?.path ?? "" }
     var diagPath: String { Diag.shared.path }
-    // Ring cap so a marathon session cannot grow the array unbounded; the
+    // A ring cap, so a marathon session cannot grow the array unbounded. The
     // on-disk transcript keeps everything.
     private static let traceCap = 2000
-    // Overthink penalty: a static logit bias on reasoning branch-openers while
-    // thinking, to curb over-reasoning. Robust across 0.5-4.0. TODO: Settings.
-    // Paper: https://arxiv.org/abs/2606.00206
+    // A static logit bias on reasoning branch-openers while thinking. Robust
+    // across 0.5-4.0. TODO: surface as a setting.
     private static let overthinkLambda: Float = 1.0
 
-    // Thinking budget: T-shirt sizes anchored in TIME. The token cap is
-    // derived per model AND device from the measured decode rate (persisted
-    // after each turn), so "M is about 20 seconds" holds on an M3 Max and an
-    // iPad alike, and stays true as the engine gets faster. Seeded with a
-    // conservative rate until the first turn measures truth.
+    // Anchored in TIME, not tokens: the cap is derived per model and device
+    // from the measured decode rate, so "M is about 20 seconds" holds on an
+    // M3 Max and an iPad alike and stays true as the engine gets faster.
     enum ThinkBudget: String, CaseIterable, Identifiable {
         case xs = "XS", s = "S", m = "M", l = "L", xl = "XL"
         var id: String { rawValue }
@@ -791,15 +601,13 @@ import UniformTypeIdentifiers
 
     private static func tgKey(_ name: String) -> String { "tg.\(name)" }
 
-    // Measured decode rate for the current model on THIS device; a
-    // conservative 20 t/s until the first turn records one.
+    // A conservative 20 t/s until the first turn records one.
     var measuredTG: Double {
         let v = UserDefaults.standard.double(forKey: Self.tgKey(modelName))
         return v > 0 ? v : 20
     }
 
-    // EMA so one outlier turn (a tool-heavy round, a cold start) does not
-    // yank the budget around.
+    // EMA, so one outlier turn cannot yank the budget around.
     private func recordTG(_ tg: Double) {
         if tg > 0 {
             let old = UserDefaults.standard.double(
@@ -809,8 +617,8 @@ import UniformTypeIdentifiers
         }
     }
 
-    // The soft token cap for the current budget, rounded to 100 for display
-    // honesty; the hard runaway backstop is twice this.
+    // Rounded to 100, so the figure shown is not falsely precise. The hard
+    // runaway backstop is twice this.
     var thinkTokenCap: Int {
         let raw = thinkBudget.seconds * measuredTG
         return max(200, Int((raw / 100).rounded()) * 100)
@@ -819,50 +627,33 @@ import UniformTypeIdentifiers
     private let log = Logger(subsystem: "io.github.leok7v.gadeon",
                               category: "ui")
     private var chat: AneChat?
-    // The unified-engine (ternary GGUF) backend, set instead of `chat` when a
-    // GGUF model is active: a GPU MetalBackend driving the SAME ChatSession. Its
-    // template / vocab / sampler recs all come from the one GGUF. Vision and the
-    // ANE heavy/carry compile sets do not apply (guarded by `chat` being nil).
+    // Set INSTEAD of `chat` for a GGUF model. Vision and the ANE heavy/carry
+    // sets do not apply there, which `chat` being nil is what guards.
     private var ggufBackend: (any AgentBackend)?
     private var ggufTemplate = ""
     private var ggufVocabCount = 0
-    // The multi-turn chat loop (jinja chat_template + O(delta) bookmark
-    // continuation). One per conversation; recreated on model switch, reset on
-    // New Chat.
+    // One per conversation: recreated on model switch, reset on New Chat.
     private var session: ChatSession?
-    // The in-flight generation, held so Stop can cancel it. Cancelling ends
-    // the reply stream (the decode loop breaks on Task.isCancelled) and the
-    // send task clears busy. Generation is otherwise unbounded (runs to EOS).
+    // Held so Stop can cancel it. Generation is otherwise unbounded.
     private var genTask: Task<Void, Never>?
     // Compiles each downloaded .mlmodelc in-process WHILE the rest of the set
-    // still streams (macOS and iOS), so the one-time "Optimizing" compile
-    // overlaps the download.
+    // still streams, so the one-time compile overlaps the download.
     private let primer = Primer()
-    // Learned prefill rate (tokens/sec) from the last turn, for the attachment
-    // time estimate; 0 until the first turn measures it (then the estimate
-    // shows a duration). Per-image vision token cost, a baseline until the first
-    // image turn learns the tower's real merged-token count.
+    // Learned from the last turn; 0 until one has measured it.
     private var lastPP = 0.0
+    // A baseline until the first image turn learns the tower's real
+    // merged-token count.
     private var perImageTokens = 256
-    // The set's sampling matrix (thinking on/off x text/vision), captured at
-    // build so makeSession can rebuild the session (New Chat) without re-reading
-    // the model directory.
+    // Captured at build, so makeSession can rebuild without re-reading the
+    // model directory.
     private var activePresets: SamplingPresets = .qwen35
-    // Wall-clock start of the in-flight download or optimize, for the live
-    // ETA.
     @ObservationIgnored private var phaseStart = Date()
-    // The projected optimize FINISH time, EMA-smoothed across the per-program
-    // estimates so it tracks BOTH directions -- a fast early phase (warm decode)
-    // must not pin it under a slow later one (cold prefill) -- while damping the
-    // per-program jitter. nil until the first estimate; reset when a build
-    // begins.
+    // EMA-smoothed across the per-program estimates so it tracks BOTH
+    // directions: a warm early phase must not pin it under a cold later one.
     @ObservationIgnored private var optimizeFinish: Date?
 
-    // EULA accepted: persist, then resolve the model. load() builds an on-disk
-    // set or surfaces the download-consent panel for an absent one. The fetch
-    // does NOT start here -- the App Store requires explicit consent, so it
-    // begins only when the user taps Download on that panel, which then overlaps
-    // the disclaimer shown next.
+    // The fetch does NOT start here. The App Store requires explicit consent,
+    // so it begins only when Download is tapped on the consent panel.
     func acceptEULA() {
         eulaAccepted = true
         UserDefaults.standard.set(true, forKey: "eulaAccepted")
@@ -874,21 +665,15 @@ import UniformTypeIdentifiers
         UserDefaults.standard.set(true, forKey: "disclaimerAccepted")
     }
 
-    // Gemma's own licence gate. Separate from the EULA and the disclaimer
-    // because it binds the user to a THIRD party's terms, and separate from
-    // the size-consent panel because agreeing to a licence and agreeing to
-    // spend 2.7 GB are different decisions.
+    // Separate from the EULA and from the size-consent panel: it binds the
+    // user to a THIRD party's terms, which is a different decision from
+    // agreeing to spend the bytes.
     var gemmaTermsAccepted = GemmaTerms.accepted
 
     func acceptGemmaTerms() {
         GemmaTerms.accept()
         gemmaTermsAccepted = true
     }
-
-    // Resolve the pinned set for `name` on disk. Present and verified -> build
-    // it straight on the ANE. Absent -> surface the download-consent panel
-    // (the app ships no weights); confirmDownload then fetches it from the Hub
-    // and builds.
 
     func load(name: String) {
         loadError = nil
@@ -909,31 +694,19 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Load a ternary GGUF on the GPU (MetalChat) off the main actor, then swap
-    // in a ChatSession over its MetalBackend. No ANE compile, no vision, no
-    // heavy/carry sets -- everything comes from the one file. Only the Sendable
-    // backend + template + vocab + sampler recs cross back to the main actor
-    // (the non-Sendable engine stays inside the backend).
+    // Only the Sendable backend, template, vocab and sampler recs cross back
+    // to the main actor; the non-Sendable engine stays inside the backend.
     private func buildGguf(name: String, path: String) {
         compiling = true
         compileDoneLoC = 0
         compileTotalLoC = 0
         phaseStart = Date()
         loadError = nil
-        // No ANE compile: the wait is a GGUF mmap + GPU upload, so the
-        // screen says Loading (indeterminate), never Optimizing.
+        // No ANE compile here: the wait is an mmap and a GPU upload.
         firstCompile = false
-        // DROP THE OUTGOING MODEL BEFORE MAPPING THE NEW ONE. Building
-        // first and assigning after -- the obvious order, and what this did
-        // -- keeps BOTH alive for the whole load: the old mmap, its Metal
-        // buffers, its towers and its session, plus everything the new one
-        // maps. Switching Bonsai (442 MB) to E2B (2.7 GB) therefore needs
-        // room for the sum, which is what jetsammed a 4 GB iPhone that had
-        // ample room for either alone.
-        //
-        // Order matters within this too: `session` retains the backend, so
-        // clearing it first is what actually lets the backend go. ARC frees
-        // on the last release, and until then the mapping stays.
+        // DROP THE OUTGOING MODEL BEFORE MAPPING THE NEW ONE, or a switch
+        // needs room for the sum of both. `session` retains the backend, so
+        // clearing it first is what actually lets the backend go.
         session = nil
         chat = nil
         media = nil
@@ -943,24 +716,17 @@ import UniformTypeIdentifiers
                         vocab: Int, presets: SamplingPresets,
                         shape: ModelShape)?
             var media: Gemma4Media? = nil
-            // Bracket the load: the DELTA is what says whether a set fits a
-            // device, and for an mmap'd GGUF most of it lands in file-backed
-            // pages rather than in the footprint jetsam counts. With the
-            // outgoing model already released, "before" is the floor the new
-            // one grows from rather than a sum of the two.
             Footprint.report("before \(name)")
             do {
                 // The FILE says which engine it needs, by its own
-                // general.architecture -- never the catalog name, which is a
+                // general.architecture. Never the catalog name, which is a
                 // label we chose.
                 if Gemma4Model.isGemma4(path: path) {
                     let c = try GemmaChat(ggufPath: path)
                     let gpu = try c.metalBackend()
                     built = (gpu, c.chatTemplate,
                              c.vocabCount, c.samplingPresets, c.shape)
-                    // Held for the session so the vision and audio towers are
-                    // built once rather than per attachment, and over the text
-                    // engine's own mapping rather than a second one.
+                    // Over the text engine's own mapping, never a second one.
                     media = c.media(ctx: gpu.ctx)
                 } else {
                     let c = try MetalChat(ggufPath: path)
@@ -969,12 +735,10 @@ import UniformTypeIdentifiers
                              c.shape)
                 }
             } catch {
-                // Say WHY. A swallowed reason here is the difference between
-                // "cannot be prepared" and a diagnosis: on a 4 GB phone the
-                // whole GGUF is wrapped in ONE bytesNoCopy MTLBuffer, and
-                // Metal's maxBufferLength is a hard per-device ceiling that
-                // a 2.67 GB set can exceed -- which is not a memory-tuning
-                // problem and cannot be inferred from a footprint log.
+                // The reason cannot be inferred from a footprint log: the
+                // whole GGUF is one bytesNoCopy MTLBuffer, and Metal's
+                // maxBufferLength is a hard per-device ceiling a large set
+                // can exceed.
                 Diag.shared.report("model prep FAILED \(name): \(error)")
                 built = nil
             }
@@ -991,14 +755,6 @@ import UniformTypeIdentifiers
                     self?.modelSupportsSoftTokens = soft
                     self?.modelShape = b.shape
                     self?.media = media
-                    // A ~479 ms main-thread stall has been logged starting
-                    // exactly here, right after "loaded <model>", and never
-                    // attributed -- the two candidates are the session build
-                    // (a jinja render for templateSupportsThinking, plus the
-                    // ChatSession init) and SwiftUI laying out the whole chat
-                    // for the first time as `compiling` clears. Both are
-                    // frame-gated, so they say nothing until one of them is
-                    // the answer.
                     Instrument.timed("makeSession") { self?.makeSession() }
                     Instrument.timed("show chat") {
                         self?.compiling = false
@@ -1013,21 +769,14 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Retry after a failed build: wipe the whole compile cache first, so a
-    // corrupt program (e.g. an OS reboot mid-compile) is thrown away and the
-    // model recompiles cleanly from scratch, in-process -- no relaunch. A
-    // truly unsupported ANE just fails again, but the button costs nothing.
+    // Wipes the whole compile cache first, so a program corrupted by an OS
+    // reboot mid-compile is thrown away rather than reloaded.
 
     func retry() {
         loadError = nil
         clearCompileCache()
         load(name: modelName)
     }
-
-    // Fetch the pinned set from the Hub (verified, atomic) with a progress
-    // report, then build it. Stored permanently in Application Support and
-    // excluded from backup, so it downloads once and later launches are
-    // offline.
 
     func confirmDownload() {
         if let name = downloadName, let src = ModelCatalog.source(name) {
@@ -1039,13 +788,13 @@ import UniformTypeIdentifiers
             phaseStart = Date()
             status = "downloading \(name)…"
             let dest = Bundle.modelStore().appendingPathComponent(name)
-            // In-place download puts files at their final (cache-keyed)
-            // paths, so the primer can compile each finished program while
-            // later files stream.
+            // In place, so files land at their final cache-keyed paths and
+            // the primer can compile each finished program while later files
+            // still stream.
             let setDir = dest.appendingPathComponent(src.revision)
             Task.detached { [weak self] in
-                // Entry snapshot before the primer's first compile, so the
-                // streamed set's programs land in its ownership claim.
+                // Snapshot BEFORE the primer's first compile, so the streamed
+                // set's programs land in its ownership claim.
                 AneCache.shared.downloadBegan()
                 var set: URL? = nil
                 var failure = "download failed, check your connection"
@@ -1060,15 +809,14 @@ import UniformTypeIdentifiers
                         }
                     }
                 } catch HubError.digest {
-                    // Repeated verification failures are corruption (a proxy,
-                    // a disk problem), not connectivity -- say so.
+                    // Corruption, not connectivity.
                     failure = "download failed verification, try again"
                 } catch {
                 }
                 await MainActor.run {
-                    // Whatever is primed is primed; from here the build
-                    // compiles the remainder itself, so the helper must not
-                    // contend for the serial ANE compiler.
+                    // The build compiles the remainder itself from here, so
+                    // the helper must not contend for the serial ANE
+                    // compiler.
                     self?.primer.cancel()
                     self?.downloading = false
                     if let self, let set {
@@ -1088,11 +836,8 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Build the engine for an on-disk set and wait for the WHOLE set (decode +
-    // batched embedding + carry prefill) to finish compiling on the ANE before
-    // enabling chat. First cold-cache launch shows "compiling on Neural
-    // Engine", blocking Send until everything is ready; a warm cache is
-    // instant.
+    // Waits for the WHOLE set to finish compiling before enabling chat: no
+    // half-compiled partial is ever served.
 
     private func build(setDir: URL, attempt: Int = 0) {
         compiling = true
@@ -1103,27 +848,22 @@ import UniformTypeIdentifiers
         activePresets = Self.presets(setDir)
         loadError = nil
         let key = Self.compiledKey(setDir)
-        // A container migration (every Xcode install / App Store update)
-        // forces a cold recompile regardless of the compiled-once flag: the
-        // e5 cache keys bind to container identity. Show the honest
-        // Optimizing copy for it, not "Loading".
+        // A container migration forces a cold recompile whatever the
+        // compiled-once flag says: the e5 cache keys bind to container
+        // identity.
         firstCompile = !UserDefaults.standard.bool(forKey: key)
             || AneCache.shared.containerMigrated()
         Task.detached { [weak self] in
-            // Entry snapshot BEFORE the first MLModel touch, so everything
-            // this build compiles lands in the set's ownership claim.
+            // Snapshot BEFORE the first MLModel touch, so everything this
+            // build compiles lands in the set's ownership claim.
             let cacheBefore = AneCache.shared.buildBegan()
-            // Fresh install: the e5 daemon has not created its cache dir yet, so
-            // a restore lands in a dir it does not trust. Compile the smallest
-            // program first so the daemon creates+owns the dir, THEN relink the
-            // shadow's inodes into it, so the real load below warm-hits them.
+            // A restore lands in a dir the e5 daemon does not trust unless it
+            // created it, so compile the smallest program first and relink
+            // the shadow's inodes only after that.
             Engine.primeCacheDir(setDir)
             AneCache.shared.restoreFromShadow()
             let total = Engine.compileTotalLoC(setDir)
             await MainActor.run { self?.compileTotalLoC = total }
-            // Each program's model.mil LoC lands here as it finishes
-            // compiling, so the Optimizing bar advances across the whole set,
-            // not just at coarse phase edges.
             let report: @Sendable (Int) -> Void = { loc in
                 Task { @MainActor in
                     self?.compileDoneLoC += loc
@@ -1146,27 +886,19 @@ import UniformTypeIdentifiers
             }
             if let built {
                 do {
-                    // Compile the WHOLE model before enabling chat: decode, then
-                    // the heavy embed + one-block carry sets. Any failure is
-                    // fatal -- no half-compiled partial -- so a corrupt program
-                    // hits the failure view and Try Again clears the cache and
-                    // recompiles. A fresh install can afford the splash.
                     try await built.engine.warmup()
                     try await built.loadHeavy()
                     try await built.loadCarry()
-                    // Autodetect the MTP self-spec drafter: loads it only if the
-                    // set ships it, silent no-op otherwise (plain decode).
+                    // A silent no-op unless the set ships the drafter.
                     await built.loadMTP()
                     // The tower compiled during essential load; drop its
-                    // residency so text-only serving does not hold it (an image
-                    // turn reloads it warm).
+                    // residency so text-only serving does not hold it.
                     await built.engine.offloadVision()
                     AneCache.shared.buildEnded(setDir: setDir,
                                                before: cacheBefore)
                     await MainActor.run {
-                        // Only the first (cold) compile times the real
-                        // optimize; a warm relaunch is instant and must not
-                        // overwrite it.
+                        // Only a COLD compile times the real optimize; a warm
+                        // relaunch is instant and must not overwrite it.
                         if let self, self.firstCompile {
                             Self.saveSeconds("optimize", self.modelName,
                                 Date().timeIntervalSince(self.phaseStart))
@@ -1187,10 +919,9 @@ import UniformTypeIdentifiers
         }
     }
 
-    // A build that failed to load: in hardlink cache mode a relinked bundle may
-    // be corrupt or stale, so purge this set's cache + shadow and recompile
-    // ONCE (attempt caps the retry, so a genuine unsupported-device failure
-    // still surfaces). Otherwise the failure view + Try Again.
+    // A relinked bundle may be corrupt or stale, so the cache and shadow are
+    // purged and rebuilt ONCE. `attempt` caps that, so a genuine
+    // unsupported-device failure still surfaces.
     private func buildFailed(_ setDir: URL, _ attempt: Int) {
         if AneCache.cacheMode == .hardlink, attempt == 0 {
             AneCache.shared.purgeSet(setDir)
@@ -1203,12 +934,10 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Persistent "already compiled once" key. The {sha} leaf identifies a
-    // downloaded set; the mf0 graph .mil size is folded in so a re-emitted
-    // bundled graph (Local debug) reads as a fresh compile, not a warm load;
-    // the OS version is folded in because the e5 compile cache is keyed by OS
-    // build -- after an OS update every model recompiles from scratch, and the
-    // "Optimizing, this takes a while" screen must say so again.
+    // Three things are folded in and each is load-bearing: the {sha} leaf
+    // identifies the set, the mf0 graph's .mil size makes a re-emitted graph
+    // read as a fresh compile, and the OS version because the e5 cache is
+    // keyed by OS build, so an update recompiles everything.
 
     private static func compiledKey(_ setDir: URL) -> String {
         let n = Engine.programCount(setDir)
@@ -1221,10 +950,8 @@ import UniformTypeIdentifiers
             + ".\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"
     }
 
-    // Switch the active model (macOS picker). A downloaded set switches
-    // straight away; an un-downloaded one surfaces the consent panel WITHOUT
-    // tearing down the current model, so Cancel returns to it. No-op mid-reply
-    // / same model.
+    // An un-downloaded set surfaces the consent panel WITHOUT tearing down
+    // the current model, so Cancel returns to it.
 
     func switchModel(_ name: String) {
         if name != modelName, !busy, Models.all.contains(name) {
@@ -1238,11 +965,9 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Cancel a switch to an un-downloaded model: dismiss the consent panel. When
-    // a model is loaded, it was never torn down, so the app returns to it. At
-    // STARTUP the persisted choice may be un-downloaded with nothing loaded --
-    // so if a downloaded set exists (e.g. the 0.8B), switch to it and load it,
-    // rather than stranding the user on a mandatory download with no way back.
+    // At STARTUP the persisted choice may be un-downloaded with nothing
+    // loaded, so a set already on disk is what keeps Cancel from stranding
+    // the user on a mandatory download.
 
     func cancelDownload() {
         let fallback = ready ? nil : downloadedFallback()
@@ -1254,38 +979,27 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Whether the download screen's Cancel has somewhere to go: back to a loaded
-    // model, or to a downloaded set on disk. False only on the mandatory
-    // first-run download (nothing on disk yet), which stays uncancellable.
-
     var canCancelDownload: Bool { ready || downloadedFallback() != nil }
-
-    // A downloaded set to fall back to, preferring this device's start model,
-    // else any set on disk that it is actually offered. nil when nothing is
-    // downloaded.
 
     private func downloadedFallback() -> String? {
         isOnDisk(Models.start)
             ? Models.start : Models.all.first { isOnDisk($0) }
     }
 
-    // Commit to `name`: tear down the current engine + conversation and make
-    // it active. Taken only when a switch is actually chosen (a downloaded set
-    // or a confirmed download), never while the consent panel is still
-    // cancellable.
+    // Tears down the current engine and conversation, so it is taken only
+    // when a switch is actually chosen, never while the consent panel is
+    // still cancellable.
 
     private func commitSwitch(_ name: String) {
         genTask?.cancel()
-        // A cook still running on the outgoing model's engine would hold that
-        // whole mapping alive, and keep the GPU busy, for as long as it takes
-        // to finish work whose result is about to be discarded.
+        // A cook still running on the outgoing engine would hold that whole
+        // mapping alive for work whose result is about to be discarded.
         session?.requestStop()
         primer.cancel()
         chat = nil
         ggufBackend = nil
         session = nil
-        // Pending images belong to the OLD model's vision path; the new one
-        // may not have eyes at all. The capability re-probes after build.
+        // The new model may have no eyes at all; both re-probe after build.
         modelSupportsVision = false
         modelSupportsSoftTokens = false
         modelShape = nil
@@ -1316,18 +1030,13 @@ import UniformTypeIdentifiers
         return result
     }
 
-    // Settings > Models: per-model disk state + selective delete / download.
-    // diskRevision ticks on a delete so the pane re-reads the disk (isOnDisk
-    // reads no observable state).
+    // Ticks on a delete, because isOnDisk reads no observable state and the
+    // pane would otherwise not re-read the disk.
     private(set) var diskRevision = 0
 
     func isDownloaded(_ name: String) -> Bool { isOnDisk(name) }
 
-    // Delete a downloaded set to free its disk space; it can be downloaded
-    // again. The ACTIVE model is not deletable (the running engine mmaps it).
-    // The compiled-once flags go with it (every size/OS variant for the sha),
-    // so a re-download presents as a fresh install -- the Optimizing screen,
-    // not a bare Loading.
+    // The ACTIVE model is not deletable: the running engine mmaps it.
     func deleteModel(_ name: String) {
         if name != modelName, !busy, !downloading {
             ChatModel.erase(name)
@@ -1335,10 +1044,9 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Everything one model owns on disk: the set, its precooked prefix, and
-    // the compiled-once flags (every size / OS variant for its sha), so a
-    // re-download presents as a fresh install -- the Optimizing screen, not a
-    // bare Loading.
+    // Everything one model owns: the set, its precooked prefix, and every
+    // size / OS variant of its compiled-once flag, so a re-download presents
+    // as a fresh install rather than a warm load.
     private static func erase(_ name: String) {
         let fm = FileManager.default
         try? fm.removeItem(
@@ -1353,17 +1061,13 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Downloaded sets this device is not offered: a choice persisted from a
-    // roomier device, or one a gating change dropped (the 0.8B on a 3 GB
-    // phone, whose Neural Engine cannot compile it). They are unreachable --
-    // absent from the picker, and Settings > Models hides itself when only
-    // one model is offered -- so without this their gigabytes have no route
-    // off the device short of a reinstall. An offered model is never touched,
-    // downloaded or not, and anything erased returns on demand.
+    // A set this device is not offered is unreachable, so its gigabytes have
+    // no route off the device short of a reinstall. Anything erased returns
+    // on demand; an offered model is never touched.
     private static func pruneUnavailable() {
         let offered = Set(Models.all)
         // Empty means the device runs nothing at all, not that every set is
-        // dead: pruning on that would wipe the store rather than one entry.
+        // dead: pruning on that would wipe the store.
         if !offered.isEmpty {
             let names = (try? FileManager.default.contentsOfDirectory(
                 atPath: Bundle.modelStore().path)) ?? []
@@ -1373,8 +1077,6 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Fetch a model from Settings: the same consent -> download -> build flow
-    // the composer picker uses (downloading implies switching to it).
     func requestDownload(_ name: String) {
         if !busy, !downloading, !isOnDisk(name),
            ModelCatalog.source(name) != nil {
@@ -1382,45 +1084,30 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Build a fresh ChatSession over the loaded model with the CURRENT system
-    // prompt and reasoning-effort. Cheap (no model recompile), so a Settings
-    // change lands on the next conversation. The engine is cleared separately
-    // (newChat resets it through the new session's backend).
-
-    // The MiniLM semantic-search model bundled inside the LLM package, if
-    // present. Best-effort: absent -> no wikipedia_query tool (the app still
-    // works, just no grounding).
+    // Best-effort: absent means no wikipedia_query tool, and the app still
+    // works without grounding.
     private static let minilmPath: String? = WikiSlugs.bundledModel?.path
 
-    // The tool runner for the current tiers. get_current_time and calculator
-    // are local, so they are offered even in airplane mode.
+    // get_current_time and calculator are local, so they are offered even in
+    // airplane mode.
     private var toolRunner: (any ToolRunner)? {
         SafeToolRunner(slugsPath: wikipedia ? ChatModel.minilmPath : nil,
                        wikipedia: wikipedia, network: webAccess)
     }
 
-    // The system prompt with the current date/time appended, so the model
-    // answers "what day is it" directly without a tool. When Web access is off,
-    // it also states that no web/Wikipedia lookup exists, so the model does not
-    // fabricate a search tool for an online-sounding question -- get_current_time
-    // stays usable. Rebuilt per session (New Chat), like the tool advertisement.
-    // Regions wholly (or predominantly) south of the equator, so the stated
-    // season flips there -- resolved from the locale, per the zero-config rule.
+    // Regions wholly or predominantly south of the equator, so the stated
+    // season flips there. Resolved from the locale rather than asked.
     private static let southernRegions: Set<String> = [
         "AU", "NZ", "AR", "CL", "UY", "PY", "BO", "PE", "BR", "ZA", "NA",
         "BW", "ZW", "ZM", "MZ", "MG", "LS", "SZ", "AO", "MW", "PG", "FJ",
         "NC", "WS", "TO", "VU", "SB",
     ]
 
-    // The system prompt SPLITS for the precooked-prefix cache: systemStable
-    // is everything whose bytes hold across sessions (persona, locale,
-    // access tier, vision) -- what ChatSession precooks; systemDynamic is
-    // the date/time tail that changes every minute and would poison the
-    // cache stamp, laid separately after a restore.
+    // The prompt SPLITS for the precooked-prefix cache. This half is
+    // everything whose bytes hold across sessions, and is what gets
+    // precooked; the date/time tail changes every minute and would poison the
+    // cache stamp, so it is laid separately after a restore.
     private var systemStable: String {
-        // The host's locale, so the model answers in the user's units (the 2B
-        // otherwise garbles C<->F) and knows the region for weather and
-        // local questions.
         let loc = Locale.current
         let region = loc.region?.identifier ?? "unknown"
         let units = loc.measurementSystem == .metric
@@ -1440,17 +1127,11 @@ import UniformTypeIdentifiers
                 + "(get_news); for anything else answer from your own "
                 + "knowledge."
         }
-        // Speech reaches the model as its OWN tower's output, but it does
-        // not know that: shown a spoken turn it reasons "I cannot process
-        // audio directly ... they have given me a transcript snippet
-        // instead", spends the reasoning budget arguing with itself, and is
-        // one step from the refusal that poisons every later turn. Asserting
-        // it up front is the lever that works -- correcting it afterwards is
-        // measured NOT to.
-        //
-        // The second sentence is the one that makes dictation a conversation:
-        // without it a spoken "how are you?" comes back transcribed rather
-        // than answered.
+        // Speech reaches the model as its own tower's output and it does not
+        // know that, so it argues itself into "I cannot process audio" and
+        // then into a refusal that poisons every later turn. Asserting this
+        // up front is the lever that works; correcting it afterwards does
+        // not.
         if canAttachAudio {
             s += "\nThe user may speak to you. Their speech reaches you "
                 + "already encoded by your own audio tower, so you hear it "
@@ -1459,9 +1140,8 @@ import UniformTypeIdentifiers
                 + "the user talking TO you -- answer them as you would the "
                 + "same words typed, and write them out only when asked to."
         }
-        // A text-tuned checkpoint with a grafted tower (the 27B) reflexively
-        // claims it cannot see images even while describing one; assert the
-        // vision channel whenever the active model actually has it.
+        // A text-tuned checkpoint with a grafted tower reflexively claims it
+        // cannot see images even while describing one.
         if canAttachImages {
             s += "\nThe user may attach images. Each is encoded by your "
                 + "vision tower and fully visible to you: describe what you "
@@ -1477,8 +1157,8 @@ import UniformTypeIdentifiers
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd hh:mm a zzz"
-        // State the season outright: a small model does not reliably infer it
-        // from the date (the 2B guessed "spring" in July).
+        // Stated outright: a small model does not reliably infer the season
+        // from a date.
         let region = Locale.current.region?.identifier ?? "unknown"
         let south = ChatModel.southernRegions.contains(region)
         let month = Calendar.current.component(.month, from: Date()) - 1
@@ -1497,9 +1177,6 @@ import UniformTypeIdentifiers
         traceFile?.append(e)
     }
 
-    // Wire the fresh session's trace into the debug array + the on-disk
-    // transcript, headed by the session's configuration. The vision
-    // capability is set BEFORE makeSession (the system prompt reads it).
     private func hookTrace() {
         traceFile?.note("=== \(modelName) thinking=\(thinkingActive) "
             + "wiki=\(wikipedia) web=\(webAccess) \(Date())")
@@ -1509,8 +1186,6 @@ import UniformTypeIdentifiers
                 Task { @MainActor in self?.recordTrace(e) }
             }
         }
-        // Endpoint diagnostics (what the search backend ACTUALLY returned)
-        // land beside the tool rounds in the debug view + transcript.log.
         Tools.setDiagSink { [weak self] msg in
             Task { @MainActor in
                 self?.recordTrace(TraceEvent(
@@ -1555,14 +1230,10 @@ import UniformTypeIdentifiers
         }
     }
 
-    // ---- precooked system-prefix cache ---------------------------------
-    // One state file per model under Caches/precook: the rendered system +
-    // tools prefix, prefilled once and restored at every session build
-    // (model load / New Chat), so TTFT skips the prefix prefill. The stamp
-    // inside the file self-invalidates when the prompt / tools tier /
-    // locale / template change; the files are also wiped outright when the
-    // user edits the system prompt (a 27B blob is ~300MB of stale bytes
-    // otherwise).
+    // One state file per model: the rendered system + tools prefix, prefilled
+    // once and restored at every session build. The stamp inside the file
+    // self-invalidates when the prompt, tools tier, locale or template
+    // change.
     private static var precookDir: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent(Bundle.main.bundleIdentifier ?? "app")
@@ -1577,10 +1248,8 @@ import UniformTypeIdentifiers
         try? FileManager.default.removeItem(at: precookDir)
     }
 
-    // Prime the fresh session from the model's precooked prefix, cooking it
-    // on a miss. primeOrCook registers as the session's priming gate, so an
-    // early user send WAITS it out (the same wait the fresh prefill would
-    // have cost) instead of interleaving with it.
+    // primeOrCook registers as the session's priming gate, so an early send
+    // WAITS it out instead of interleaving with it.
     private func primeSession(resetFirst: Bool = false) {
         if let s = session {
             let url = ChatModel.precookURL(modelName)
@@ -1590,9 +1259,6 @@ import UniformTypeIdentifiers
         }
     }
 
-    // New Chat rebuilds the session so an edited system prompt / thinking flag
-    // takes effect, then resets the engine (dropping the prior KV + GDN state).
-
     func newChat() {
         lastTurnSpoken = false
         speech.stopSpeaking()
@@ -1601,21 +1267,16 @@ import UniformTypeIdentifiers
         currentConversationId = nil
         generatedTitle = nil
         messages = []
-        // Per-conversation trace: the outgoing one is saved by commitCurrent
-        // above; the graph and debug view now belong to the fresh chat.
         traceEvents = []
         statsLabel = ""
-        // The outgoing session may still be COOKING its prefix or running a
-        // TURN, and the fresh one resets the engine they SHARE -- so both have
-        // to be off it first. Held in genTask so `busy` covers the swap: Send
-        // stays disabled until the new session is the live one.
+        // The outgoing session may still be cooking its prefix or running a
+        // turn, and the fresh one resets the engine they SHARE, so both have
+        // to be off it first. Held in genTask, so `busy` covers the swap.
         //
-        // A turn is not covered by endPriming, and assigning genTask does not
-        // end the one it replaces -- it abandons it, still running, on the
-        // engine the successor is about to reset. Cancelling alone does not
-        // land either: a Metal forward is synchronous and passes no
-        // cancellation point, so the stop FLAG is what reaches it and the
-        // await is what makes "off the engine" true rather than requested.
+        // Cancelling alone does not land: a Metal forward is synchronous and
+        // passes no cancellation point, so the stop FLAG is what reaches it
+        // and the await is what makes "off the engine" true rather than
+        // merely requested.
         let outgoing = session
         let running = genTask
         genTask = Task { @MainActor in
@@ -1631,11 +1292,9 @@ import UniformTypeIdentifiers
         }
     }
 
-    // After the first substantive exchange, generate a short title on the
-    // loaded model and re-commit with it. Routed through genTask so the
-    // composer is disabled for its ~1s: makeTitle holds the engine, and a
-    // concurrent send would interleave two turns on one KV. Once per
-    // conversation.
+    // Routed through genTask so the composer is disabled while it runs:
+    // makeTitle holds the engine, and a concurrent send would interleave two
+    // turns on one KV.
     private func maybeGenerateTitle() {
         let chars = messages.reduce(0) { sum, m in sum + m.text.count }
         let worth = !readOnly && generatedTitle == nil && genTask == nil
@@ -1652,19 +1311,16 @@ import UniformTypeIdentifiers
         }
     }
 
-    // The toolbar gear and ladybug TOGGLE their views: a second click on
-    // the button whose view is up acts as Done, and opening one dismisses
-    // the other (the routing shows debug first, so a stale flag would
-    // shadow the requested view).
+    // Opening one dismisses the other: the routing shows debug first, so a
+    // stale flag would shadow the requested view.
 
     func toggleSettings() {
         showSettings.toggle()
         if showSettings { showDebug = false }
     }
 
-    // Command-comma OPENS, where the gear toggles: the shortcut is a request
-    // for Settings, and a second press closing them again would surprise
-    // anyone who pressed it twice not knowing whether the first took.
+    // OPENS where the gear toggles: a second Command-comma must not close
+    // what the first one asked for.
 
     func openSettings() {
         showDebug = false
@@ -1676,7 +1332,7 @@ import UniformTypeIdentifiers
         if showDebug { showSettings = false }
     }
 
-    // Flip reasoning-effort on the live session; it takes effect next turn.
+    // Takes effect next turn.
 
     func toggleThinking() {
         if modelSupportsThinking {
@@ -1688,26 +1344,17 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Ask the running turn to end reasoning at the next token; the session
-    // ignores it once the answer has begun, so this only forwards.
-
     func quickAnswer() {
         let s = session
         Task { await s?.requestQuickAnswer() }
     }
 
-    // The composer's [+] / Photos / drop hand image bytes here; the next send
-    // runs the vision path. `at` is the UTF-16 offset the inline reference is
-    // inserted at (the caret). Adds one image (up to maxImages), each a
-    // uniquely-named inline reference, like a doc.
+    // `at` is the UTF-16 offset the inline reference is inserted at.
     func attachImage(_ data: Data, name: String, at offset: Int) {
-        // Skip an exact-content duplicate (same file dropped twice) -- it just
-        // wastes context/RSS. A text-only model attaches nothing (the button
-        // is disabled too; this covers drops and pickers).
         let dup = attachedImages.contains { $0.data == data }
         if canAttachImages, attachedImages.count < Self.maxImages, !dup {
             let unique = uniqueName(name)
-            // 96px covers a ~24pt chip at up to 3x; decoded straight to size, so
+            // 96px covers a ~24pt chip at 3x, decoded straight to size so
             // even a huge source never materializes its full bitmap.
             let thumb = VisionPreprocess.thumbnail(data, maxPx: 96)
             attachedImages.append(
@@ -1716,16 +1363,14 @@ import UniformTypeIdentifiers
         }
     }
 
-    // A dropped sound or video. Only the URL is kept -- the decode happens at
-    // send, so a long video never sits in memory waiting to be asked about.
+    // Only the URL is kept: the decode happens at send, so a long video never
+    // sits in memory waiting to be asked about.
     func attachClip(_ url: URL, isVideo: Bool, at offset: Int) {
         let allowed = isVideo ? canAttachVideo : canAttachAudio
         let dup = attachedClips.contains { c in c.url == url }
-        // ONE video per turn, where the general clip cap is two. A video is
-        // 32 frames through the tower and the largest single thing a turn can
-        // carry -- two of them is a minute of encoding before a token, and
-        // the composer can only show one of them being looked at anyway.
-        // Sound is unaffected: a clip plus its own soundtrack still fits.
+        // ONE video per turn, where the general clip cap is two: a video is
+        // 32 frames through the tower, and the composer can only show one of
+        // them being looked at anyway.
         let seenVideo = isVideo
             && attachedClips.contains { c in c.isVideo }
         if allowed, attachedClips.count < Self.maxClips, !dup, !seenVideo {
@@ -1737,12 +1382,9 @@ import UniformTypeIdentifiers
         }
     }
 
-    // A dropped .txt/.md: keep the content, add a uniquely-named inline
-    // reference (so two same-named files stay distinct) at `at`.
     func attachDoc(_ name: String, _ content: String, at offset: Int,
                    from url: URL? = nil) {
         let capped = Self.capDoc(content, docBudget.bytes)
-        // Skip an exact-content duplicate (same file dropped twice).
         if !attachedDocs.contains(where: { $0.content == capped }) {
             let unique = uniqueName(name)
             attachedDocs.append(
@@ -1752,18 +1394,11 @@ import UniformTypeIdentifiers
         }
     }
 
-    // A PDF or an office file becomes Markdown BEFORE it is attached, so
-    // everything downstream sees exactly what a dropped .md gives and nothing
-    // else in the turn has to know where the text came from.
-    //
-    // The file is COPIED first, and the copy is what the transcript keeps.
-    // Reading is seconds of work on anything large, so it happens off the
-    // main actor, and neither the security scope a drop holds nor the
-    // original path outlives this turn -- a sandboxed app cannot reopen a
-    // dropped URL later, so a transcript pointing at one would offer a
-    // document it could not show. The reference appears when the text lands
-    // rather than at the moment of the drop, which is also when a user would
-    // have got it had they waited.
+    // Markdown BEFORE it is attached, so nothing downstream has to know where
+    // the text came from. The file is COPIED first and the copy is what the
+    // transcript keeps: neither the security scope a drop holds nor the
+    // original path outlives this turn, and a sandboxed app cannot reopen a
+    // dropped URL later.
     private func convertDoc(_ from: URL, _ name: String) {
         if let kept = ChatModel.keep(from, name) {
             converting += 1
@@ -1784,11 +1419,8 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Reading a document is the SLOWEST way a turn can gain an attachment --
-    // a scan with no text layer goes through recognition page by page -- and
-    // it was the one that said nothing, where an image or a clip each names
-    // itself. Truncation is called out because the model then saw a prefix of
-    // the document and nothing downstream says so.
+    // Truncation is called out because the model then saw a PREFIX of the
+    // document, and nothing downstream says so.
     private static func read(_ name: String, _ text: String?,
                              _ since: Date, _ limit: Int) {
         let bytes = text?.utf8.count ?? 0
@@ -1798,12 +1430,8 @@ import UniformTypeIdentifiers
             cut, Date().timeIntervalSince(since)))
     }
 
-    // Attached files live beside the conversations that cite them, under the
-    // Data container's Application Support -- the same store the weights use,
-    // and preserved across upgrades where Caches is purgeable. The name is
-    // unique-prefixed so two files called report.pdf cannot collide.
-    //
-    // Swept by sweepAttachments whenever a conversation is deleted.
+    // Application Support, not Caches: it is preserved across upgrades where
+    // Caches is purgeable.
     static let attachments: URL = {
         let fm = FileManager.default
         let support = (try? fm.url(for: .applicationSupportDirectory,
@@ -1815,10 +1443,9 @@ import UniformTypeIdentifiers
         return dir
     }()
 
-    // Kept under a directory of its own rather than behind a unique PREFIX,
-    // so the file keeps the name it arrived with. The prefix would show in
-    // Quick Look's own title as well as in the transcript, and a viewer
-    // naming a document by a UUID is telling the reader nothing.
+    // A directory of its own rather than a unique PREFIX, so the file keeps
+    // the name it arrived with: a prefix would show in Quick Look's own
+    // title.
     private static func keep(_ from: URL, _ name: String) -> URL? {
         let fm = FileManager.default
         let dir = attachments.appendingPathComponent(UUID().uuidString,
@@ -1838,9 +1465,8 @@ import UniformTypeIdentifiers
         }.value
     }
 
-    // What the transcript keeps of a turn's documents: the file to offer back
-    // and the size of the TEXT taken from it. A doc whose file could not be
-    // kept is dropped rather than shown as a chip that opens nothing.
+    // A doc whose file could not be kept is dropped rather than shown as a
+    // chip that opens nothing.
     private static func refs(_ docs: [Doc]) -> [DocRef] {
         docs.compactMap { doc in
             doc.url.map { url in
@@ -1850,14 +1476,10 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Bound a doc to the budget so one file cannot balloon the prompt (the
-    // aggregate warning is separate).
-    //
     // Cut on BYTES, backed off to the last whole character. Counting
-    // Characters instead lets a document of multi-byte text through at
-    // several times the stated bound, and a byte prefix on its own can land
-    // inside a scalar, which String refuses to make -- so the loop steps back
-    // at most three bytes to the nearest boundary.
+    // Characters would let multi-byte text through at several times the
+    // bound, and a byte prefix alone can land inside a scalar, which String
+    // refuses to make -- hence the step back of at most three bytes.
     private static func capDoc(_ content: String, _ limit: Int) -> String {
         var out = content
         if content.utf8.count > limit {
@@ -1897,10 +1519,8 @@ import UniformTypeIdentifiers
         clampCaret()
     }
 
-    // A reference edited out of the prompt drops its attachment (the chips are
-    // driven by these, so the chip goes too), and any broken "@name" remnant is
-    // scrubbed so no orphan text is left. Called on every input change; the
-    // scrub is idempotent, so a self-triggered re-run settles.
+    // Called on every input change. The scrub is idempotent, so the
+    // re-entrant run it triggers settles.
     func reconcileAttachments() {
         let live = Set(AttachmentRefs.names(in: input))
         for doc in attachedDocs where !live.contains(doc.name) {
@@ -1928,8 +1548,8 @@ import UniformTypeIdentifiers
         caret = max(0, min(caret, input.utf16.count))
     }
 
-    // A reference name unique across BOTH docs and images, so two attachments
-    // (even a doc and image sharing a filename) stay distinct inline refs.
+    // Unique across docs, images AND clips: two attachments sharing a
+    // filename must stay distinct inline references.
     private func uniqueName(_ name: String) -> String {
         var candidate = name
         var n = 2
@@ -1945,15 +1565,11 @@ import UniformTypeIdentifiers
     static let imageExts: Set<String> =
         ["png", "jpg", "jpeg", "heic", "heif", "gif", "webp", "bmp", "tiff"]
     static let docExts: Set<String> = ["txt", "md", "markdown", "text"]
-    // Read into Markdown rather than read as text. They land in the same
-    // place a .md does, so the cap and the send path are already right.
+    // Read into Markdown rather than read as text.
     static let convertExts: Set<String> = Set(["pdf"] + Docs2md.readable)
-    // Sound and video are recognised by the SYSTEM's own type conformance,
-    // not by a list here: the file panel already filters on UTType.audio /
-    // .movie, so an extension list can only disagree with it -- and it did,
-    // silently swallowing the ogg and opus the panel happily offered.
-    // Whatever the system calls audio gets through, and the DECODE is the
-    // arbiter, failing at send with a real message.
+    // The SYSTEM's own type conformance, never a list here: the file panel
+    // filters on UTType.audio / .movie, so an extension list could only
+    // disagree with what it offers. The DECODE is the arbiter.
     static func clipKind(_ url: URL) -> Bool? {
         let type = UTType(filenameExtension:
                             url.pathExtension.lowercased())
@@ -1967,15 +1583,9 @@ import UniformTypeIdentifiers
     }
     static let maxDocs = 6
     static let maxImages = 4
-    // One clip is already hundreds to thousands of soft tokens; several would
-    // bury the question under them.
+    // One clip is already hundreds to thousands of soft tokens.
     static let maxClips = 2
-    // How much text a document may contribute. A dropped note and an
-    // attached PDF land in the same place, but they are not the same act:
-    // a note is incidental where a document someone chose to attach IS the
-    // subject of the turn, so the default is well past the 8 KB that suited
-    // the first. Roughly 4 bytes to a token, so M is around 8,000 of them --
-    // which every model here handles, given the time to prefill it.
+    // Roughly 4 bytes to a token, so M is around 8,000 of them.
     enum DocBudget: String, CaseIterable, Identifiable {
         case xs = "XS", s = "S", m = "M", l = "L", xl = "XL"
         var id: String { rawValue }
@@ -1999,14 +1609,8 @@ import UniformTypeIdentifiers
             UserDefaults.standard.set(docBudget.rawValue, forKey: "docBudget")
         }
     }
-    // Warn once the pending attachments cross this rough prefill-token estimate
-    // (a few thousand tokens is a noticeable ingest).
     static let warnTokens = 4000
 
-    // A drop: each image becomes a vision attachment (up to maxImages), each
-    // .txt/.md a doc attachment (up to maxDocs), each inserted as an inline
-    // reference at `offset` (the caret) and advancing it. Reads happen off the
-    // URLs here (macOS: the user-selected-files entitlement covers drops).
     func handleDrop(_ urls: [URL], at offset: Int) {
         caret = max(0, min(offset, input.utf16.count))
         var refused: [String] = []
@@ -2030,11 +1634,9 @@ import UniformTypeIdentifiers
             } else if let isVideo = Self.clipKind(url) {
                 attachClip(url, isVideo: isVideo, at: caret)
             }
-            // Nothing appeared, so the drop was refused somewhere -- an
-            // unreadable type, a model that cannot take this kind, or a full
-            // slate. Any of them looked identical before: silence. A file
-            // still being read counts as accepted, or every convertible drop
-            // would report itself refused a second before it arrives.
+            // A file still being READ counts as accepted, or every
+            // convertible drop reports itself refused a second before it
+            // arrives.
             let after = attachedImages.count + attachedDocs.count
                 + attachedClips.count + converting
             if after == before { refused.append(ext.isEmpty ? "file" : ext) }
@@ -2043,9 +1645,6 @@ import UniformTypeIdentifiers
         if !refused.isEmpty { flashHUD(refusedText(refused)) }
     }
 
-    // Names the FIRST reason that fits, because a drop of several files
-    // usually fails for one shared reason and a list of every kind would say
-    // less than one sentence does.
     private func refusedText(_ kinds: [String]) -> String {
         let what = Set(kinds).sorted()
             .map { k in "." + k }.joined(separator: " ")
@@ -2063,11 +1662,9 @@ import UniformTypeIdentifiers
         return out
     }
 
-    // The prompt to send: each inline doc reference is replaced in place by that
-    // file's fenced content (markdown-fenced so it does not bleed into chat
-    // markup); the image reference is dropped (the image goes via the vision
-    // path); stray sentinels are stripped. Both paths multi-block, so a big doc
-    // is fine, bounded by the model context + KV RAM.
+    // Each doc reference is replaced in place by that file's FENCED content,
+    // so it cannot bleed into the chat markup; an image or clip reference is
+    // dropped, since those ride their own path.
     private func promptFor(_ raw: String) -> String {
         AttachmentRefs.substitute(raw) { name in
             var out = "@\(name)"
@@ -2086,12 +1683,9 @@ import UniformTypeIdentifiers
         }
     }
 
-    // ---- dictation ------------------------------------------------------
-    // The mic gates what it hears (SpeechGate) and only the speech becomes an
-    // attachment: a session that recorded the clock would spend most of its
-    // context on room tone at 25 soft tokens a second. Each utterance is one
-    // span and the whole session rides ONE turn, which is the shape a long
-    // file already proved.
+    // Only the SPEECH becomes an attachment: room tone costs 25 soft tokens a
+    // second. Each utterance is one span and the whole session rides one
+    // turn.
 
     @ObservationIgnored private var mic: Microphone?
     @ObservationIgnored private var gate: SpeechGate?
@@ -2099,30 +1693,22 @@ import UniformTypeIdentifiers
     @ObservationIgnored private var rateInUse: Double = 1
     @ObservationIgnored private var endOfTurn: Task<Void, Never>?
     @ObservationIgnored private var micPhrases: Task<Void, Never>?
-    // Quiet after the last utterance CLOSED that means "I am done talking to
-    // you", as against the 700 ms inside SpeechGate that only means "that was
-    // a sentence". The two are different questions and this is the one the
-    // speaker cannot answer with a pause -- so it is deliberately long
-    // enough to think in: with the gate's own hangover ahead of it, sending
-    // costs about 2.2 s of real silence.
+    // "I am done talking to you", as against the 700 ms inside SpeechGate
+    // that only means "that was a sentence". Long enough to think in: with
+    // the gate's own hangover ahead of it, sending costs about 2.2 s of real
+    // silence.
     private static let endOfTurnSilence = 1.5
 
-    // A second tap stops and sends; the button reads as state either way.
     func voice() {
         if listening { endListening() } else { beginListening() }
     }
 
     private func beginListening() {
-        // BARGE-IN. Opening the mic silences the reply and nothing else: the
-        // turn keeps generating, so interrupting costs the listener only the
-        // audio they had already decided not to hear. It also has to happen
-        // BEFORE the input is claimed -- on iOS the record category makes
+        // BEFORE the input is claimed: on iOS the record category makes
         // output silent, and a player left running into that never finishes.
         speech.stopSpeaking()
-        // Still gated on !busy: one session drives one turn, so the mic can
-        // only open once generation has ended. In practice the voice runs
-        // several times longer than the decode, so an interruption during
-        // reading finds the turn already finished.
+        // One session drives one turn, so the mic opens only once generation
+        // has ended.
         if let media, ready, !busy {
             let rate = media.audioSampleRate
             rateInUse = rate
@@ -2161,27 +1747,22 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Stop, take what was said, and send it as a turn. Nothing said means
-    // nothing sent -- a span with no speech in it comes back as invented
-    // speech, so silence must reach neither the tower nor the transcript.
-    // Send when the speaker stops for long enough, so a dictated turn needs
-    // one tap rather than two. The tap remains, and sends at once -- waiting
-    // out a timeout you have already decided the end of is its own annoyance.
+    // Silence must reach neither the tower nor the transcript: a span with no
+    // speech in it comes back as INVENTED speech.
     private func watchForEndOfTurn() {
         endOfTurn?.cancel()
         var ticks = 0
         endOfTurn = Task { @MainActor in
             while listening && !Task.isCancelled {
-                // Fast enough that the ring tracks a syllable; the gate's own
+                // Fast enough that the ring tracks a syllable. The gate's own
                 // hop is 20 ms, so nothing here is the limiting factor.
                 try? await Task.sleep(for: .milliseconds(60))
                 heardSeconds = heard.seconds
                 hearingSpeech = gate?.hearing ?? false
                 speechLevel = Double(gate?.level ?? 0)
                 // A gate that opens and never closes produces no utterance,
-                // so the stop line that would explain it never gets written
-                // either. One line a second while the mic is open is the only
-                // way to see the run from outside.
+                // so the stop line that would explain it is never written
+                // either.
                 ticks += 1
                 if ticks % 16 == 0, let gate {
                     Diag.shared.report(String(
@@ -2221,18 +1802,11 @@ import UniformTypeIdentifiers
         hearingSpeech = false
         speechLevel = 0
         let said = heard.take()
-        // Report the SAMPLE count and the bar the gate was holding, not just
-        // the verdict: every way this goes wrong looks the same from outside.
-        // No audio at all is a microphone that never opened (a missing
-        // sandbox entitlement does exactly that, silently); all of it as
-        // speech is a background measured too low; none of it, in a room that
-        // was talking, is one measured too high.
         let secs = Double(heard.samples) / max(rateInUse, 1)
-        // The PEAK is what separates the two silent failures from each other.
-        // A dead session and a quiet room both come back as "nothing was
-        // said"; only an amplitude tells them apart, and an exact zero peak
-        // over tens of seconds is not a room, it is an input that was never
-        // really running.
+        // Every way this goes wrong looks the same from outside, so the line
+        // carries the sample count, the bar and the PEAK: a dead input and a
+        // quiet room both come back as "nothing was said", and only an
+        // amplitude tells them apart.
         Diag.shared.report(String(
             format: "[mic] stopped: %.1fs captured, %d utterance(s), "
                 + "%.1fs of speech, bar %.5f, peak %.6f, rms %.6f, %@",
@@ -2243,45 +1817,27 @@ import UniformTypeIdentifiers
             flashHUD(secs < 0.5 ? "No audio from the microphone"
                                 : "Nothing was said")
         } else {
-            // The one gap in the whole flow with nothing in it: the mic has
-            // closed, the towers have not run, and the transcript is still
-            // the previous turn. A speaker who has just finished a sentence
-            // reads that silence as not having been heard -- so this answers
-            // BEFORE the working phrases start narrating.
+            // The one gap with nothing in it: the mic has closed, the towers
+            // have not run, and the transcript is still the previous turn.
             flashHUD(Whimsical.current(.heard, hold: 0), prominent: true,
                      seconds: 2)
             sendSpoken(said)
         }
     }
 
-    // Stop the in-flight generation (the Send button shows Stop while busy).
-    // The engine stop flag is the reliable lever: the decode loop polls it and
-    // ends even when AsyncStream cancellation does not propagate to the
-    // producer. Cancelling the task is belt-and-suspenders. The partial answer
-    // and state stay intact, so the conversation continues normally on the
-    // next turn.
-
     func stop() {
         speech.stopSpeaking()
         genTask?.cancel()
-        // The engine stop flag (raised through the session's active backend) is
-        // the reliable lever: nonisolated, so it lands even while a synchronous
-        // forward holds the ChatSession/engine -- prefill rolls the turn back, a
-        // decode-phase Stop keeps the partial answer. Covers BOTH the CoreML
-        // (Engine actor) and Metal (MetalEngine, no actor hop) backends, where
-        // task cancellation alone does not reliably reach the Metal forward.
+        // The reliable lever, and nonisolated, so it lands even while a
+        // synchronous forward holds the engine. Task cancellation alone does
+        // not reach the Metal forward.
         session?.requestStop()
     }
 
-    // Destructive reset (Option+Command on macOS / 3s long-press on iOS):
-    // forget the license acceptance and the model choice, delete every
-    // downloaded set and the compile cache, then quit -- so the next launch
-    // re-shows the disclaimer and re-downloads the 0.8B fallback from scratch.
-
     func factoryReset() {
-        // The alert promises ALL settings go: wipe the whole persistent
-        // domain (system prompt, view toggles, timing keys, ...), not a
-        // hand-picked list that drifts as settings are added.
+        // The alert promises ALL settings go, so the whole persistent domain
+        // goes rather than a hand-picked list that drifts as settings are
+        // added.
         let d = UserDefaults.standard
         if let id = Bundle.main.bundleIdentifier {
             d.removePersistentDomain(forName: id)
@@ -2289,8 +1845,7 @@ import UniformTypeIdentifiers
         clearCompileCache()
         ChatModel.wipePrecook()
         try? FileManager.default.removeItem(at: Bundle.modelStore())
-        // The cache keeper's claims + snapshot go with the cache they
-        // describe.
+        // The keeper's claims go with the cache they describe.
         if let support = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask).first {
             try? FileManager.default.removeItem(
@@ -2299,23 +1854,19 @@ import UniformTypeIdentifiers
         quitApp()
     }
 
-    // Shown when the on-device build fails. Try Again wipes the cache and
-    // recompiles; a persistent failure means the ANE is too old for the graph.
     static let prepFailed = "This model could not be prepared. Try Again "
         + "clears the compile cache and recompiles; if it keeps failing, this "
         + "device's Neural Engine is likely unsupported."
 
-    // Delete the ANE compile cache AND the "already compiled" flags, so the
-    // next build is a clean cold recompile (shown as "Optimizing"). Recovers
-    // from a corrupt cache -- e.g. an OS reboot mid-compile -- and backs both
-    // the factory reset and Try Again. Safe to call with no model loaded.
+    // The compiled-once FLAGS go with the cache, or the next build reads as
+    // warm and shows Loading over a cold recompile.
     private func clearCompileCache() {
         let d = UserDefaults.standard
         for k in d.dictionaryRepresentation().keys
             where k.hasPrefix("compiled.") {
             d.removeObject(forKey: k)
         }
-        // Flush now: iOS quitApp is exit(0), a hard exit that never flushes.
+        // iOS quitApp is exit(0), a hard exit that never flushes.
         d.synchronize()
         let fm = FileManager.default
         if let caches = fm.urls(for: .cachesDirectory,
@@ -2333,10 +1884,9 @@ import UniformTypeIdentifiers
     func send() {
         let attached = !attachedImages.isEmpty || !attachedClips.isEmpty
         if attached, ready, !busy {
-            // A SIBLING rather than a flag on sendVision: that path speaks
-            // MLMultiArray tiles on a square grid at one token rate, and a
-            // native-resolution tower has none of those -- its count follows
-            // each picture's aspect ratio and is known only once it has run.
+            // A SIBLING of sendVision rather than a flag on it: that path
+            // speaks MLMultiArray tiles on a square grid at one token rate,
+            // and a native-resolution tower has none of those.
             if modelSupportsSoftTokens {
                 sendSoft()
             } else {
@@ -2347,22 +1897,12 @@ import UniformTypeIdentifiers
         }
     }
 
-    // The soft-token turn: encode every attachment through the model's own
-    // towers, then hand ChatSession the parts and their spans. The order the
-    // user attached them IS the order they reach the template, so a question
-    // can refer to them positionally.
     // What to ask when a turn carries attachments and no typed question.
     //
-    // Each phrasing is MEASURED (3 runs, reasoning on and off), not chosen for
-    // style. Ask about PERCEPTION, never about the medium: "write out what you
-    // hear" is answered every time, while "transcribe any speech in the audio"
-    // is refused every time with reasoning on -- naming the audio makes the
-    // model hunt for a file it was never given and conclude none exists. It
-    // has the sound either way; only the question differs.
-    //
-    // The picture wording is insensitive to this and video is too, so the
-    // perception form is used throughout for one voice rather than because
-    // each kind demands it.
+    // Ask about PERCEPTION, never about the medium. "Write out what you hear"
+    // is answered; "transcribe any speech in the audio" is refused, because
+    // naming the audio sends the model hunting for a file it was never given.
+    // It has the sound either way; only the question differs.
     private static func softDefaultPrompt(_ parts: [ContentPart]) -> String {
         var images = 0, videos = 0, sounds = 0
         for part in parts {
@@ -2435,8 +1975,8 @@ import UniformTypeIdentifiers
         }
     }
 
-    // A dictated turn: the gate already decided what is speech, so each
-    // utterance goes to the tower as it stands and no clip is re-cut.
+    // The gate already decided what is speech, so each utterance goes to the
+    // tower as it stands and no clip is re-cut.
     private func sendSpoken(_ said: [SpeechGate.Utterance]) {
         if let media {
             let secs = said.reduce(0.0) { sum, u in sum + u.seconds }
@@ -2450,19 +1990,14 @@ import UniformTypeIdentifiers
         }
     }
 
-    // What a DICTATED turn asks, as against an attached clip's "write out
-    // what you hear". Someone holding the microphone is talking, not filing a
-    // transcription job, and the default that suits a dropped file answered a
-    // spoken "how are you?" by repeating it back.
-    //
-    // It names no medium, deliberately: asking for "the audio" sends this
-    // model hunting for a file and it concludes none exists (measured 0/3
-    // against 3/3 for a perception-shaped ask).
+    // Distinct from an attached clip's "write out what you hear": someone
+    // holding the microphone is talking, not filing a transcription job. It
+    // names no medium, for the same reason softDefaultPrompt does not.
     private static let spokenPrompt = "Reply to what I just said."
 
     // One soft-token turn, however its spans were produced: the attachment
-    // path encodes files, dictation encodes utterances, and everything from
-    // the bubbles to the rollback is the same afterwards.
+    // path encodes files, dictation encodes utterances, and everything after
+    // that is the same.
     private func softTurn(
         display: String, typed: String, previews: [CGImage],
         films: [URL] = [], papers: [DocRef] = [], labelled: Bool = true,
@@ -2503,11 +2038,10 @@ import UniformTypeIdentifiers
                                                hard: thinkTokenCap * 2)
                 do {
                     // The towers run on the SAME GPU as the prefix prime, and
-                    // `busy` cannot see the prime -- it lives in its own task,
-                    // not in genTask -- so a sample tapped at launch would
-                    // otherwise put a shader compile and a prefill on the GPU
-                    // together. The session's turn path already waits here;
-                    // the encode is the one GPU step that runs before it.
+                    // `busy` cannot see the prime: it lives in its own task,
+                    // not in genTask. The encode is the one GPU step that
+                    // runs before the session's turn path, which already
+                    // waits.
                     await session.awaitPriming()
                     let built = try await encode()
                     if built.perImage > 0 { perImageTokens = built.perImage }
@@ -2548,17 +2082,13 @@ import UniformTypeIdentifiers
                 ticker.cancel()
                 genTask = nil
                 prefilling = false
-                // The last frame holds through the prefill that follows the
-                // encode and goes when the turn does, so the composer is
-                // clear again the moment there is an answer to read.
                 lookingAt = nil
             }
         }
     }
 
-    // Every attachment through its tower, off the main actor -- a picture is
-    // roughly a second of GPU and a video is far more. Ordered images first
-    // then clips, matching the composer's own chip order.
+    // The order the user attached them IS the order they reach the template,
+    // so a question can refer to them positionally.
     private static func encode(
         _ media: Gemma4Media, images: [ImageAttachment],
         clips: [ClipAttachment],
@@ -2587,8 +2117,7 @@ import UniformTypeIdentifiers
                 }
             }
             // The towers run HERE, so this is the peak an attachment turn
-            // reaches -- the moment a device short of headroom would be
-            // killed, and the one a load-time number cannot predict.
+            // reaches, and one no load-time number predicts.
             if !images.isEmpty || !clips.isEmpty {
                 Footprint.report("encoded \(images.count) img "
                     + "\(clips.count) clip")
@@ -2597,9 +2126,8 @@ import UniformTypeIdentifiers
         }.value
     }
 
-    // Utterances through the tower, off the main actor. The gate already
-    // bounded each one under the tower's ceiling, so media.audio returns a
-    // single span per utterance and re-cutting never happens.
+    // The gate already bounded each utterance under the tower's ceiling, so
+    // media.audio returns a single span per utterance.
     private static func encode(
         _ media: Gemma4Media, speech: [SpeechGate.Utterance]
     ) async throws -> (parts: [ContentPart], spans: [SoftSpan],
@@ -2620,10 +2148,8 @@ import UniformTypeIdentifiers
         }.value
     }
 
-    // Every attachment names itself in diag.log: what kind, which file, how
-    // many soft tokens the tower produced, and how long it took. Without it
-    // a turn that went wrong is indistinguishable from one that never
-    // encoded anything.
+    // Without this a turn that went wrong is indistinguishable from one that
+    // never encoded anything.
     nonisolated private static func note(_ kind: String, _ name: String,
                                         _ rows: Int, _ since: Date) {
         Diag.shared.report(String(
@@ -2631,23 +2157,14 @@ import UniformTypeIdentifiers
             kind, name, rows, Date().timeIntervalSince(since)))
     }
 
-    // The model's own refusal reaches the transcript: the clip ceiling is the
-    // one a user can act on ("use a shorter clip"), and a generic apology
-    // would hide it.
     private static func attachmentFailed(_ error: any Error) -> String {
-        // Gemma4MediaError prints its own sentence; anything else would leak
-        // a Swift case name into the transcript.
+        // Gemma4MediaError prints its own sentence, which the user can act
+        // on; anything else would leak a Swift case name into the transcript.
         error is Gemma4MediaError
             ? "\(error)" : "Could not process the attachment."
     }
 
-    // ---- empty-screen sample pills -----------------------------------
-    // Two canned demos on a fresh conversation, sent exactly as if typed
-    // (the same input + send path), so the transcript teaches the real
-    // flow: the agentic research walk and the vision story.
-//  static let sampleResearch = "Using Simple English Wikipedia, research "
-//      + "Dark Matter and Dark Energy and summarize the current state of "
-//      + "the art in this field."
+    // Sent exactly as if typed, through the same input and send path.
     static let sampleResearch =
         "Using Simple English Wikipedia as your primary source, " +
         "research Dark Matter and Dark Energy. Provide a highly factual, " +
@@ -2665,54 +2182,40 @@ import UniformTypeIdentifiers
         + "the unit circle), Euler's identity e^(i*pi) + 1 = 0, i^i, "
         + "sqrt(i), and ln(-1). Compute each and explain briefly what it "
         + "means geometrically."
-    // "compounded annually" summons the textbook (1 + r/nt)^(nt) formula,
-    // which the 0.8B garbles into (1 + 5/22)^22 (or subtracts the
-    // principal); "multiplies by 1.05" all but dictates 1000 * 1.05^22,
-    // the expression every size gets right.
+    // "multiplies by 1.05" rather than "compounded annually": the latter
+    // summons the textbook formula, which a small model garbles.
     static let sampleInterest = "A savings account starts with $1,000 and "
         + "earns 5% interest each year, so every year its balance "
         + "multiplies by 1.05. Use the calculator to find the balance "
         + "after 22 years."
-    // The 0.8B fumbles even the hinted interest walk (overthinks itself
-    // out of the right answer), so the phone model gets a question whose
-    // numbers are ALL in the prompt with one operation between them --
-    // every unit conversion tried (weeks/year, tonne/grams, minute/year)
-    // derailed it in testing, as did thousands-commas in the given
-    // numbers. Baker's percentages fit that shape: percent-of-flour per
-    // ingredient, one multiply each.
-    // ONE ingredient on purpose: with two, the 0.8B's percentages-sum-
-    // to-100 prior computes the second as flour-minus-first (baker's
-    // percentages exceeding 100% total is exactly the counterintuitive
-    // bit). A bare "65% of 350 grams" is the shape it always gets right.
+    // The shape the smallest model gets right: every number in the prompt,
+    // one operation between them, no unit conversion and no
+    // thousands-commas. ONE ingredient, because with two its
+    // percentages-sum-to-100 prior computes the second as
+    // flour-minus-first.
     static let sampleCookies = "Bakers weigh every ingredient as a "
         + "percentage of the flour weight. In my cookie recipe, butter "
         + "is 65% of the flour. I have 350 grams of flour. Use the "
         + "calculator to find how many grams of butter I need."
 
-    // Whether the calculator pill runs the interest walk (2B and up) or
-    // the chicken math (the 0.8B base model).
     var calcSampleIsInterest: Bool { modelName != Models.fallback }
 
-    // The bundled demo picture (the beach scene); nil hides the pill.
-    // App/Resources/ on disk, but the copy phase FLATTENS into the bundle, so
-    // these stay a plain forResource lookup with no subdirectory.
+    // App/Resources/ on disk, but the copy phase FLATTENS into the bundle,
+    // so these stay a plain forResource lookup with no subdirectory.
     static let samplePicture: Data? = Bundle.main
         .url(forResource: "dogs-beach", withExtension: "jpg")
         .flatMap { url in try? Data(contentsOf: url) }
 
-    // A URL, not Data: VideoFrames hands it to AVURLAsset, and the whole point
-    // of the streaming encode is that a clip is never held whole.
+    // A URL, not Data: the streaming encode exists so a clip is never held
+    // whole.
     static let sampleVideo: URL? = Bundle.main
         .url(forResource: "dogs-beach", withExtension: "mp4")
-    // Pill-sized preview decoded once, like the attach chips.
     static let samplePictureThumb: CGImage? = samplePicture.flatMap { data in
         VisionPreprocess.thumbnail(data, maxPx: 128)
     }
 
-    // A one-page report whose TABLE holds the answer: the prose names Eastern
-    // at every turn (most trees, most tonnes) while the highest yield per
-    // tree is Riverbank's, which only the table says. So a run that merely
-    // reads the words gets it wrong, visibly.
+    // The answer is in the report's TABLE and the prose points the other way,
+    // so a run that merely reads the words gets it wrong, visibly.
     static let sampleReport =
         "Which block gives the most fruit per tree, and what makes that "
         + "surprising?"
@@ -2720,19 +2223,14 @@ import UniformTypeIdentifiers
     static let samplePdf: URL? = Bundle.main
         .url(forResource: "harvest-report", withExtension: "pdf")
 
-    // A STILL of the clip rather than a frame pulled from it: drawing the card
-    // must not depend on decoding the video, which is exactly what fails on a
-    // device whose formats the clip outruns -- the demo would then advertise
-    // itself with a blank square on the phones least able to run it.
+    // A STILL, never a frame pulled from the clip: drawing the card must not
+    // depend on decoding the video.
     static let sampleClipThumb: CGImage? = Bundle.main
         .url(forResource: "dogs-beach-poster", withExtension: "jpg")
         .flatMap { url in try? Data(contentsOf: url) }
         .flatMap { data in VisionPreprocess.thumbnail(data, maxPx: 128) }
 
-    // "Always show sample prompts" (Settings), OFF by default. Off, each
-    // sample shows until it has been used once, then hides; on, every
-    // applicable sample always shows. One switch -- no per-conversation
-    // graduation, no sticky re-enable state.
+    // Off, each sample shows until it has been used once.
     var alwaysShowSamples: Bool =
         UserDefaults.standard.bool(forKey: "alwaysShowSamples") {
         didSet {
@@ -2743,9 +2241,8 @@ import UniformTypeIdentifiers
     private var usedSamples: Set<String> = Set(
         UserDefaults.standard.stringArray(forKey: "usedSamples") ?? [])
 
-    // The samples applicable to the current model + access tier -- mirrors the
-    // pill view's own gating: calc always, research when online, the picture
-    // demo on a vision model, the clip on a device that takes video.
+    // MIRRORS the pill view's own gating: the two must agree, or the empty
+    // screen shows a heading over nothing.
     private var applicableSampleIds: [String] {
         var ids = ["calc"]
         if accessState != .offline { ids.append("research") }
@@ -2758,27 +2255,21 @@ import UniformTypeIdentifiers
     }
 
     // No capability gate: a document becomes Markdown before the model sees
-    // it, so this rides every model on every device, text-only included.
+    // it, so this rides every model, text-only included.
     var canOfferDocumentSample: Bool { ChatModel.samplePdf != nil }
 
-    // A video turn is ~32 tower passes and a couple of thousand soft tokens to
-    // prefill whatever the clip's own size -- the frame count and per-frame
-    // budget are the model's numbers, not the file's -- so the smallest phones
-    // are not offered a demo that would hold them for a minute.
-    // canAttachVideo already implies a soft-token model, so it picks out the
-    // gemma family on its own.
+    // A video turn is ~32 tower passes and thousands of soft tokens WHATEVER
+    // the clip's own size: the frame count and per-frame budget are the
+    // model's numbers, not the file's.
     var canOfferVideoSample: Bool {
         installedGB >= 4 && canAttachVideo && ChatModel.sampleVideo != nil
     }
 
-    // The pill area shows on an empty chat while at least one applicable
-    // sample is visible (always-on, or not yet used).
     var showSamples: Bool {
         ready && !busy && messages.isEmpty
             && applicableSampleIds.contains { id in showSample(id) }
     }
 
-    // One sample's visibility: always-on shows it regardless, else until used.
     func showSample(_ id: String) -> Bool {
         alwaysShowSamples || !usedSamples.contains(id)
     }
@@ -2827,9 +2318,7 @@ import UniformTypeIdentifiers
         }
     }
 
-    // The bundled report is read before the question is sent rather than
-    // beside it: the turn has to carry the text, and a bundle URL needs none
-    // of the copying a dropped file does.
+    // A bundle URL needs none of the copying a dropped file does.
     func runDocumentSample() {
         if let url = ChatModel.samplePdf {
             markSampleUsed("document")
@@ -2849,10 +2338,6 @@ import UniformTypeIdentifiers
         }
     }
 
-    // The clip rides the ordinary attachment path, so the film strip plays its
-    // frames behind the composer while the towers run -- which is the part of
-    // this demo worth watching, and the reason the wait reads as work rather
-    // than as a stall.
     func runVideoSample() {
         if let url = ChatModel.sampleVideo {
             markSampleUsed("video")
@@ -2864,9 +2349,8 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Display metadata per advertised tool; an unknown emitted name keeps its
-    // raw text with a question-mark glyph (the grounded no-such-tool case,
-    // exactly what the strip exists to surface).
+    // An unknown emitted name keeps its raw text with a question-mark glyph,
+    // which is the no-such-tool case the strip exists to surface.
     private static let toolGlyphs: [String: (label: String, symbol: String)] = [
         "get_current_time": ("Current Time", "clock"),
         "calculator": ("Calculator", "function"),
@@ -2877,10 +2361,9 @@ import UniformTypeIdentifiers
         "wikipedia_query": ("Wikipedia", "books.vertical"),
     ]
 
-    // Fold a session tool-round event into the live message: the start event
-    // appends a running row, the completion fills its result. The index is
-    // re-checked on the actor hop, and a completion never un-fills a result
-    // (main-actor task order across two hops is not guaranteed).
+    // The index is re-checked on the actor hop, and a completion never
+    // un-fills a result: main-actor task order across two hops is not
+    // guaranteed.
     private func applyToolRound(_ event: ToolRoundEvent, at idx: Int) {
         if messages.indices.contains(idx) {
             let known = event.resolved
@@ -2888,9 +2371,9 @@ import UniformTypeIdentifiers
             let args = event.params
                 .map { param in "\(param.name): \"\(param.value)\"" }
                 .joined(separator: "  ")
-            // Both edges drive the spoken cue, and from HERE rather than from
-            // onTool because every send path reports rounds this way while
-            // only the text one carries onTool.
+            // The spoken cue is driven from HERE and not from onTool, because
+            // every send path reports rounds this way while only the text one
+            // carries onTool.
             if event.result == nil {
                 speech.toolStarted(event.resolved ?? event.name)
             } else {
@@ -2913,23 +2396,15 @@ import UniformTypeIdentifiers
         }
     }
 
-    // VL turn: preprocess every attached image, then stream the answer through
-    // the ChatSession vision path so the images are carried -- a later text turn
-    // still sees them. The tower's grid drives the tiling and the merged-token
-    // count; reasoning follows the session's thinking toggle like a text turn.
-    // Several images are each fit to one tile (distinct photos, not tiles of one
-    // picture); a lone image keeps the tile/fit toggle.
+    // The tower's grid drives the tiling and the merged-token count. The
+    // images are carried, so a later text turn still sees them.
     private func sendVision() {
         let raw = input
-        // Docs inline in place, image references dropped (they go via vision).
-        // No text left -> a neutral question the transcript never shows; the
-        // bubble shows the "@name" references, or an image marker if bare.
         let body = promptFor(raw)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let ask = body.isEmpty ? VLPrompt.defaultPrompt : body
-        // The strip below SHOWS the images, so their "@name" references
-        // leave the displayed text (docs keep theirs); an image-only turn
-        // shows the strip alone, no text bubble.
+        // The strip SHOWS the images, so their references leave the displayed
+        // text where a doc's stays.
         var scrubbed = raw
         for img in attachedImages {
             scrubbed = AttachmentRefs.scrub(img.name, from: scrubbed)
@@ -2944,9 +2419,8 @@ import UniformTypeIdentifiers
             attachedDocs = []
             prefilling = true
             activePrefillStage = .vision
-            // Bounded display decode (640px long edge, ~1.6MB each, at most
-            // four): crisp at transcript sizes without retaining full
-            // bitmaps for the life of the conversation.
+            // Bounded, so the conversation does not retain full bitmaps for
+            // its whole life.
             let previews = images.compactMap { img in
                 VisionPreprocess.thumbnail(img.data, maxPx: 640)
             }
@@ -2955,12 +2429,12 @@ import UniformTypeIdentifiers
             messages.append(Message(fromUser: false, text: ""))
             let idx = messages.count - 1
             resetLiveBuffers()
-            // Several images -> fit each (distinct photos); one image keeps the
-            // toggle. iOS is always fit (allowsTiling false there anyway).
+            // Several images are distinct photos, not tiles of one picture,
+            // so each is fit; only a lone image keeps the toggle.
             let tiled = allowsTiling && visionMode == .tile && images.count == 1
-            // The index is re-checked on every MainActor hop, like
-            // applyToolRound: New Chat / rollback can shrink `messages`
-            // between the hop's enqueue and its run.
+            // The index is re-checked on every MainActor hop: New Chat or a
+            // rollback can shrink `messages` between a hop's enqueue and its
+            // run.
             let onReasoning: @Sendable (String) -> Void = { piece in
                 Task { @MainActor in
                     if self.prefilling { self.prefilling = false }
@@ -2979,8 +2453,8 @@ import UniformTypeIdentifiers
             genTask = Task {
                 let phrases = phraseCycler()
                 let ticker = statsTicker(session)
-                // The thinking budget is time-anchored: re-derive the token
-                // caps from the latest measured decode rate each turn.
+                // The budget is time-anchored, so the token caps are
+                // re-derived from the latest measured decode rate each turn.
                 await session.setReasoningCaps(soft: thinkTokenCap,
                                                hard: thinkTokenCap * 2)
                 do {
@@ -3009,8 +2483,8 @@ import UniformTypeIdentifiers
                     speech.endTurn()
                     flushLive(idx, force: true)
                     finishDocs(idx)
-                    // A prefill-phase Stop rolls the turn back in the session;
-                    // drop the two bubbles it left (user + empty assistant).
+                    // A prefill-phase Stop rolls the turn back in the
+                    // session, so the two bubbles it left go with it.
                     if await session.turnRolledBack {
                         if messages.count >= 2 { messages.removeLast(2) }
                     } else {
@@ -3033,9 +2507,7 @@ import UniformTypeIdentifiers
         }
     }
 
-    // A tiny aspect-preserving JPEG (<=128px, a few KB) of the turn's first
-    // image, riding the .user trace event so the debug view shows WHAT was
-    // attached. Decoded straight to size, never the full bitmap.
+    // Decoded straight to size, never the full bitmap.
     private static func traceThumbnail(_ data: Data?) -> Data? {
         var out: Data? = nil
         if let data, let cg = VisionPreprocess.thumbnail(data, maxPx: 128) {
@@ -3065,9 +2537,6 @@ import UniformTypeIdentifiers
             caret = 0
             let papers = ChatModel.refs(attachedDocs)
             attachedDocs = []
-            // Prefill runs before the first decoded token. The status
-            // line keeps the previous turn's numbers (shimmering) rather
-            // than blanking; only a turn-zero context shows a phrase.
             prefilling = true
             var asked = Message(fromUser: true, text: display)
             asked.docs = papers
@@ -3075,10 +2544,9 @@ import UniformTypeIdentifiers
             messages.append(Message(fromUser: false, text: ""))
             let idx = messages.count - 1
             resetLiveBuffers()
-            // Reasoning streams on ChatSession's actor, so hop each piece to
-            // the main actor to grow the message's think disclosure; the first
-            // reasoning token also ends prefill. It comes before the answer
-            // (think precedes content), so ordering holds.
+            // Reasoning streams on ChatSession's actor, so each piece hops to
+            // the main one. Think precedes content, so the first reasoning
+            // token ending prefill holds.
             let onReasoning: @Sendable (String) -> Void = { piece in
                 Task { @MainActor in
                     if self.prefilling { self.prefilling = false }
@@ -3091,9 +2559,7 @@ import UniformTypeIdentifiers
                     }
                 }
             }
-            // A tool call starts the "consulting" stage (and re-enters prefill
-            // while the fetched article is ingested); the first answer/reason
-            // token clears it.
+            // A tool call re-enters prefill while its result is ingested.
             let onTool: @Sendable (String) -> Void = { _ in
                 Task { @MainActor in
                     self.consulting = true
@@ -3107,8 +2573,8 @@ import UniformTypeIdentifiers
             genTask = Task {
                 let phrases = phraseCycler()
                 let ticker = statsTicker(session)
-                // The thinking budget is time-anchored: re-derive the token
-                // caps from the latest measured decode rate each turn.
+                // The budget is time-anchored, so the token caps are
+                // re-derived from the latest measured decode rate each turn.
                 await session.setReasoningCaps(soft: thinkTokenCap,
                                                hard: thinkTokenCap * 2)
                 let stream = session.reply(prompt, onReasoning: onReasoning,
@@ -3132,17 +2598,17 @@ import UniformTypeIdentifiers
                 genTask = nil
                 prefilling = false
                 consulting = false
-                // A prefill-phase Stop rolls the turn back in the session; drop
-                // the two bubbles it left (user + empty assistant).
+                // A prefill-phase Stop rolls the turn back in the session, so
+                // the two bubbles it left go with it.
                 if await session.turnRolledBack {
                     if messages.count >= 2 { messages.removeLast(2) }
                 } else {
                     await refreshStats(session)
                     recordTG(await session.lastMetrics.tg)
                     noteLoopStop(await session.lastMetrics, idx)
-                    // Persist EVERY completed turn: title generation commits
-                    // only once, so without this later turns are lost until the
-                    // conversation is left (New Chat / switch).
+                    // EVERY completed turn: title generation commits only
+                    // once, so without this later turns are lost until the
+                    // conversation is left.
                     commitCurrent()
                     maybeGenerateTitle()
                 }
@@ -3150,9 +2616,8 @@ import UniformTypeIdentifiers
         }
     }
 
-    // The loop breaker fired mid-think and the turn committed NO answer:
-    // flag the message so the transcript explains itself instead of showing
-    // silence. A breaker-cut turn WITH content keeps its partial answer.
+    // A breaker-cut turn WITH content keeps its partial answer; only one that
+    // committed nothing gets the note.
     private func noteLoopStop(_ m: TurnMetrics, _ idx: Int) {
         if m.endReason == "loop-breaker", messages.indices.contains(idx),
            messages[idx].text.isEmpty {
@@ -3160,20 +2625,13 @@ import UniformTypeIdentifiers
         }
     }
 
-    // The status line's one line: context size, the reasoning (🤔) / answer
-    // (💬) split, footprint (🐏), and prefill/decode t/s. Called on a ~400ms
-    // ticker while streaming and once at the end, never per token -- the
-    // memory walk (task_vm_info) is charged only at this cadence.
-    //
-    // With reasoning off there is no split to show, so the one count is every
-    // token decoded rather than a 🤔 0 nobody needs to read.
+    // Never per token: the memory walk is charged only at this cadence.
     private func refreshStats(_ session: ChatSession) async {
         let t = await session.lastMetrics
         if t.pp > 0 { lastPP = t.pp }   // feeds the attachment time estimate
         // ctx 0 is a conversation that has not run a turn yet, where every
-        // number would read 0. Publish nothing and the working phrase keeps
-        // the line -- which is why this gate lives here rather than in the
-        // view: an empty label IS "there is nothing to say yet".
+        // number would read 0. The gate lives HERE rather than in the view,
+        // because an empty label IS "there is nothing to say yet".
         if t.ctx > 0 {
             let tokens = thinkingActive
                 ? "🤔 \(t.thinkTokens) 💬 \(t.contentTokens)"
@@ -3184,19 +2642,15 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Poll the running throughput a few times a second (not per token) so the
-    // status line shows a live pp/tg rate while a turn runs -- through the
-    // prefill as well, so a second prompt's ingest is visible rather than
-    // hidden behind a phrase.
-    // The same cadence refreshes the live message's Markdown snapshots --
-    // never per token; only the stream's open block re-parses.
+    // The one cadence behind both the live rate and the Markdown snapshots,
+    // neither of which may run per token.
     private func statsTicker(_ session: ChatSession) -> Task<Void, Never> {
         Task { @MainActor in
             while busy && !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(400))
                 if busy {
-                    // Through the prefill too: pp lands the moment decode
-                    // starts, and the line is on screen to receive it.
+                    // Runs through the prefill too: pp lands the moment
+                    // decode starts, and the line is on screen to receive it.
                     if !prefilling { refreshDocs() }
                     await refreshStats(session)
                 }
@@ -3204,8 +2658,6 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Snapshot the live assistant message's Markdown streams into the docs
-    // the transcript renders.
     private func refreshDocs() {
         if let idx = messages.indices.last, !messages[idx].fromUser {
             Instrument.timed("refreshDocs") {
@@ -3216,12 +2668,9 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Streamed pieces accumulate in these non-observable buffers and flush to
-    // the visible message on a bounded cadence: a fast token stream would
-    // otherwise mutate the @Observable model once per token, re-diffing the
-    // whole (non-lazy) transcript ~25x/sec and stalling the main thread
-    // (measured). The visible Markdown already updates on the 400ms doc ticker,
-    // so per-token writes bought nothing. Reset at each turn's first token.
+    // NON-OBSERVABLE, and flushed on a bounded cadence: writing the
+    // @Observable model per token re-diffs the whole non-lazy transcript at
+    // the token rate and stalls the main thread.
     @ObservationIgnored private var liveAnswer = ""
     @ObservationIgnored private var liveReason = ""
     @ObservationIgnored private var lastFlushNs: UInt64 = 0
@@ -3233,8 +2682,7 @@ import UniformTypeIdentifiers
         lastFlushNs = 0
     }
 
-    // Flush at most every flushIntervalNs; force at turn end. Equality-guarded
-    // so an idle gap (a tool prefill with no yield) writes nothing.
+    // Equality-guarded, so an idle gap writes nothing.
     private func flushLive(_ idx: Int, force: Bool = false) {
         let now = DispatchTime.now().uptimeNanoseconds
         let due = force || now - lastFlushNs >= Self.flushIntervalNs
@@ -3249,8 +2697,8 @@ import UniformTypeIdentifiers
         }
     }
 
-    // Seal the streams at end of turn so the settled docs are the full parse
-    // (finish resolves what a snapshot's open block could not).
+    // Seals the streams, so the settled docs are the full parse: finish
+    // resolves what a snapshot's open block could not.
     private func finishDocs(_ idx: Int) {
         if messages.indices.contains(idx), !messages[idx].fromUser {
             messages[idx].answerDoc = messages[idx].answerStream.finish()
@@ -3259,14 +2707,11 @@ import UniformTypeIdentifiers
         }
     }
 
-    // The whimsical list to draw from right now: while a reply is still
-    // ingesting the prompt it is the in-flight turn's stage (prefill / documents
-    // / vision), and once tokens flow it is the reasoning verbs. Set at send.
+    // Set at send: the stage a reply is ingesting under, before tokens flow
+    // and the reasoning verbs take over.
     private var activePrefillStage: Whimsical.Stage = .prefill
-    // A spoken turn gets its own pair -- speech is a conversation, and
-    // "Analyzing pixels" over a sentence someone just said reads as the wrong
-    // machine answering. Cleared when the turn ends, so a typed follow-up is
-    // back to the ordinary words.
+    // Cleared when the turn ends, so a typed follow-up is back to the
+    // ordinary words.
     private var spokenTurn = false
     private var whimsicalStage: Whimsical.Stage {
         let out: Whimsical.Stage
@@ -3282,26 +2727,19 @@ import UniformTypeIdentifiers
         return out
     }
 
-    // Cycle the two playful phrases every ~5s while a reply runs (prefill and
-    // decode), each a different word, so the transcript quip and the
-    // reasoning label never show the same one.
     private func phraseCycler() -> Task<Void, Never> {
         Task { @MainActor in
             while (busy || listening) && !Task.isCancelled {
                 let p = Whimsical.pair(whimsicalStage)
                 thinkStatus = p.first
                 thinkLabel = p.second
-                // Faster while listening: the phrase IS the feedback there,
-                // and a line that has not moved in five seconds reads as a
-                // frozen app rather than an attentive one.
+                // Faster while listening, where the phrase IS the feedback.
                 try? await Task.sleep(for: .seconds(listening ? 2 : 5))
             }
         }
     }
 
-    // phys_footprint in GiB (Apple's pressure metric): dirty + wired anonymous
-    // memory. Excludes the mmapped weights, which refreshStats adds
-    // separately.
+    // phys_footprint, which EXCLUDES the mmapped weights.
     private static func footprintGiB() -> Double {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(
@@ -3315,9 +2753,7 @@ import UniformTypeIdentifiers
         return kr == KERN_SUCCESS ? Double(info.phys_footprint) / gib : 0
     }
 
-    // The model's own sampling matrix (generation_config.json's
-    // "_sampling_presets"), falling back to the Qwen3.5/QwenPaw card values for
-    // a set that predates the matrix.
+    // The card values are the fallback for a set that predates the matrix.
 
     private static func presets(_ setDir: URL) -> SamplingPresets {
         let url = setDir.appendingPathComponent("generation_config.json")
@@ -3325,32 +2761,25 @@ import UniformTypeIdentifiers
                                           fallback: .qwen35)) ?? .qwen35
     }
 
-    // Live ETA for the in-flight download / optimize, from the phase's elapsed
-    // time and its progress fraction; nil until there is enough to
-    // extrapolate.
-
     var downloadETA: String? { Self.eta(phaseStart, downloadFraction) }
 
-    // A monotonic countdown from the held finish time (tightenOptimizeETA), so
-    // the shown remaining never jumps back up as per-program estimates jitter.
+    // A monotonic countdown from the held finish time, so the remaining never
+    // jumps back up as the per-program estimates jitter.
     var optimizeETA: String? {
         optimizeFinish.map { finish in
             Self.formatETA(max(0, finish.timeIntervalSinceNow))
         }
     }
 
-    // Pull the projected optimize finish EARLIER when a fresh estimate warrants,
-    // never later, so the shown ETA only counts down. Called as each program
-    // finishes compiling (where the raw estimate jitters up and down).
     private func tightenOptimizeETA() {
         if compileFraction > 0.02 {
             let now = Date()
             let elapsed = now.timeIntervalSince(phaseStart)
             let candidate = elapsed * (1 - compileFraction) / compileFraction
             let current = optimizeFinish?.timeIntervalSince(now) ?? candidate
-            // Ease toward each fresh remaining-time estimate (EMA) rather than
-            // locking to the most optimistic one, so a warm early phase cannot
-            // strand the ETA under a cold later phase.
+            // EASED toward each fresh estimate rather than locked to the most
+            // optimistic one, so a warm early phase cannot strand the ETA
+            // under a cold later phase.
             let blended = current + (candidate - current) * 0.35
             optimizeFinish = now.addingTimeInterval(max(0, blended))
         }
@@ -3365,8 +2794,6 @@ import UniformTypeIdentifiers
         return result
     }
 
-    // "ETA: ~N seconds" under a minute, else "ETA: ~N minutes" ("~1 minute"
-    // singular).
     static func formatETA(_ seconds: Double) -> String {
         let s = max(1, Int(seconds.rounded()))
         let m = Int((Double(s) / 60).rounded())
@@ -3375,9 +2802,8 @@ import UniformTypeIdentifiers
         return "ETA: " + body
     }
 
-    // Estimated (download, optimize) minutes for `name`: the model's own
-    // measured times when it has them, else the 0.8B baseline scaled by byte
-    // ratio. nil until the 0.8B has been through both phases once.
+    // The model's own measured times when it has them, else the base model's
+    // scaled by byte ratio. nil until that base has been through both phases.
 
     func estimatedMinutes(_ name: String) -> (download: Int, optimize: Int)? {
         var result: (download: Int, optimize: Int)? = nil
@@ -3389,16 +2815,11 @@ import UniformTypeIdentifiers
             let ratio = Double(bytes) / Double(base0)
             let dl = Self.savedSeconds("download", name)
             let opt = Self.savedSeconds("optimize", name)
-            // Download scales with bytes; compile time tracks op count,
-            // superlinear in model size (~n^1.3 measured), so a linear byte
-            // ratio undersells a big set's first-install optimize.
-            // A GGUF set names its files explicitly and runs on the GPU:
-            // there is no ANE compile, so there is no optimize phase to
-            // estimate. buildGguf already knows this (it sets firstCompile
-            // false and shows Loading, never Optimizing) -- the consent
-            // panel did not, and extrapolated an ANE compile time from the
-            // base model by byte ratio. That is how a 2.67 GB GPU model came
-            // to promise "~34 min optimize" for work it never does.
+            // Download scales with bytes; compile time tracks op count and is
+            // superlinear in model size, ~n^1.3.
+            // A GGUF set runs on the GPU with no ANE compile at all, so it
+            // has no optimize phase to estimate and must not be extrapolated
+            // one from the base model.
             let gpuOnly = ModelCatalog.source(name)?.files != nil
             result = (Self.minutes(dl > 0 ? dl : dl0 * ratio),
                       gpuOnly ? 0
@@ -3427,17 +2848,16 @@ import UniformTypeIdentifiers
 
 }
 
-// Utterances arrive on the audio thread and are read on the main one when the
-// mic closes. A lock rather than an actor: the audio thread cannot await.
+// A lock rather than an actor: utterances arrive on the audio thread, which
+// cannot await, and are read on the main one when the mic closes.
 final class HeardSpeech: @unchecked Sendable {
     private let lock = NSLock()
     private var said: [SpeechGate.Utterance] = []
     private var count = 0
     private var at = Date()
 
-    // When the last utterance CLOSED. The end-of-turn watch measures from
-    // here rather than from the last audio block, because blocks keep
-    // arriving through silence and would never let the turn end.
+    // When the last utterance CLOSED, not when the last block arrived: blocks
+    // keep coming through silence and would never let the turn end.
     var lastAt: Date {
         lock.lock()
         defer { lock.unlock() }
@@ -3456,16 +2876,15 @@ final class HeardSpeech: @unchecked Sendable {
         return said.count
     }
 
-    // Speech kept so far, which is NOT the time the mic has been open: the
-    // pauses are already gone.
+    // NOT the time the mic has been open: the pauses are already gone.
     var seconds: Double {
         lock.lock()
         defer { lock.unlock() }
         return said.reduce(0.0) { sum, u in sum + u.seconds }
     }
 
-    // How many samples the microphone actually delivered, which is the one
-    // number that tells a silent room from a silent input.
+    // What the microphone actually delivered, which is what tells a silent
+    // room from a silent input.
     var samples: Int {
         lock.lock()
         defer { lock.unlock() }
@@ -3478,8 +2897,7 @@ final class HeardSpeech: @unchecked Sendable {
         lock.unlock()
     }
 
-    // Loudest sample seen and the running mean square, so a stopped mic can
-    // be told from a quiet one after the fact.
+    // So a stopped mic can be told from a quiet one after the fact.
     private var loudest: Float = 0
     private var square: Double = 0
 

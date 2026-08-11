@@ -1,9 +1,8 @@
 import MD
 import SwiftUI
 
-// The whole transcript as one selectable document with Find. The live
-// per-block transcript can't host MarkdownFindController (it targets a single
-// MarkdownTextView), so Find lives here; TranscriptTools opens it.
+// MarkdownFindController targets a SINGLE MarkdownTextView, which the live
+// per-block transcript cannot offer.
 
 struct ReadingView: View {
 
@@ -78,4 +77,5 @@ struct ReadingView: View {
         matchCount = find.find(q)
         currentMatch = find.currentMatch
     }
+
 }

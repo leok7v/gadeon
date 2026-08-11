@@ -304,6 +304,150 @@ extension NativeText: NSViewRepresentable {
             return result
         }
 
+        // What a COPY carries. A display is a layout, not a run of
+        // characters -- the fraction bar is a drawn rule and the radical a
+        // stretched glyph assembly -- so no font and no rich text can spell
+        // it, and the object-replacement character alone pastes as a gap.
+        //
+        // So each flavour gets the best it can hold: a rich target gets the
+        // formula as a vector PDF, a plain one gets the TeX it was written
+        // from. Inline maths is already Unicode and travels either way.
+
+        override var writablePasteboardTypes: [NSPasteboard.PasteboardType] {
+            var types: [NSPasteboard.PasteboardType] = [.rtfd, .rtf, .string]
+            for one in super.writablePasteboardTypes where
+                !types.contains(one) {
+                types.append(one)
+            }
+            return types
+        }
+
+        // NSTextView does not route copy: through writeSelection(to:type:)
+        // -- MEASURED: with only that override in place, `clipboard info`
+        // showed AppKit's own defaults, 4 bytes of utf8 for the object
+        // replacement character and an RTFD with no picture in it. So the
+        // flavours are written here, where the command lands.
+        //
+        // writeSelection stays below for the paths that DO use it, dragging
+        // and the Services menu.
+
+        override func copy(_ sender: Any?) {
+            let picked = selectedRange()
+            let store = picked.length > 0 ? textStorage : nil
+            if let store {
+                let slice = store.attributedSubstring(from: picked)
+                let board = NSPasteboard.general
+                board.clearContents()
+                board.declareTypes([.rtfd, .rtf, .string], owner: nil)
+                let rich = Self.illustrated(slice, dark: self.isDark)
+                if let data = rich.rtfd(
+                    from: NSRange(location: 0, length: rich.length),
+                    documentAttributes: [:]) {
+                    board.setData(data, forType: .rtfd)
+                }
+                let text = Self.plain(slice)
+                board.setString(text, forType: .string)
+                let flat = NSAttributedString(string: text)
+                if let data = flat.rtf(
+                    from: NSRange(location: 0, length: flat.length),
+                    documentAttributes: [:]) {
+                    board.setData(data, forType: .rtf)
+                }
+            } else {
+                super.copy(sender)
+            }
+        }
+
+        override func writeSelection(to pboard: NSPasteboard,
+                                     type: NSPasteboard.PasteboardType)
+            -> Bool {
+            let picked = selectedRange()
+            var written = false
+            if picked.length > 0, let ts = textStorage {
+                let slice = ts.attributedSubstring(from: picked)
+                if type == .string {
+                    written = pboard.setString(Self.plain(slice), forType: type)
+                } else if type == .rtfd {
+                    let rich = Self.illustrated(slice, dark: self.isDark)
+                    let full = NSRange(location: 0, length: rich.length)
+                    if let data = rich.rtfd(from: full,
+                                            documentAttributes: [:]) {
+                        written = pboard.setData(data, forType: type)
+                    }
+                } else if type == .rtf {
+                    // MEASURED: AppKit's plain-RTF writer embeds no picture
+                    // for an image attachment -- 324 bytes and no \pict. So
+                    // a target that takes only RTF gets the TeX spelled out
+                    // rather than the gap an unrenderable attachment leaves.
+                    let text = NSAttributedString(string: Self.plain(slice))
+                    let full = NSRange(location: 0, length: text.length)
+                    if let data = text.rtf(from: full,
+                                           documentAttributes: [:]) {
+                        written = pboard.setData(data, forType: type)
+                    }
+                }
+            }
+            if !written {
+                written = super.writeSelection(to: pboard, type: type)
+            }
+            return written
+        }
+
+        // The TeX a display was written from, in place of the object
+        // replacement character that stands for it.
+        private static func plain(_ slice: NSAttributedString) -> String {
+            let m = NSMutableAttributedString(attributedString: slice)
+            let full = NSRange(location: 0, length: m.length)
+            for range in Self.attachments(in: m, full).reversed() {
+                let tex = m.attribute(atomicCopyKey, at: range.location,
+                                      effectiveRange: nil) as? String
+                m.replaceCharacters(in: range, with: tex ?? "")
+            }
+            return m.string
+        }
+
+        // The same selection with every formula swapped for a picture of
+        // itself, which is the only form a foreign document can render.
+        private var isDark: Bool {
+            effectiveAppearance
+                .bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        }
+
+        // The VIEW's appearance decides the theme, never the process: the
+        // system one says nothing about a theme forced in the app, and on a
+        // dark Mac answered dark for every copy however the app was set.
+        private static func illustrated(_ slice: NSAttributedString,
+                                        dark: Bool)
+            -> NSAttributedString {
+            let m = NSMutableAttributedString(attributedString: slice)
+            let full = NSRange(location: 0, length: m.length)
+            for range in Self.attachments(in: m, full).reversed() {
+                let cell = (m.attribute(.attachment, at: range.location,
+                                        effectiveRange: nil)
+                            as? NSTextAttachment)?.attachmentCell
+                if let math = cell as? MathAttachmentCell,
+                   let pdf = math.pdf(dark: dark),
+                   let image = NSImage(data: pdf) {
+                    let shown = NSTextAttachment()
+                    shown.image = image
+                    m.replaceCharacters(
+                        in: range,
+                        with: NSAttributedString(attachment: shown))
+                }
+            }
+            return m
+        }
+
+        private static func attachments(in m: NSAttributedString,
+                                        _ full: NSRange) -> [NSRange] {
+            var found: [NSRange] = []
+            m.enumerateAttribute(.attachment, in: full,
+                                 options: []) { value, range, _ in
+                if value != nil { found.append(range) }
+            }
+            return found
+        }
+
         override func layout() {
             super.layout()
             if bounds.size != lastBounds {

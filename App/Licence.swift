@@ -1,10 +1,6 @@
-// The full text of every licence this app's parts are distributed under.
-//
-// Embedded rather than linked because both licences require a COPY to travel
-// with what they cover -- Apache-2.0 section 4(a) for the model weights this
-// app redistributes, GPL-3.0 section 4 for the app itself. A link is not a
-// copy, and a device that is offline (which is the point of this app) cannot
-// follow one.
+// Embedded, not linked: Apache-2.0 section 4(a) and GPL-3.0 section 4 both
+// require a COPY to travel with what they cover, and an offline device
+// cannot follow a link.
 
 enum Licence {
 

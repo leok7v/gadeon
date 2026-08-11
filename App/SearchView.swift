@@ -1,24 +1,11 @@
 import Foundation
 
-// Matching for the sidebar's conversation filter: does a saved conversation
-// answer this query, and if the answer is not visible in its title, what part
-// of it did. The sidebar owns the field and the list; this owns only the
-// question, so a filtered row stays the same row.
-
 enum ConversationSearch {
 
-    // Shortest query worth filtering on. One character matches most of the
-    // history and reads as the list breaking rather than narrowing.
     static let minimumQuery = 2
 
-    // Every word has to land somewhere, in any order -- the words a person
-    // remembers about a conversation are rarely adjacent in it, so matching
-    // the query as one literal string finds "dark matter" and misses "dark
-    // energy and matter".
-    //
-    // Split exactly as ConversationStore indexes, on anything that is not a
-    // letter or a digit. The two MUST agree: the index holds "matter", so a
-    // query tokenized any other way could type "matter," and match nothing.
+    // Split exactly as ConversationStore indexes: the two MUST agree.
+
     static func words(_ query: String) -> [String] {
         query.lowercased()
             .split(whereSeparator: { c in !c.isLetter && !c.isNumber })
@@ -32,12 +19,6 @@ enum ConversationSearch {
                 >= minimumQuery
     }
 
-    // The conversations a query answers, best first. Every query word has to
-    // land somewhere -- a filter that keeps rows matching ANY word barely
-    // narrows anything -- and what orders the survivors is how WELL they
-    // landed: a whole word beats a word that merely starts the same way,
-    // which beats one buried inside another, and a word said nine times
-    // beats one said once.
     static func rank(_ list: [ConversationStore.Convo],
                      _ index: [UUID: [String: Int]],
                      _ query: String) -> [ConversationStore.Convo] {
@@ -55,8 +36,6 @@ enum ConversationSearch {
             }
             if landed == wanted.count { scored.append((convo, total)) }
         }
-        // Recency is part of the comparator so it reports no ties, which
-        // makes the order a property of the key alone.
         return scored
             .sorted { a, b in
                 a.score == b.score
@@ -81,10 +60,6 @@ enum ConversationSearch {
         return total
     }
 
-    // Where the match was found, for the row's second line -- but ONLY for a
-    // word the title does not already show. A row whose own title carries the
-    // query needs no explanation, and repeating it there costs the timestamp
-    // for nothing.
     static func reason(_ convo: ConversationStore.Convo,
                        _ query: String) -> String? {
         var result: String? = nil
@@ -97,9 +72,6 @@ enum ConversationSearch {
         return result
     }
 
-    // The text around the first occurrence of `word` in the transcript. Only
-    // the messages: the caller asks this exactly when the title does NOT
-    // carry the word, which is what makes the answer worth a row.
     private static func found(_ word: String,
                               in convo: ConversationStore.Convo) -> String? {
         var result: String? = nil
@@ -124,4 +96,5 @@ enum ConversationSearch {
         if hi < text.endIndex { out += "\u{2026}" }
         return out
     }
+
 }

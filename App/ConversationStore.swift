@@ -1,10 +1,5 @@
 import Foundation
 
-// Read-only-from-the-caller's-view conversation persistence: one JSON file
-// per conversation under Application Support/conversations/<id>.json.
-// `list` is the in-memory index (newest `updated` first), kept in sync with
-// disk on every save/delete rather than re-scanned each time.
-
 @MainActor @Observable final class ConversationStore {
 
     static let shared = ConversationStore()
@@ -24,27 +19,22 @@ import Foundation
         let rounds: [Round]
         let images: [Data]
         let loopStopped: Bool
-        // Attached video PATHS, not bytes: a conversation is kilobytes and a
-        // phone clip is tens of megabytes. OPTIONAL because a synthesized
-        // Codable does not fall back to a property's default for a missing
-        // key -- it throws -- so every record written before this field would
-        // stop decoding. Same reason `trace` is optional.
+        // Optional: a synthesized Codable throws, rather than falling back
+        // to a property's default, on a missing key -- so a field added
+        // after records already exist on disk must be Optional to decode.
         let clips: [String]?
-        // Attached DOCUMENTS: where the file was kept, and how much text came
-        // out of it. Optional for the same reason `clips` is.
         let docs: [StoredDoc]?
     }
 
     struct StoredDoc: Codable {
         let path: String
         let bytes: Int
-        // Optional for the same reason `docs` is: records written before it
-        // must keep decoding.
         let short: Bool?
     }
 
-    // Trimmed trace for debug-on-reopen: timings + metrics + tool results, but
-    // NOT the multi-KB verbatim render/decode payloads (dropped in `text`).
+    // `text` drops the multi-KB verbatim render/decode payload; trimmed for
+    // debug-on-reopen to timings, metrics, and tool results.
+
     struct Trace: Codable {
         let kind: String
         let t0: Date
@@ -66,14 +56,6 @@ import Foundation
 
     private(set) var list: [Convo] = []
 
-    // Word counts per conversation, maintained beside `list` rather than
-    // stored in `Convo`: that type is Codable and one file per conversation,
-    // so a new property would rewrite the on-disk format of every chat ever
-    // saved. Kept here, the index costs nothing on disk and is rebuilt from
-    // the same two places the in-memory list is.
-    //
-    // It exists so the sidebar filter scores a small dictionary per keystroke
-    // instead of rescanning the full text of every conversation.
     private(set) var words: [UUID: [String: Int]] = [:]
 
     private init() {
@@ -127,9 +109,6 @@ import Foundation
         words[convo.id] = Self.wordCounts(convo)
     }
 
-    // The title's words count for several, because the title is what the
-    // conversation is ABOUT: a word in it should outrank the same word said
-    // once in passing halfway down a transcript.
     private static let titleWeight = 5
 
     private static func wordCounts(_ convo: Convo) -> [String: Int] {

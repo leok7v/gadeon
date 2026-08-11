@@ -2,15 +2,8 @@ import ImageIO
 import LLM
 import SwiftUI
 
-// Session drill-in (the Option-hold ladybug), routed in-view like Settings:
-// the context/tool time graph over the structured trace on top, the event
-// transcript below. Clicking near a point on the graph scrolls its event
-// into view; clicking a row expands its payload. The footer shows where the
-// same trace is mirrored on disk (transcript.log.txt).
-
-// Timestamps are elapsed since the app started, not time of day: a session
-// trace is read as "how long in" and "how far apart", and a wall clock makes
-// the reader do that subtraction. Hours appear only once there are any.
+// Elapsed since app start, not time of day: a trace reads as "how long in"
+// and "how far apart". Hours appear only once there are any.
 
 private func elapsed(_ t: Date, since zero: Date) -> String {
     let ms = Int((max(t.timeIntervalSince(zero), 0) * 1000).rounded())
@@ -31,19 +24,15 @@ struct DebugView: View {
     let onClose: () -> Void
     @State private var selected: UUID?
 
-    // Zero for every timestamp here: the app's launch, unless the trace
-    // predates it -- a REOPENED conversation carries the events of the run
-    // that recorded it, and against this launch every one of them would
-    // clamp to 00:00.000. Then its own first event is the zero.
+    // Zero is app launch, unless the trace predates it: a reopened
+    // conversation's events would otherwise clamp to 00:00.000, so a
+    // trace's own first event becomes zero instead.
+
     private var zero: Date {
         min(Instrument.launched, model.traceEvents.first?.t1
             ?? Instrument.launched)
     }
 
-    // Dismissal comes from the SAME place Settings gets it: the navigation
-    // stack's own confirmation slot on iOS, a header of ours on macOS. Two
-    // hand-rolled headers rendered two different Dones -- Settings' system
-    // one and a bare tinted button here -- for one word doing one job.
     var body: some View {
         Group {
             if isOS {
@@ -75,8 +64,6 @@ struct DebugView: View {
         }
     }
 
-    // The navigation title carries the name on iOS, so the count travels on
-    // its own rather than being dropped with the header that held it.
     private var eventCount: some View {
         Text("\(model.traceEvents.count) events")
             .appFont(.caption)
@@ -99,9 +86,6 @@ struct DebugView: View {
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                // A log is scanned, not read: the gap between rows sits well
-                // under the height of a row's own line, so a screenful is
-                // events rather than air.
                 LazyVStack(alignment: .leading, spacing: 2) {
                     ForEach(model.traceEvents) { e in
                         TraceRow(e: e, zero: zero, selected: e.id == selected)
@@ -121,17 +105,10 @@ struct DebugView: View {
         }
     }
 
-    // Both logs by NAME and size, each a button that puts that file's contents
-    // on the clipboard. The full path was accurate and useless: on a phone it
-    // is a sandbox UUID nobody can act on, it needed head-truncating to fit,
-    // and it named only ONE of the two files -- diag.log had no route out of
-    // the app at all.
     private var footer: some View {
         HStack(spacing: 8) {
-            // A Release build writes no transcript -- that file is the
-            // conversation itself -- so the row would name an empty path and
-            // copy nothing. Diagnostics carries no conversation content and
-            // ships everywhere.
+            // A Release build writes no transcript, so this row is skipped
+            // rather than naming an empty path.
             if !model.tracePath.isEmpty {
                 logButton("Transcript", model.tracePath)
                 Text("\u{00B7}").foregroundStyle(.tertiary)
@@ -143,9 +120,6 @@ struct DebugView: View {
         .padding(8)
     }
 
-    // The checkmark is the same acknowledgement the transcript's code blocks
-    // give: a clipboard write is invisible, and a button that says nothing is
-    // indistinguishable from a dead one.
     @State private var copied: String?
 
     private func logButton(_ label: String, _ path: String) -> some View {
@@ -173,8 +147,9 @@ struct DebugView: View {
         }
     }
 
-    // The FOLDER, not the file: every run writes a `current.txt`, so the name
-    // that tells the two apart is the directory holding it.
+    // Every run writes to the same `current.txt`; the folder, not the file
+    // name, is what tells sessions apart.
+
     private static func folder(_ path: String) -> String {
         URL(fileURLWithPath: path).deletingLastPathComponent()
             .lastPathComponent
@@ -188,21 +163,14 @@ struct DebugView: View {
     }
 }
 
-// Context size over time as a step line (a rewind reads as a visible drop),
-// a pp/tg rate overlay (green, its own scale), and a marker lane on top:
-// user turns as vertical rules, tool calls / injections / rewinds as
-// colored dots. A tap selects the nearest event in time so any region of
-// the graph drills into the transcript; hovering shows the event's stats
-// in a bubble (tool wall time rides the result event's duration).
-
 private struct TraceGraph: View {
     let events: [TraceEvent]
     let zero: Date
     @Binding var selected: UUID?
     @State private var hovered: TraceEvent?
     @State private var hoverAt: CGPoint = .zero
-    // A Canvas draws Text values, not views, so its labels cannot take the
-    // .appFont modifier the rest of the app uses and read the scale directly.
+    // Canvas draws Text values, not views, so its labels can't take
+    // `.appFont` and read the scale directly instead.
     @Environment(\.appTextScale) private var textScale
 
     private static let pad: CGFloat = 8
@@ -240,11 +208,10 @@ private struct TraceGraph: View {
         }
     }
 
-    // The axis starts at the first event's MARK, not at its start. Everything
-    // is plotted at t1, so anchoring to t0 spends the opening event's whole
-    // duration on blank canvas -- and the opening event is the precooked
-    // system prefill, ~15 s of it, which left a session's real activity
-    // squeezed against the right edge.
+    // Anchored at the first event's t1, not t0: t0 would spend the opening
+    // event's whole duration as blank canvas, and that event is the ~15s
+    // system prefill.
+
     private var span: (start: Date, seconds: Double) {
         let start = events.first?.t1 ?? Date()
         let end = events.last?.t1 ?? start
@@ -278,6 +245,7 @@ private struct TraceGraph: View {
     }
 
     // Tokens per second of a prefill / decode event; 0 = not a rate event.
+
     private static func rate(_ e: TraceEvent) -> Double {
         let dur = e.t1.timeIntervalSince(e.t0)
         let rated = e.kind == .prefill || e.kind == .decode
@@ -343,9 +311,9 @@ private struct TraceGraph: View {
                  at: CGPoint(x: size.width - 34, y: 22))
     }
 
-    // The event nearest in time to the tapped x, markers preferred: within
-    // the tap slop a marker (tool / rewind / inject) beats the prefill or
-    // decode that shares its instant, since markers are what the lane shows.
+    // Nearest event by x, biased toward markers: within tap slop a marker
+    // beats a prefill/decode sharing its instant.
+
     private func nearest(_ tapX: CGFloat, _ size: CGSize) -> TraceEvent? {
         var best: (e: TraceEvent, d: CGFloat)? = nil
         for e in events {
@@ -358,10 +326,6 @@ private struct TraceGraph: View {
         return best?.e
     }
 }
-
-// The graph's hover bubble: the event's time, kind, summary, and stats
-// (tokens, ctx, wall time, derived t/s) at a glance without leaving the
-// graph.
 
 private struct HoverBubble: View {
     let e: TraceEvent
@@ -402,9 +366,6 @@ private struct HoverBubble: View {
             .stroke(.separator, lineWidth: 0.5))
     }
 }
-
-// One transcript row: time, a kind chip, the summary; the payload (rendered
-// delta, raw decode, tool result) collapsed to two lines until selected.
 
 private struct TraceRow: View {
     let e: TraceEvent
@@ -471,9 +432,6 @@ private struct TraceRow: View {
                 payload
             }
         }
-        // Tighter vertically than horizontally, but not to nothing: the
-        // selection highlight needs some body around the text or it reads as
-        // a stray tint rather than as a selected row.
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -482,10 +440,10 @@ private struct TraceRow: View {
         .contentShape(Rectangle())
     }
 
-    // An expanded payload scrolls inside a content-hugging capped frame (like
-    // the tool popover): a selected render is many KB, and a row that
-    // balloons to thousands of points collapses the transcript's scroll
-    // geometry into a blank void when it shrinks back.
+    // Scrolls inside a capped frame: a row that balloons to an expanded
+    // payload collapses the transcript's scroll geometry when it shrinks
+    // back.
+
     @ViewBuilder private var payload: some View {
         let text = Text(e.text)
             .appFont(.caption2).monospaced()

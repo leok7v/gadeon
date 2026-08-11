@@ -1,12 +1,6 @@
 import SwiftUI
 import UIKit
 
-// iOS counterpart of the macOS prompt editor (parallel symbol, no #if os()). A
-// UITextView inserts at the caret, scrolls smoothly, and grows
-// minLines..maxLines via sizeThatFits. The soft keyboard has no Shift+Return,
-// so Return inserts a newline and Send submits; onSubmit is kept for API
-// parity.
-
 struct PromptEditor: UIViewRepresentable {
     @Binding var text: String
     @Binding var focused: Bool
@@ -14,15 +8,13 @@ struct PromptEditor: UIViewRepresentable {
     var disabled: Bool
     var minLines: Int
     var maxLines: Int
-    // The app's text size, already carrying this device's Dynamic Type ratio.
-    // The base below is therefore the UNSCALED body size: preferredFont has
-    // the system's own category baked in, and multiplying that by a ratio
-    // derived from the same category would count it twice.
+    // `scale` already carries the device's Dynamic Type ratio; `font`
+    // below must stay the UNSCALED body size, or the category is
+    // counted twice.
     var scale: CGFloat = 1
     var onSubmit: () -> Void
-    // Symbol parity with macOS (the shared Composer passes it). Unused on iOS:
-    // the field refuses drops (willBecomeEditableForDrop -> .no) and iPad
-    // in-field drag-drop is a won't-do; the chat handler owns [+]/Photos.
+    // Unused on iOS (kept for symbol parity with the macOS twin); the
+    // field refuses drops via willBecomeEditableForDrop.
     var onDropFiles: ([URL]) -> Void = { _ in }
 
     // The body point size at a given scale, shared with the SwiftUI
@@ -68,13 +60,9 @@ struct PromptEditor: UIViewRepresentable {
                 tv.selectedTextRange = tv.textRange(from: pos, to: pos)
             }
         }
-        // Any first-responder-affecting UIKit call HERE re-enters SwiftUI's
-        // responder graph mid-update -- an AttributeGraph cycle:
-        // setEditable(false) resigns, becomeFirstResponder() acquires, both
-        // walk canBecomeFirstResponder -> responderNode while this update
-        // runs. So apply both on the next tick, off the update pass. Focus is
-        // skipped while disabled so it does not fight the resign disabling
-        // triggers.
+        // A first-responder-affecting UIKit call here re-enters SwiftUI's
+        // responder graph mid-update (an AttributeGraph cycle), so both
+        // calls are deferred to the next tick.
         let editable = !disabled
         let wantFocus = focused && !disabled
         if tv.isEditable != editable

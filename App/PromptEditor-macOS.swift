@@ -1,12 +1,6 @@
 import AppKit
 import SwiftUI
 
-// AppKit-backed multiline prompt editor, replacing TextField(axis:.vertical):
-// that appends a Shift+Return newline at the string END (not the caret) and
-// scrolls choppily. NSTextView inserts at the caret, scrolls smoothly, owns
-// paste, and grows minLines..maxLines via sizeThatFits. Return submits;
-// Shift+Return breaks at the caret. SDK-split with PromptEditor-iOS.swift.
-
 struct PromptEditor: NSViewRepresentable {
 
     @Binding var text: String
@@ -15,14 +9,13 @@ struct PromptEditor: NSViewRepresentable {
     var disabled: Bool
     var minLines: Int
     var maxLines: Int
-    // The app's text size. NSTextView takes a font, not an environment, and
-    // preferredFont(forTextStyle:) is a fixed 13pt on this platform whatever
-    // the app is set to -- so without this the field is the one control that
-    // stays put while the card around it grows.
+    // NSTextView takes a font, not an environment; preferredFont(for
+    // TextStyle:) is a fixed 13pt on macOS regardless of the app's
+    // text-size setting, so `scale` compensates.
     var scale: CGFloat = 1
     var onSubmit: () -> Void
-    // A file dropped ONTO the field: routed to the chat's attach handler (chip
-    // + @reference) instead of the field pasting the path. iOS ignores it.
+    // A dropped file is routed to the chat's attach handler (chip +
+    // @reference) instead of pasted as text.
     var onDropFiles: ([URL]) -> Void = { _ in }
 
     // The body point size at a given scale, shared with the SwiftUI
@@ -66,10 +59,9 @@ struct PromptEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         if let tv = scroll.documentView as? SubmitTextView {
-            // Only when input changed under the field (send/clear, or a dropped
-            // reference) -- comparing first keeps local typing from resetting
-            // the caret each keystroke. On such a change, put the caret where
-            // the model wants it (just after an inserted reference).
+            // On an external change (send/clear, or a dropped reference) put
+            // the caret where the model wants it; comparing first keeps
+            // local typing from resetting it each keystroke.
             if tv.string != text {
                 tv.string = text
                 let len = (text as NSString).length
@@ -96,15 +88,11 @@ struct PromptEditor: NSViewRepresentable {
         let width = proposal.width ?? 300
         let inset = (tv?.textContainerInset.height ?? 2) * 2
         let line = ceil(font.ascender - font.descender + font.leading)
-        // boundingRect drops a trailing empty line; a sentinel keeps that
-        // line.
-        let text = ((tv?.string ?? "") + " ") as NSString
-        let measured = text.boundingRect(
-            with: NSSize(width: max(1, width), height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font]).height
         let lo = ceil(CGFloat(minLines) * line) + inset
         let hi = ceil(CGFloat(maxLines) * line) + inset
+        let measured = context.coordinator.height(
+            of: tv?.string ?? "", width: max(1, width), font: font,
+            atMost: hi - inset)
         return CGSize(width: width,
                       height: min(max(ceil(measured) + inset, lo), hi))
     }
@@ -115,6 +103,57 @@ struct PromptEditor: NSViewRepresentable {
         weak var textView: SubmitTextView?
 
         init(_ parent: PromptEditor) { self.parent = parent }
+
+        // What the last measurement was taken from, so the same question is
+        // not asked of CoreText twice.
+        private struct Measured {
+            let text: String
+            let width: CGFloat
+            let size: CGFloat
+            let height: CGFloat
+        }
+
+        private var last: Measured?
+
+        // Clamped to `ceiling`: once a prefix already exceeds it, more text
+        // cannot bring it back down, so the rest need not be measured.
+
+        func height(of text: String, width: CGFloat, font: NSFont,
+                    atMost ceiling: CGFloat) -> CGFloat {
+            let size = font.pointSize
+            var result = last?.height ?? 0
+            if last?.text != text || last?.width != width
+                || last?.size != size {
+                result = Coordinator.measure(text, width: width, font: font,
+                                             atMost: ceiling)
+                last = Measured(text: text, width: width, size: size,
+                                height: result)
+            }
+            return result
+        }
+
+        // The sentinel keeps a trailing empty line, which boundingRect drops.
+        private static func measure(_ text: String, width: CGFloat,
+                                    font: NSFont,
+                                    atMost ceiling: CGFloat) -> CGFloat {
+            let box = NSSize(width: width, height: .greatestFiniteMagnitude)
+            let options: NSString.DrawingOptions = [.usesLineFragmentOrigin,
+                                                    .usesFontLeading]
+            let attributes: [NSAttributedString.Key: Any] = [.font: font]
+            let head = String(text.prefix(sampleLength)) + " "
+            var result = (head as NSString).boundingRect(
+                with: box, options: options, attributes: attributes).height
+            if result < ceiling, text.count > sampleLength {
+                result = ((text + " ") as NSString).boundingRect(
+                    with: box, options: options,
+                    attributes: attributes).height
+            }
+            return result
+        }
+
+        // Enough characters to overflow any sane maxLines at any sane width,
+        // and short enough that measuring it costs nothing.
+        private static let sampleLength = 2048
 
         func textDidChange(_ notification: Notification) {
             if let tv = textView, parent.text != tv.string {
@@ -129,9 +168,6 @@ struct PromptEditor: NSViewRepresentable {
             }
         }
 
-        // Keep `focused` in step with the real first responder, so it does not
-        // re-grab focus after the user clicks away.
-
         func textDidBeginEditing(_ notification: Notification) {
             if !parent.focused { parent.focused = true }
         }
@@ -144,17 +180,11 @@ struct PromptEditor: NSViewRepresentable {
 
 }
 
-// NSTextView that sends a plain Return to onSubmit and lets Shift+Return (and
-// everything else) fall through, so AppKit inserts the break at the caret.
-
 final class SubmitTextView: NSTextView {
     var onSubmit: (() -> Void)?
-    // A dropped FILE is routed here so the chat attaches it (chip + @reference
-    // at the caret) instead of NSTextView pasting the file PATH as text. Trying
-    // to make the field REFUSE drops does not work -- NSTextView accepts file
-    // drops through its built-in text-drag machinery, not the overridable
-    // registerForDraggedTypes -- so we intercept the drop instead. Non-file
-    // drags (selected text) fall through to the default.
+    // NSTextView accepts file drops through its built-in text-drag
+    // machinery, not the overridable registerForDraggedTypes, so drops
+    // are intercepted here instead of refused.
     var onDropFiles: (([URL]) -> Void)?
 
     private func droppedFileURLs(_ sender: NSDraggingInfo) -> [URL] {
@@ -189,4 +219,5 @@ final class SubmitTextView: NSTextView {
             super.doCommand(by: selector)
         }
     }
+
 }

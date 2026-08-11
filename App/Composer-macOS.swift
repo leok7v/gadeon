@@ -1,19 +1,11 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-// The in-card model picker renders as a borderless label + chevron on
-// macOS. .borderlessButton is a macOS-only menu style, so it lives in an
-// SDK-split modifier (matched symbol-for-symbol by Composer-iOS.swift)
-// rather than a #if os() branch in the shared Composer.
-
 struct ComposerMenuStyle: ViewModifier {
     func body(content: Content) -> some View {
         content.menuStyle(.borderlessButton)
     }
 }
-
-// [+] attaches one image for the next turn via the Files / open panel. iOS
-// (Composer-iOS.swift) adds the photo library alongside it.
 
 struct AttachButton: View {
     let model: ChatModel
@@ -27,10 +19,7 @@ struct AttachButton: View {
         .buttonStyle(.plain)
         .foregroundStyle(model.hasAttachments ? Color.accentColor
                                               : Color.secondary)
-        // NOT gated on canAttachImages: .txt / .md ride every model, so a
-        // device whose GPU cannot run the towers still attaches documents.
-        // attachableTypes is what narrows the panel to what is actually
-        // takeable, and attachHelp already names the reduced offer.
+        // Not gated on canAttachImages: .txt / .md ride every model.
         .disabled(model.busy)
         .help(model.attachHelp)
         .fileImporter(isPresented: $showImporter,

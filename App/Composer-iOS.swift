@@ -2,19 +2,11 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
-// iOS counterpart of the macOS borderless picker style. .borderlessButton
-// is macOS-only; the default menu style already renders the custom label as
-// an inline tappable control, so this is the identity that keeps the shared
-// Composer compiling on iOS. The iOS layout pass will refine it later.
-
 struct ComposerMenuStyle: ViewModifier {
     func body(content: Content) -> some View {
         content.menuStyle(.automatic)
     }
 }
-
-// [+] on iOS attaches one image for the next turn from the photo library
-// (PhotosPicker -- privacy-preserving, no permission prompt) or the Files app.
 
 struct AttachButton: View {
     let model: ChatModel
@@ -25,10 +17,7 @@ struct AttachButton: View {
     // A PhotosPicker placed directly as a Menu item never presents (SwiftUI
     // only renders plain buttons in a menu), so a menu Button arms the picker
     // through the .photosPicker(isPresented:) modifier instead.
-    // Documents ride every model, so the button is never withdrawn -- only
-    // the CHOICE is. With no towers there is nothing to pick between, and a
-    // one-item menu is a worse affordance than the action itself, so it opens
-    // the file panel directly.
+
     var body: some View {
         Group {
             if model.canAttachImages {
@@ -69,13 +58,9 @@ struct AttachButton: View {
             .frame(width: 22, height: 22)
     }
 
-    // Picked library items -> image Data -> the model's pending attachments.
+    // A picked movie must not be handed to attachImage: its bytes would
+    // arrive as Data like a photo's and be patchified as a still.
 
-    // A picked VIDEO must not be handed to attachImage: with videos now
-    // selectable, its bytes would arrive as Data like a photo's and be
-    // patchified as a still. The item's own supported types say which it is,
-    // and a movie is copied out to a URL because a clip is far too large to
-    // carry as Data for the life of the conversation.
     private func load(_ items: [PhotosPickerItem]) {
         if !items.isEmpty {
             Task { @MainActor in

@@ -1,25 +1,11 @@
 import Foundation
 
-// Playful per-stage status phrases, one bundled App/Whimsical/*.txt list per
-// Stage (reasoning / prefill / documents / vision / listening / mulling /
-// consulting / optimizing),
-// each line "emoji Word emoji". Shown in the status bar, as the transcript's
-// live "working" line, and on the one-time Optimizing screen. trio() returns
-// three distinct phrases, one per live surface.
-
 enum Whimsical {
 
     enum Stage: String {
         case reasoning, prefill, documents, vision, consulting, optimizing,
              downloading
-        // A spoken turn has its own two: the tower encoding what was said,
-        // and the reasoning that follows it. Speech is a CONVERSATION, and
-        // "Analyzing pixels" over a sentence someone just spoke reads as the
-        // wrong machine answering.
         case listening, mulling
-        // The one flash that ANSWERS rather than narrates: shown the moment
-        // the gate accepts what was said, while the towers are still working
-        // and the transcript has nothing in it yet.
         case heard
     }
 
@@ -74,10 +60,9 @@ enum Whimsical {
     nonisolated(unsafe) private static var held:
         [Stage: (idx: Int, at: Date)] = [:]
 
-    // The stage's CURRENT phrase, advancing through the shuffled ring at most
-    // once per `hold` seconds NO MATTER how many views or tickers ask --
-    // concurrent tasks and view re-inits are idempotent reads and cannot
-    // fast-forward or ping-pong the rotation.
+    // Advances at most once per `hold` seconds; concurrent callers are
+    // idempotent reads.
+
     static func current(_ stage: Stage,
                         hold: TimeInterval = 7) -> String {
         let all = list(stage)
@@ -96,11 +81,9 @@ enum Whimsical {
         return result
     }
 
-    // Two phrases from the stage's shuffled ring, one per surface that can
-    // show a phrase at once: the transcript quip and the reasoning label. The
-    // up and down cursors wrap around in opposite directions and a collision
-    // pushes the second along, so with two or more phrases in the list the
-    // two surfaces never show the same word.
+    // Two cursors, opposite directions; a collision advances the second so
+    // the two surfaces never repeat.
+
     static func pair(_ stage: Stage) -> (first: String, second: String) {
         let all = list(stage)
         let n = all.count

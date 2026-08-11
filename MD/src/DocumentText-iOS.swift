@@ -1,6 +1,27 @@
 #if os(iOS)
 import UIKit
 
+// A formula has no line breaks to give: it is one raster at fixed geometry,
+// so a surface narrower than its natural width does not reflow it, it cuts
+// the right end off. TextKit offers the available width here, before layout,
+// which is the one place the formula can be scaled to fit. Small and whole
+// beats large and cut in half.
+final class MathAttachment: NSTextAttachment {
+
+    var natural: CGRect = .zero
+
+    override func attachmentBounds(for textContainer: NSTextContainer?,
+                                   proposedLineFragment lineFrag: CGRect,
+                                   glyphPosition position: CGPoint,
+                                   characterIndex charIndex: Int) -> CGRect {
+        let fitted = DocumentText.mathFit(natural: natural.size,
+                                         available: lineFrag.width)
+        let scale = natural.width > 0 ? fitted.width / natural.width : 1
+        return CGRect(origin: CGPoint(x: 0, y: natural.origin.y * scale),
+                      size: fitted)
+    }
+}
+
 extension DocumentText {
 
     // UIKit has no attachment cell to draw through, so the formula is
@@ -9,7 +30,7 @@ extension DocumentText {
     // already does.
 
     static func mathAttachment(_ layout: MathLayout) -> NSTextAttachment {
-        let attachment = NSTextAttachment()
+        let attachment = MathAttachment()
         let scale = UIScreen.main.scale
         if let cg = layout.cgImage(scale: scale, padding: 4,
                                    background: nil,
@@ -17,9 +38,10 @@ extension DocumentText {
             attachment.image = UIImage(cgImage: cg, scale: scale,
                                        orientation: .up)
         }
-        attachment.bounds = CGRect(x: 0, y: -layout.descent,
-                                   width: layout.width + 8,
-                                   height: layout.height)
+        attachment.natural = CGRect(x: 0, y: -layout.descent,
+                                    width: layout.width + 8,
+                                    height: layout.height)
+        attachment.bounds = attachment.natural
         return attachment
     }
 

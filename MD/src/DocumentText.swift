@@ -104,6 +104,27 @@ import Foundation
         return result
     }
 
+    // A formula scaled to the width on offer, or left alone when it already
+    // fits. A ceiling, never a stretch: given room, a formula keeps its
+    // natural size rather than growing to fill the bubble.
+    //
+    // It has no line breaks to give -- it is one run of glyphs at fixed
+    // geometry -- so a surface narrower than its natural width does not
+    // reflow it, it cuts the right end off. Small and whole beats large and
+    // halved, which is the same answer PdfExport reaches for a page.
+
+    // nonisolated because the sizing overrides that ask it are: pure
+    // arithmetic over two values, touching nothing shared.
+    nonisolated static func mathFit(natural: CGSize,
+                                    available: CGFloat) -> CGSize {
+        var scale: CGFloat = 1
+        if available > 0, natural.width > available {
+            scale = available / natural.width
+        }
+        return CGSize(width: natural.width * scale,
+                      height: natural.height * scale)
+    }
+
     // A formula has no line breaks to give and the single surface has no way
     // to scroll one on its own, so the surface has to be wide enough to hold
     // it whole -- the same bargain the tables strike.

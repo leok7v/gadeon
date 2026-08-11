@@ -1,35 +1,17 @@
 import LLM
 import SwiftUI
 
-// Settings shown in-view (routed by model.showSettings), not a sheet.
-
 struct SettingsView: View {
 
     @Bindable var model: ChatModel
     let onClose: () -> Void
     @State private var category: Category = .systemPrompt
-    // The set a tapped trash asks to delete; non-nil drives the confirm alert.
     @State private var deleteName: String?
-    // Factory Reset lives in Misc, revealed only while Option is held (a
-    // destructive action kept off the default surface). iOS has no Option key,
-    // so its monitor is a no-op there.
     @State private var optionDown = false
     @State private var confirmReset = false
     @State private var confirmClear = false
-    // The rail's labels scale with Dynamic Type; a fixed 180pt rail
-    // hyphenates them ("Sys-tem Promp-t") under Larger Text, so the rail
-    // and its icon slots scale on the same curve (width capped so the rail
-    // never eats half the pane).
     @ScaledMetric(relativeTo: .body) private var railWidth: CGFloat = 180
     @ScaledMetric(relativeTo: .body) private var railIcon: CGFloat = 20
-    // The text-size notch being chosen, applied only on the way out, so the
-    // pane renders throughout at the size it was opened at. Live would reflow
-    // the surface holding the slider and show nothing for it: Settings
-    // replaces the transcript, so there is no transcript here to preview.
-    // The keyboard commands are live instead, since there the chat is in view.
-    //
-    // nil until the widget is touched, which is also what keeps a visit that
-    // never went near it from writing the setting back.
     @State private var draftZoom: Int?
 
     private var notch: Int { draftZoom ?? model.textZoom }
@@ -64,10 +46,6 @@ struct SettingsView: View {
         }
     }
 
-    // Done sits top-trailing (the HIG spot for settings dismissal; a
-    // bottom-prominent button is the call-to-action pattern and belongs to
-    // the disclaimer, not here), mirrored by the debug view's header.
-    // Return and Esc both close.
     var body: some View {
         Group {
             if isOS {
@@ -96,8 +74,6 @@ struct SettingsView: View {
         }
     }
 
-    // iPhone (compact): an Apple-style grouped list that drills into each pane,
-    // Done top-right -- not the desktop rail, which is cramped on a phone.
     private var compactBody: some View {
         NavigationStack {
             List {
@@ -114,7 +90,6 @@ struct SettingsView: View {
         }
     }
 
-    // iPad / Mac: the persistent rail + detail.
     private var regularBody: some View {
         VStack(spacing: 0) {
             HStack {
@@ -134,10 +109,6 @@ struct SettingsView: View {
         }
     }
 
-    // Vision appears only when the active model actually offers the
-    // tile/fit choice; a pane that switches nothing (the 0.8B, iOS) just
-    // confuses. Models hides when this device ships only the base model
-    // (nothing to pick or manage).
     private var categories: [Category] {
         Category.allCases.filter { c in
             (c != .vision || model.allowsTiling)
@@ -152,8 +123,6 @@ struct SettingsView: View {
             Spacer()
         }
         .padding(12)
-        // A container holding text follows the text, or bigger labels only
-        // buy themselves more hyphenation in the same width.
         .frame(width: min(railWidth, 300) * model.textScale)
     }
 
@@ -201,10 +170,6 @@ struct SettingsView: View {
         }
     }
 
-    // Credit, and the two licences a copy of which has to travel with what
-    // they cover. The texts are collapsed because nobody reads them by
-    // choice, and present in full because a link is not a copy and this app
-    // is meant to work with the network off.
     private var aboutPane: some View {
         VStack(alignment: .leading, spacing: 10) {
             title("About")
@@ -237,8 +202,6 @@ struct SettingsView: View {
         .padding(.vertical, 4)
     }
 
-    // Bounded rather than free-flowing: 11k and 35k characters inline would
-    // bury everything above them in the pane's own scroll.
     private func licence(_ name: String, _ text: String) -> some View {
         DisclosureGroup(name) {
             ScrollView {
@@ -366,10 +329,6 @@ struct SettingsView: View {
         .padding(.vertical, 2)
     }
 
-    // ONE glyph per row: trash for a downloaded set (disabled on the active
-    // one), arrow-down for a fetchable one (routes into the same consent ->
-    // download -> switch flow as the composer picker).
-
     private func rowButton(_ name: String, downloaded: Bool,
                            active: Bool) -> some View {
         let idle = !model.busy && !model.downloading
@@ -413,9 +372,6 @@ struct SettingsView: View {
         }
     }
 
-    // A PDF or an office file is read into Markdown and attached like a note,
-    // so ONE budget governs both -- naming the two separately in Settings
-    // would ask a user to know which path their file took.
     private var documentsPane: some View {
         VStack(alignment: .leading, spacing: 10) {
             title("Documents")
@@ -452,14 +408,6 @@ struct SettingsView: View {
         }
     }
 
-    // LAST in the pane, because the paragraph under the slider is the live
-    // sample and is therefore the one thing in Settings that moves while the
-    // slider does. With nothing below it, its reflow has nothing to push.
-    //
-    // Every part of the control itself is sized off something that does not
-    // move: a control that resizes under the finger dragging it cannot be
-    // aimed. Reset Zoom sits in the same centred column as the slider, which
-    // lands it exactly under the middle detent it returns to.
     private var textSizeRow: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
@@ -488,12 +436,10 @@ struct SettingsView: View {
                 })
     }
 
-    // Five detents with the middle one marked. The resting size has to be
-    // findable by eye rather than by counting notches in from an end.
     // Spacers BETWEEN the marks, so the first and last land on the ends of
-    // the travel. Giving each mark an equal slice instead centres it in that
-    // slice, which puts the outer pair a tenth of the track in from the
-    // positions they are supposed to be naming.
+    // the travel. An equal slice per mark centres it in that slice, which
+    // puts the outer pair a tenth of the track in from the value it names.
+
     private var detents: some View {
         HStack(spacing: 0) {
             ForEach(-ChatModel.zoomLimit ... ChatModel.zoomLimit,
@@ -505,18 +451,15 @@ struct SettingsView: View {
                            height: notch == 0 ? 9 : 5)
             }
         }
-        // The thumb cannot reach the ends of the track, so the marks must not
-        // either: inset by its radius, or the outer pair sits a thumb's width
-        // away from the value it names.
+        // The thumb cannot reach the ends of the track,
+        // so the marks are inset by its radius.
         .padding(.horizontal, isOS ? 13 : 5)
         .allowsHitTesting(false)
     }
 
-    // The ONE thing in Settings drawn at the draft size rather than the
-    // committed one. It has to be: Settings replaces the transcript instead of
-    // sitting beside it, so without this nothing on screen would show what the
-    // slider just did. Its own words are the explanation, which is why there
-    // is no separate specimen line to go stale beside it.
+    // Drawn at the DRAFT size; everything else in the app uses the committed
+    // one.
+
     private var sample: some View {
         Text("Text and controls throughout the app. This adjusts your "
             + "device's own text size rather than replacing it.")
@@ -528,13 +471,11 @@ struct SettingsView: View {
     private var miscPane: some View {
         VStack(alignment: .leading, spacing: 10) {
             title("Misc")
-            // Thinking drives the session's enable_thinking, so it applies to
-            // EVERY turn -- text, dropped .txt/.md documents (a prompt in
-            // themselves), and images (which now always carry a prompt). Takes
-            // effect next turn, like the toolbar toggle it mirrors.
             Toggle("Thinking", isOn: Binding(
                 get: { model.thinkingActive },
-                set: { on in if on != model.thinking { model.toggleThinking() } }
+                set: { on in
+                    if on != model.thinking { model.toggleThinking() }
+                }
             ))
             .toggleStyle(.switch)
             .disabled(!model.modelSupportsThinking)
@@ -545,8 +486,6 @@ struct SettingsView: View {
                     + "Answer skips the rest of it."
                 : "\(Models.display(model.modelName)) answers directly and "
                     + "has no step-by-step mode, so this does nothing here.")
-            // The budget only means something while the model can think; a
-            // token cap for reasoning that never happens is noise.
             if model.modelSupportsThinking {
                 Picker("Thinking budget", selection: $model.thinkBudget) {
                     ForEach(ChatModel.ThinkBudget.allCases) { size in
@@ -555,10 +494,6 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                // The token cap behind this is derived per model and device,
-                // which is the reason the setting is stated in SECONDS at
-                // all. Naming the count and the checkpoint answers a question
-                // no one reading this pane is asking.
                 explain("How long the model may think before it is nudged to "
                     + "answer: about \(Int(model.thinkBudget.seconds)) "
                     + "seconds.")
@@ -585,12 +520,7 @@ struct SettingsView: View {
                 + "weather. Search terms based on your question are sent to "
                 + "the search engine, and pages the model picks are fetched. "
                 + "Weather uses your approximate location.")
-            // TODO: surface the overthink penalty (ChatModel.overthinkLambda,
-            // fixed 1.0): a per-token logit bias on reasoning branch-openers
-            // ("Wait", "However", ...) applied only while thinking, nudging
-            // the chain of thought toward the answer sooner. Robust across
-            // 0.5-4.0 (arxiv 2606.00206); a slider would trade reasoning
-            // depth for speed.
+            // TODO: surface ChatModel.overthinkLambda as a setting.
             Toggle("Confirm before deleting a conversation",
                    isOn: $model.confirmDeleteConversation)
                 .toggleStyle(.switch)
@@ -598,9 +528,6 @@ struct SettingsView: View {
                 + "Off deletes immediately.")
             if !ConversationStore.shared.list.isEmpty {
                 Divider().padding(.vertical, 4)
-                // Off while a turn runs, like the sidebar trash: the live
-                // conversation is one of the saved ones being cleared, and
-                // the turn in flight commits it straight back.
                 Button(role: .destructive) { confirmClear = true } label: {
                     Label("Clear all conversations", systemImage: "trash")
                 }
@@ -618,10 +545,6 @@ struct SettingsView: View {
         }
     }
 
-    // The compact path pushes each pane with a navigation title already
-    // naming it, so the pane's own heading is the same word a second time
-    // directly beneath the first. Only the rail layout, which has no
-    // navigation bar to carry it, needs one.
     @ViewBuilder
     private func title(_ text: String) -> some View {
         if !isOS {

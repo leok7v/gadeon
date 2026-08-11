@@ -1,26 +1,16 @@
 import SwiftUI
 import UIKit
 
-// A text style at the app's text size. The platform font already carries this
-// device's Dynamic Type, so the scale here is the app's own setting alone and
-// multiplies on top of it -- a notch down from whatever the phone is set to,
-// never an absolute size that discards it.
+// Scale multiplies on top of this device's Dynamic Type; never add it twice.
 
 func appTextFont(_ style: Font.TextStyle, _ scale: CGFloat) -> Font {
     let base = UIFont.preferredFont(forTextStyle: appTextStyle(style))
     return Font(base.withSize(base.pointSize * scale))
 }
 
-// The style's own point size, before the app's scale but WITH this device's
-// Dynamic Type, exactly as appTextFont resolves it. For the places that need
-// a size between two styles, or one run set slightly under another.
-
 func appTextPoints(_ style: Font.TextStyle) -> CGFloat {
     UIFont.preferredFont(forTextStyle: appTextStyle(style)).pointSize
 }
-
-// The two vocabularies differ in two names only, and the fallback covers the
-// styles a later SDK adds rather than failing to compile against it.
 
 private func appTextStyle(_ style: Font.TextStyle) -> UIFont.TextStyle {
     let result: UIFont.TextStyle

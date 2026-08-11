@@ -393,7 +393,12 @@ enum TeX {
         if let last = key.last, last.isLetter {
             let pattern = NSRegularExpression.escapedPattern(for: key)
                         + "(?![A-Za-z])"
-            if let re = try? NSRegularExpression(pattern: pattern) {
+            // Case-sensitive, as TeX is, except where the expansion is
+            // empty and dropping a mis-cased command loses nothing.
+            let folding: NSRegularExpression.Options =
+                value.isEmpty ? [.caseInsensitive] : []
+            if let re = try? NSRegularExpression(pattern: pattern,
+                                                 options: folding) {
                 let ns = s as NSString
                 result = re.stringByReplacingMatches(
                     in: s, range: NSRange(location: 0, length: ns.length),
