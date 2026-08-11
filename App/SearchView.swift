@@ -4,8 +4,6 @@ enum ConversationSearch {
 
     static let minimumQuery = 2
 
-    // Split exactly as ConversationStore indexes: the two MUST agree.
-
     static func words(_ query: String) -> [String] {
         query.lowercased()
             .split(whereSeparator: { c in !c.isLetter && !c.isNumber })

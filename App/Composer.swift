@@ -89,8 +89,6 @@ struct Composer: View {
         }
     }
 
-    // Different signals per platform, and neither works for both: on macOS
-    // the field is focused from launch, so focus says nothing there.
     private var composing: Bool {
         isOS ? focused : !model.input.isEmpty
     }
@@ -190,10 +188,6 @@ struct Composer: View {
         .font(.system(size: controlSize))
     }
 
-    // No symbol effect: an indefinite one keeps the SwiftUI display link
-    // running, turning every display refresh into a view-graph update and a
-    // synchronous render-server round trip.
-
     private var speakerButton: some View {
         let on = model.speech.enabled
         let live = model.speech.speaking
@@ -240,8 +234,6 @@ struct Composer: View {
 
     private var thinkingButton: some View {
         let on = model.thinkingActive
-        // Built as a String, not inline: .help infers LocalizedStringKey, and
-        // `+` does not concatenate two of those.
         let tip: String
         if model.modelSupportsThinking {
             tip = on ? "Thinking on" : "Thinking off"
@@ -338,8 +330,8 @@ struct Composer: View {
         .foregroundStyle(.secondary)
     }
 
-    // No .keyboardShortcut(.defaultAction): it would register a second Return
-    // handler racing PromptEditor's.
+    // No .keyboardShortcut(.defaultAction): it would register a second
+    // Return handler racing PromptEditor's.
 
     private var sendButton: some View {
         Button(action: fire) {

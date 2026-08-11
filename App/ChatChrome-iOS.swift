@@ -1,9 +1,7 @@
 import SwiftUI
 
-// Not NavigationSplitView: its compact mode injects a back chevron and a
-// grouped toolbar pill.
-
 struct ChatChrome<Leading: View, Center: View, Trailing: View>: ViewModifier {
+
     let leading: Leading
     let center: Center
     let trailing: Trailing
@@ -22,4 +20,5 @@ struct ChatChrome<Leading: View, Center: View, Trailing: View>: ViewModifier {
             .background(.bar)
         }
     }
+
 }

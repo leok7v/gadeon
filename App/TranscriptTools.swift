@@ -3,8 +3,6 @@ import MD
 import SwiftUI
 import UniformTypeIdentifiers
 
-// Write-only: the transcript is never read back from a file.
-
 private struct ExportFile: FileDocument {
 
     static let readableContentTypes: [UTType] = []

@@ -1,9 +1,6 @@
 import Foundation
 import Metal
 
-// The best available proxy for the NEURAL ENGINE generation, which no API
-// names: the A13's H12 cannot compile the 0.8B decode graph, and A13 is
-// exactly what fails apple7.
 let modernGPU: Bool = {
     MTLCreateSystemDefaultDevice()?.supportsFamily(.apple7) ?? false
 }()
@@ -19,9 +16,7 @@ let debugBuild = false
 #endif
 
 extension Bundle {
-    // Application Support, not the app-group container: the group container
-    // is spuriously regenerated on update (FB11844942), and the model store
-    // path must stay stable or the ANE compile cache re-keys.
+
     private static let store: URL = {
         let fm = FileManager.default
         let support = (try? fm.url(for: .applicationSupportDirectory,
@@ -40,9 +35,11 @@ extension Bundle {
                 as? String)
             ?? "Gadeon"
     }
+
 }
 
 enum Models {
+
     static var all: [String] {
         let gb = installedGB
         var list: [String] = []
@@ -70,22 +67,14 @@ enum Models {
         return list
     }
 
-    // Below the offered set entirely, pruneUnavailable removes its download
-    // too -- alternating Debug/Release re-downloads it each way.
     private static func offersSmall(_ gb: Int) -> Bool {
         gb < 8 || debugBuild
     }
 
-    // Backstop for a tier offering nothing; App Store's iOS 18 floor (A12)
-    // guarantees at least the 1.7B.
     static var supported: Bool { !all.isEmpty }
 
-    // Key used by tiling / sample-prompt rules; not necessarily runnable on
-    // this device -- see `start`.
     static let fallback = "Qwen3.5-0.8B"
 
-    // Prefers `fallback` over `list.first`: on older hardware `list.first`
-    // may be a CoreML set whose ANE cannot lower it.
     static var start: String {
         let list = all
         var out = list.contains(fallback) ? fallback : (list.first ?? fallback)
@@ -97,20 +86,19 @@ enum Models {
     private static let e2b = "gemma-4-E2B"
     private static let e4b = "gemma-4-E4B"
 
-    // Cosmetic only -- the id is also the store path / catalog / precook
-    // key and must stay unchanged.
     static func display(_ name: String) -> String {
         switch name {
-        case "Qwen3.5-0.8B": return "Qwen3.5 0.8B"
-        case "QwenPaw-Flash-2B": return "QwenPaw 2B"
-        case "QwenPaw-Flash-4B": return "QwenPaw 4B"
-        case "QwenPaw-Flash-9B": return "QwenPaw 9B"
-        case "Ternary-Bonsai-27B": return "Bonsai 27B"
-        case "Ternary-Bonsai-1.7B": return "Bonsai 1.7B"
-        case "gemma-4-E2B": return "Gemma E2B"
-        case "gemma-4-E4B": return "Gemma E4B"
-        case "gemma-4-12B": return "Gemma 12B"
-        default: return name
+            case "Qwen3.5-0.8B": return "Qwen3.5 0.8B"
+            case "QwenPaw-Flash-2B": return "QwenPaw 2B"
+            case "QwenPaw-Flash-4B": return "QwenPaw 4B"
+            case "QwenPaw-Flash-9B": return "QwenPaw 9B"
+            case "Ternary-Bonsai-27B": return "Bonsai 27B"
+            case "Ternary-Bonsai-1.7B": return "Bonsai 1.7B"
+            case "gemma-4-E2B": return "Gemma E2B"
+            case "gemma-4-E4B": return "Gemma E4B"
+            case "gemma-4-12B": return "Gemma 12B"
+            default: return name
         }
     }
+
 }

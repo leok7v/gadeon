@@ -8,9 +8,9 @@ struct ClipSurface: NSViewRepresentable {
 
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
-        // .minimal: the inline bar's volume popover is unsatisfiable by
-        // construction in AppKit (NSGlassView pins it to 180pt, the slider
-        // inside needs 128) and logs a framework warning every time it opens.
+        // AVPlayerView's inline volume popover is unsatisfiable in AppKit
+        // (NSGlassView pins it to 180pt, its slider needs 128) and warns on
+        // every open; there is no per-control switch, only the whole bar.
         view.controlsStyle = .minimal
         view.player = player
         return view
@@ -19,4 +19,5 @@ struct ClipSurface: NSViewRepresentable {
     func updateNSView(_ view: AVPlayerView, context: Context) {
         if view.player !== player { view.player = player }
     }
+
 }

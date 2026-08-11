@@ -53,15 +53,10 @@ enum Whimsical {
         return out.isEmpty ? ["Thinking"] : out
     }
 
-    // Per-stage ring cursors: one walks up, one walks down, both wrapping.
-    // Guarded by a lock (callers span MainActor tasks and view inits).
     private static let lock = NSLock()
     nonisolated(unsafe) private static var cursors: [Stage: (Int, Int)] = [:]
     nonisolated(unsafe) private static var held:
         [Stage: (idx: Int, at: Date)] = [:]
-
-    // Advances at most once per `hold` seconds; concurrent callers are
-    // idempotent reads.
 
     static func current(_ stage: Stage,
                         hold: TimeInterval = 7) -> String {
@@ -80,9 +75,6 @@ enum Whimsical {
         }
         return result
     }
-
-    // Two cursors, opposite directions; a collision advances the second so
-    // the two surfaces never repeat.
 
     static func pair(_ stage: Stage) -> (first: String, second: String) {
         let all = list(stage)

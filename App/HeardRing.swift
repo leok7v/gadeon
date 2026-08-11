@@ -3,7 +3,7 @@ import SwiftUI
 struct HeardRing: View {
 
     let size: CGFloat
-    let level: Double // 0 at the gate's bar, 1 well over it
+    let level: Double
     let hearing: Bool
 
     @State private var spin = false

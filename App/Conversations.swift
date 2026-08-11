@@ -28,9 +28,6 @@ extension ChatModel {
         }
     }
 
-    // `!busy` guards a turn in flight: it holds an index into `messages`
-    // and keeps appending, so swapping the transcript here would redirect
-    // the reply into the conversation just opened.
     func openConversation(_ id: UUID) {
         commitCurrent()
         if !busy, let convo = ConversationStore.shared.load(id) {
@@ -45,13 +42,6 @@ extension ChatModel {
         }
     }
 
-    // `updated` is deliberately not bumped: a rename must not reorder the
-    // list under the hand that is using it.
-    //
-    // Setting `generatedTitle` for the live conversation does two jobs. It
-    // is what commitCurrent prefers, and it is also the gate maybeGenerate
-    // Title reads, so a name the user chose is never replaced by one the
-    // model invents a turn later.
     func renameConversation(_ id: UUID, to title: String) {
         let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
         if !name.isEmpty, var convo = ConversationStore.shared.load(id) {
@@ -61,8 +51,6 @@ extension ChatModel {
         }
     }
 
-    // Order matters: id/messages must clear before newChat(), or its own
-    // exit-commit re-saves the conversation just deleted.
     func deleteConversation(_ id: UUID) {
         ConversationStore.shared.delete(id)
         if id == currentConversationId {
@@ -82,27 +70,21 @@ extension ChatModel {
         sweepAttachments()
     }
 
-    // A live conversation and pending attachments are cited too, so a
-    // same-session file is not swept before it is saved.
-    //
-    // Matched on FILENAME, not path: the name carries a UUID and is
-    // unique by construction; the container's path is not stable across
-    // an install.
     func sweepAttachments() {
         var cited = Set<String>()
         for convo in ConversationStore.shared.list {
             for doc in convo.messages.flatMap({ m in m.docs ?? [] }) {
-                if let top = ChatModel.topName(
+                if let name = ChatModel.keptDocName(
                     ChatModel.restoredURL(doc.path)) {
-                    cited.insert(top)
+                    cited.insert(name)
                 }
             }
         }
         for doc in messages.flatMap({ m in m.docs }) {
-            if let top = ChatModel.topName(doc.url) { cited.insert(top) }
+            if let name = ChatModel.keptDocName(doc.url) { cited.insert(name) }
         }
         for url in attachedDocs.compactMap({ d in d.url }) {
-            if let top = ChatModel.topName(url) { cited.insert(top) }
+            if let name = ChatModel.keptDocName(url) { cited.insert(name) }
         }
         let fm = FileManager.default
         let kept = (try? fm.contentsOfDirectory(
@@ -152,14 +134,8 @@ extension ChatModel {
         return f.string(from: Date())
     }
 
-    // ---- Message <-> stored projection --------------------------------
-
-    // Stored by NAME under this marker, never by path: the bundle's path
-    // changes on every install/update.
-    private static let bundleMark = "bundle:"
-    // Stored by NAME under this marker too: the Data container's path is
-    // not stable across an install either.
-    private static let storeMark = "store:"
+    private static let bundleNameMark = "bundle:"
+    private static let storeRelativeMark = "store:"
 
     private static var storeRoot: String {
         ChatModel.attachments.path + "/"
@@ -168,16 +144,15 @@ extension ChatModel {
     private static func storedPath(_ url: URL) -> String {
         var out = url.path
         if url.path.hasPrefix(Bundle.main.bundlePath) {
-            out = bundleMark + url.lastPathComponent
+            out = bundleNameMark + url.lastPathComponent
         } else if url.path.hasPrefix(storeRoot) {
-            out = storeMark + String(url.path.dropFirst(storeRoot.count))
+            out = storeRelativeMark +
+                String(url.path.dropFirst(storeRoot.count))
         }
         return out
     }
 
-    // The top-level name under `storeRoot` identifies one kept document,
-    // whether it is a directory or (an older) bare file.
-    private static func topName(_ url: URL) -> String? {
+    private static func keptDocName(_ url: URL) -> String? {
         var out: String? = nil
         if url.path.hasPrefix(storeRoot) {
             out = String(url.path.dropFirst(storeRoot.count))
@@ -186,18 +161,17 @@ extension ChatModel {
         return out
     }
 
-    // A bundled resource no longer present resolves to a URL that cannot
-    // exist; the view names it rather than failing to play it.
     private static func restoredURL(_ stored: String) -> URL {
         var out = URL(fileURLWithPath: stored)
-        if stored.hasPrefix(bundleMark) {
-            let name = String(stored.dropFirst(bundleMark.count)) as NSString
+        if stored.hasPrefix(bundleNameMark) {
+            let name =
+                String(stored.dropFirst(bundleNameMark.count)) as NSString
             out = Bundle.main.url(forResource: name.deletingPathExtension,
                                   withExtension: name.pathExtension)
                 ?? URL(fileURLWithPath: name as String)
-        } else if stored.hasPrefix(storeMark) {
-            out = URL(fileURLWithPath:
-                storeRoot + String(stored.dropFirst(storeMark.count)))
+        } else if stored.hasPrefix(storeRelativeMark) {
+            out = URL(fileURLWithPath: storeRoot +
+                String(stored.dropFirst(storeRelativeMark.count)))
         }
         return out
     }
@@ -220,17 +194,11 @@ extension ChatModel {
             })
     }
 
-    // Docs are sealed from the raw text so a reopened turn renders like a
-    // live one; tool-round ids are re-indexed since the display never
-    // needs the originals.
     private static func restored(_ s: ConversationStore.Msg) -> Message {
         var m = Message(fromUser: s.fromUser, text: s.text)
         m.reasoning = s.reasoning
         m.loopStopped = s.loopStopped
         m.images = s.images.compactMap { data in decodeImage(data) }
-        // The path is restored whether or not the file survived; the view
-        // checks, so a clip that is gone becomes a named row rather than a
-        // player that cannot play.
         m.clips = (s.clips ?? []).map { p in restoredURL(p) }
         m.docs = (s.docs ?? []).map { d in
             ChatModel.DocRef(url: restoredURL(d.path), bytes: d.bytes,
@@ -250,8 +218,6 @@ extension ChatModel {
         return m
     }
 
-    // A small JPEG of a transcript image for persistence (~KB, not the full
-    // bitmap); mirrors traceThumbnail but from a CGImage.
     private static func jpeg(_ cg: CGImage) -> Data? {
         var out: Data? = nil
         let buf = NSMutableData()
@@ -271,11 +237,6 @@ extension ChatModel {
         }
     }
 
-    // ---- TraceEvent <-> trimmed stored projection ---------------------
-
-    // Keep tool results / injects / diagnostics; drop the multi-KB render /
-    // decode / prefill payloads. Timings + metrics survive, so the reopened
-    // graph still draws; only the row payload expansion goes empty.
     private static let traceTextKinds: Set<TraceEvent.Kind> =
         [.toolCall, .toolResult, .inject, .diag]
 
@@ -294,4 +255,5 @@ extension ChatModel {
                    t0: t.t0, t1: t.t1, ctx: t.ctx, tokens: t.tokens,
                    summary: t.summary, text: t.text)
     }
+
 }

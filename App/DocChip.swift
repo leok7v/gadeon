@@ -75,14 +75,10 @@ struct DocChip: View {
         }
     }
 
-    // Drawn into a CGContext rather than PDFKit's own thumbnail API: that
-    // returns an NSImage on macOS and a UIImage on iOS, a context is the
-    // same on both.
-
     private static func firstPage(_ url: URL) -> CGImage? {
         var out: CGImage? = nil
-        // PDFDocument is bound to a local: a page whose document has
-        // already been released cannot draw.
+        // `file` must stay bound: a page whose PDFDocument has been released
+        // draws nothing, and says so at runtime rather than at compile time.
         if url.pathExtension.lowercased() == "pdf",
            let file = PDFDocument(url: url), let page = file.page(at: 0) {
             let box = page.bounds(for: .mediaBox)
@@ -105,4 +101,5 @@ struct DocChip: View {
         }
         return out
     }
+
 }

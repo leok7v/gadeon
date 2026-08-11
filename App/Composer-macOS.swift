@@ -2,12 +2,15 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ComposerMenuStyle: ViewModifier {
+
     func body(content: Content) -> some View {
         content.menuStyle(.borderlessButton)
     }
+
 }
 
 struct AttachButton: View {
+
     let model: ChatModel
     @State private var showImporter = false
 
@@ -19,7 +22,6 @@ struct AttachButton: View {
         .buttonStyle(.plain)
         .foregroundStyle(model.hasAttachments ? Color.accentColor
                                               : Color.secondary)
-        // Not gated on canAttachImages: .txt / .md ride every model.
         .disabled(model.busy)
         .help(model.attachHelp)
         .fileImporter(isPresented: $showImporter,
@@ -30,4 +32,5 @@ struct AttachButton: View {
             }
         }
     }
+
 }

@@ -6,15 +6,11 @@ struct FilmStrip: View {
     var model: ChatModel
     let quiet: Bool
 
-    // `shown` is opaque; `arriving` fades in over it via `fade`.
     @State private var shown: CGImage?
     @State private var arriving: CGImage?
     @State private var fade: Double = 0
     @State private var previous: Date?
     @State private var alive: Double = 1
-
-    // `compositingGroup` is load-bearing: without it SwiftUI applies dim
-    // per-layer, reintroducing the flicker (measured 34% luminance climb).
 
     var body: some View {
         ZStack {
@@ -30,8 +26,6 @@ struct FilmStrip: View {
         .onChange(of: model.lookingAt) { _, next in
             accept(next?.image)
         }
-        // Linear, not eased: an ease-out reads as hanging then cutting,
-        // not receding.
         .onChange(of: model.watching) { _, live in
             if live {
                 alive = 1
@@ -48,8 +42,6 @@ struct FilmStrip: View {
         if let next {
             shown = arriving ?? shown
             arriving = next
-            // Two writes to `fade` in one tick would coalesce; the reset
-            // lands this tick, the animation starts next.
             fade = 0
             let seconds = min(max(gap * 0.3, 0.08), 0.25)
             Task { @MainActor in

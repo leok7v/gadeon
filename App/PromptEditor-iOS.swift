@@ -2,23 +2,17 @@ import SwiftUI
 import UIKit
 
 struct PromptEditor: UIViewRepresentable {
+
     @Binding var text: String
     @Binding var focused: Bool
     @Binding var caret: Int
     var disabled: Bool
     var minLines: Int
     var maxLines: Int
-    // `scale` already carries the device's Dynamic Type ratio; `font`
-    // below must stay the UNSCALED body size, or the category is
-    // counted twice.
     var scale: CGFloat = 1
     var onSubmit: () -> Void
-    // Unused on iOS (kept for symbol parity with the macOS twin); the
-    // field refuses drops via willBecomeEditableForDrop.
     var onDropFiles: ([URL]) -> Void = { _ in }
 
-    // The body point size at a given scale, shared with the SwiftUI
-    // placeholder drawn over the field so the two cannot drift apart.
     static func points(_ scale: CGFloat) -> CGFloat {
         UIFont.labelFontSize * scale
     }
@@ -32,8 +26,6 @@ struct PromptEditor: UIViewRepresentable {
     func makeUIView(context: Context) -> UITextView {
         let tv = UITextView()
         tv.delegate = context.coordinator
-        // Refuse drops on the text view so the chat's drop handler owns them
-        // (an @reference at the caret) rather than the field inserting content.
         tv.textDropDelegate = context.coordinator
         tv.font = font
         tv.backgroundColor = .clear
@@ -48,9 +40,6 @@ struct PromptEditor: UIViewRepresentable {
     func updateUIView(_ tv: UITextView, context: Context) {
         context.coordinator.parent = self
         if tv.font != font { tv.font = font }
-        // On an external change (send/clear, or a dropped reference) put the
-        // caret where the model wants it; the compare keeps local typing from
-        // resetting it each keystroke.
         if tv.text != text {
             tv.text = text
             let len = (text as NSString).length
@@ -60,9 +49,8 @@ struct PromptEditor: UIViewRepresentable {
                 tv.selectedTextRange = tv.textRange(from: pos, to: pos)
             }
         }
-        // A first-responder-affecting UIKit call here re-enters SwiftUI's
-        // responder graph mid-update (an AttributeGraph cycle), so both
-        // calls are deferred to the next tick.
+        // Editable and first-responder changes re-enter SwiftUI's responder
+        // graph, so applying them here cycles the AttributeGraph.
         let editable = !disabled
         let wantFocus = focused && !disabled
         if tv.isEditable != editable
@@ -75,10 +63,6 @@ struct PromptEditor: UIViewRepresentable {
             }
         }
     }
-
-    // Grow with the text, clamped to [min, max] lines. Returning the size here
-    // (not feeding a measured height back through a resizing binding) is what
-    // keeps SwiftUI's AttributeGraph from cycling.
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextView,
                       context: Context) -> CGSize? {

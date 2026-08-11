@@ -1,10 +1,9 @@
 import Foundation
 
 enum AttachmentRefs {
-    // Two default-ignorable code points delimit a reference; invisible and
-    // never occur in real input.
-    private static let open: Character = "\u{2063}"    // invisible separator
-    private static let close: Character = "\u{2064}"   // invisible plus
+
+    private static let open: Character = "\u{2063}"
+    private static let close: Character = "\u{2064}"
 
     static func token(_ name: String) -> String {
         "\(open)@\(name)\(close)"
@@ -75,4 +74,5 @@ enum AttachmentRefs {
         if let inner = pending { out += inner }
         return out
     }
+
 }

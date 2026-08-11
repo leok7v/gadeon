@@ -19,8 +19,6 @@ struct ContentView: View {
         textColor: Color(white: 0.53),
         secondaryColor: Color(white: 0.6),
         highlightCode: false)
-    // MarkdownStyle point sizes are fixed: the MD renderer builds
-    // systemFont(ofSize:), which no content-size category touches.
     @ScaledMetric(relativeTo: .body) private var typeScale: CGFloat = 1
 
     private var textScale: CGFloat { typeScale * model.textScale }
@@ -35,9 +33,6 @@ struct ContentView: View {
         out.listIndent = s.listIndent * k
         return out
     }
-    // Not FocusState: the AppKit editor owns first responder and syncs this
-    // both ways, which a FocusState binding cannot cross into an
-    // NSViewRepresentable.
     @State private var promptFocused = false
     @State private var chatHeight: CGFloat = 0
     @State private var peek = ToolPeek()
@@ -50,13 +45,9 @@ struct ContentView: View {
     @State private var optionDown = false
     @State private var showModelInvite = false
     @State private var dropActive = false
-    // A magnification is reported relative to the gesture's own start, so
-    // `pinchFrom` holds the stop it began at.
     @State private var pinchFrom: Int?
     @State private var pinchShown: Int?
 
-    // simultaneousGesture, or it takes the scroll view's own gestures with it
-    // and the transcript stops scrolling.
     private var pinchZoom: some Gesture {
         MagnifyGesture()
             .onChanged { value in
@@ -77,8 +68,6 @@ struct ContentView: View {
                 pinchShown = nil
             }
     }
-    // Seeded from the ring holder rather than a placeholder: the read is
-    // idempotent, so a view re-init cannot advance the rotation.
     @State private var optimizingPhrase = Whimsical.current(.optimizing)
     @State private var downloadingPhrase = Whimsical.current(.downloading)
     @State private var sidebarOpen = false
@@ -97,11 +86,7 @@ struct ContentView: View {
             .modifier(OptionKeyMonitor(down: $optionDown))
             .preferredColorScheme(model.theme.scheme)
             .environment(\.appTextScale, model.textScale)
-            // The default font too, so anything that never names one does not
-            // sit at the system size while labelled text grows around it.
             .font(appTextFont(.body, model.textScale))
-            // A first run starts the fetch at EULA acceptance instead, so it
-            // is not resolved here.
             .onAppear {
                 if Models.supported, model.eulaAccepted, model.accepted {
                     model.load(name: model.modelName)
@@ -116,8 +101,6 @@ struct ContentView: View {
                          onClose: { model.showSettings = false })
         } else if model.showDebug {
             DebugView(model: model, onClose: { model.showDebug = false })
-        // A pending download takes over even with a model already loaded, or
-        // the pick sets state behind the live chat with nothing on screen.
         } else if model.ready && model.downloadName == nil
             && !model.downloading {
             chatShell
@@ -139,20 +122,18 @@ struct ContentView: View {
             drawer
             renameOverlay
         }
-        // Hidden: only the Cmd+N shortcut matters, and it has to survive the
-        // top-bar button being disabled while the drawer is open.
-        .background {
-            Button("", action: openNewChat)
-                .keyboardShortcut("n", modifiers: .command)
-                .disabled(model.busy)
-                .hidden()
-        }
+        .background { newChatShortcut }
+    }
+
+    private var newChatShortcut: some View {
+        Button("", action: openNewChat)
+            .keyboardShortcut("n", modifiers: .command)
+            .disabled(model.busy)
+            .hidden()
     }
 
     @Environment(\.horizontalSizeClass) private var sizeClass
 
-    // nil on a regular layout, so the title bar inherits the toolbar's own
-    // size rather than an override.
     private var barGlyph: Font? {
         sizeClass == .compact ? .system(size: 20 * model.textScale) : nil
     }
@@ -173,8 +154,6 @@ struct ContentView: View {
         .disabled(model.busy)
     }
 
-    // Expanding hides the centered model picker, so the row takes over the
-    // bar rather than shoving it.
     private var trailingButtons: some View {
         HStack(spacing: 12) {
             if !model.messages.isEmpty {
@@ -203,15 +182,12 @@ struct ContentView: View {
         .task(id: actionsIdle) { await collapseActionsAfterIdle() }
     }
 
-    // nil hides the button.
     private var debugAction: (() -> Void)? {
         var out: (() -> Void)? = nil
         if model.statusLine { out = openDebug }
         return out
     }
 
-    // Never on iOS, which has no hover to leave: the cluster stays open there
-    // until it is tapped shut.
     private var actionsIdle: Bool {
         !isOS && actionsExpanded && !actionsHovering
     }
@@ -244,9 +220,6 @@ struct ContentView: View {
         }
     }
 
-    // Above the drawer it was opened from, and over the whole window rather
-    // than the sidebar's column, so the soft keyboard cannot push it out of
-    // view on a phone.
     @ViewBuilder
     private var renameOverlay: some View {
         if let convo = renaming {
@@ -266,10 +239,6 @@ struct ContentView: View {
             if !model.eulaAccepted {
                 EULAView(onAgree: model.acceptEULA)
             } else if let name = model.downloadName {
-                // The App Store requires explicit download consent before any
-                // fetch, so it comes before the disclaimer. A third-party
-                // licence comes before both: the size question is ours to put,
-                // the licence is not.
                 if GemmaTerms.applies(to: name), !model.gemmaTermsAccepted {
                     GemmaTermsView(model: name,
                                    onAgree: model.acceptGemmaTerms,
@@ -372,11 +341,9 @@ struct ContentView: View {
     private func openConversation(_ id: UUID) {
         hideSoftKeyboard()
         actionsExpanded = false
-        // Reopening the LIVE conversation read-only would hide the composer
-        // on its own chat.
-        if !(id == model.currentConversationId && !model.readOnly) {
-            model.openConversation(id)
-        }
+        let alreadyLive = id == model.currentConversationId &&
+                          !model.readOnly
+        if !alreadyLive { model.openConversation(id) }
         closeSidebar()
     }
 
@@ -409,9 +376,6 @@ struct ContentView: View {
     private func closeSidebar() {
         withAnimation(.snappy) { sidebarOpen = false }
     }
-
-    // The storage and backup note is required disclosure for an on-device
-    // download this size.
 
     private func downloadConsent(_ name: String) -> some View {
         VStack(spacing: 16) {
@@ -483,8 +447,6 @@ struct ContentView: View {
 
     private var compileProgress: some View {
         VStack(spacing: 16) {
-            // No LoC denominator means a GGUF load rather than an ANE
-            // compile, so a spinner rather than a bar stuck at zero.
             Group {
                 if model.compileTotalLoC > 0 {
                     ProgressView(value: model.compileFraction)
@@ -522,13 +484,8 @@ struct ContentView: View {
         .frame(maxWidth: 480)
     }
 
-    // The ring holder advances at most every 7s and the read is idempotent,
-    // so polling it costs nothing and duplicate tickers are harmless.
-
     private func stageWhimsical(_ stage: Whimsical.Stage,
                                 _ phrase: Binding<String>) -> some View {
-        // Every phrase must fit ONE line and never ellipsize, on an
-        // iPhone-mini width and under Large Text alike.
         Text(phrase.wrappedValue)
             .appFont(.subheadline)
             .foregroundStyle(.secondary)
@@ -543,10 +500,6 @@ struct ContentView: View {
                 }
             }
     }
-
-    // Some paths reach here without load() having run: accept() flips the
-    // disclaimer gate without resolving the model. load() always transitions
-    // out, so this fires once rather than spinning.
 
     private var preparing: some View {
         ProgressView()
@@ -573,10 +526,6 @@ struct ContentView: View {
         .frame(maxWidth: 420)
     }
 
-
-    // A diagnostic that deliberately drives a redraw per display refresh over
-    // the transcript. Off unless GADEON_STALL=1, and it reports which so a
-    // capture cannot be read against an app that was not running it.
     static let stallProbeOn: Bool = {
         let on = ProcessInfo.processInfo.environment["GADEON_STALL"] == "1"
         Instrument.note("[stall] probe \(on ? "ARMED" : "off")")
@@ -588,9 +537,6 @@ struct ContentView: View {
             .simultaneousGesture(pinchZoom,
                                  including: isOS ? .all : .none)
             .modifier(Shimmer(active: ContentView.stallProbeOn))
-            // A safe-area inset rather than an overlay: it composes with the
-            // keyboard's own inset, so the soft keyboard cannot strand the
-            // tail under the composer.
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if !model.readOnly {
                     VStack(spacing: 0) {
@@ -600,13 +546,9 @@ struct ContentView: View {
                             statusLine
                         }
                     }
-                    // The transcript scrolls UNDER this inset and the card is
-                    // translucent, so it needs an opaque ground of its own.
                     .background(.bar)
                 }
             }
-        // The editors refuse drops so this handler owns them, and no file
-        // path is ever pasted as text.
         .dropDestination(for: URL.self) { urls, _ in
             model.handleDrop(urls, at: model.caret)
             return true
@@ -668,7 +610,6 @@ struct ContentView: View {
             findCount = findController.find(findQuery)
             findCurrent = findController.currentMatch
         }
-        // A tick later, or the field is not yet in the hierarchy to take it.
         Task { @MainActor in findFocused = true }
     }
 
@@ -743,8 +684,6 @@ struct ContentView: View {
             }
         }
         .padding(24)
-        // The transcript stack is leading-aligned, so the cards claim the
-        // full width to centre within it.
         .frame(maxWidth: .infinity)
     }
 
@@ -788,9 +727,6 @@ struct ContentView: View {
         .buttonStyle(SampleCardStyle())
     }
 
-    // Points, not the app's text scale: the thumbnail it sits on has a fixed
-    // 44pt frame, so a badge that followed the zoom would outgrow it.
-
     @ViewBuilder
     private func badgeMark(_ symbol: String?) -> some View {
         if let symbol {
@@ -803,9 +739,6 @@ struct ContentView: View {
 
     private var statusLine: some View {
         HStack {
-            // The phone WRAPS rather than scaling to fit: a shrink-to-fit
-            // line fights the zoom setting, and it does not touch the
-            // interpolated Image runs, so only half the line would move.
             statusText
                 .font(.system(size: statusPoints))
                 .foregroundStyle(.secondary)
@@ -820,9 +753,6 @@ struct ContentView: View {
         .padding(.vertical, 4)
     }
 
-    // A Text either way, with the symbols interpolated INSIDE the run:
-    // lineLimit, minimumScaleFactor and the shimmer then apply to the whole
-    // line, which an HStack of views would have broken.
     private var statusText: Text {
         model.statsLabel.isEmpty ? modelSummary : Text(model.statsLabel)
     }
@@ -852,16 +782,13 @@ struct ContentView: View {
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                // NOT a LazyVStack: on iOS a lazy row taller than the viewport
-                // blanks once its top scrolls far off-screen, and a long
-                // answer is one such row.
+                // A LazyVStack row taller than the viewport blanks on iOS once
+                // its top scrolls off-screen; a long answer is one such row.
                 VStack(alignment: .leading, spacing: 12) {
                     let _ = Instrument.beat("transcript")
                     ForEach(model.messages) { m in
                         bubble(m).id(m.id)
                     }
-                    // INSIDE the scroll, so the soft keyboard's half of the
-                    // screen cannot put a card out of reach.
                     if model.showSamples { samplePills }
                     Color.clear
                         .frame(height: max(tailInset, 1))
@@ -886,8 +813,6 @@ struct ContentView: View {
                     }
                 }
             }
-            // Toggle follow ONLY on a user-driven scroll, so a container
-            // resize or our own animated jump never flips it.
             .onScrollPhaseChange { _, phase, context in
                 if phase == .interacting || phase == .decelerating {
                     let g = context.geometry
@@ -897,9 +822,6 @@ struct ContentView: View {
             .onChange(of: model.messages.last?.text) { _, _ in
                 if follow { scrollToBottom(proxy) }
             }
-            // Re-arms follow, which every other scroll trigger is gated on:
-            // the keyboard raising shrinks the viewport, and a scrolled-up
-            // transcript would otherwise strand its tail behind the composer.
             .onChange(of: promptFocused) { _, focused in
                 if focused {
                     follow = true
@@ -911,13 +833,10 @@ struct ContentView: View {
                 findController.order = model.messages.map { m in m.id }
             }
             .onAppear {
-                // Align the match's own fraction of the message to the same
-                // fraction of the viewport, so the exact line lands in view
-                // (a long bubble's match is not left off-screen); nil centers.
-                findController.scrollTo = { id, frac in
+                findController.scrollTo = { id, fraction in
                     withAnimation {
                         proxy.scrollTo(id,
-                            anchor: UnitPoint(x: 0.5, y: frac ?? 0.5))
+                            anchor: UnitPoint(x: 0.5, y: fraction ?? 0.5))
                     }
                 }
                 findController.order = model.messages.map { m in m.id }
@@ -940,8 +859,6 @@ struct ContentView: View {
         }
     }
 
-    // Looked up rather than copied: a round opened while it is still running
-    // has to fill in its result under the pointer.
     private var peekedRound: ChatModel.ToolRound? {
         var out: ChatModel.ToolRound? = nil
         if let id = peek.messageId,
@@ -955,8 +872,6 @@ struct ContentView: View {
         min(popScale, 1.5) * model.textScale
     }
 
-    // Quarter-speed on the Dynamic Type curve, so Large Text nudges the
-    // monospaced dump rather than ballooning it.
     private var peekTextSize: CGFloat {
         11 * (1 + (popScale - 1) / 4) * model.textScale
     }
@@ -971,8 +886,6 @@ struct ContentView: View {
                     tailAt: peek.anchor.minX + 24 - (geo.size.width - width) / 2,
                     tailOnBottom: !below)
                 ZStack {
-                    // With no pointer to move away, a touch elsewhere is the
-                    // only way out.
                     if isOS {
                         Color.black.opacity(0.001)
                             .contentShape(Rectangle())
@@ -990,20 +903,16 @@ struct ContentView: View {
                         .onHover { inside in
                             if inside { peek.keep() } else { peek.fade() }
                         }
-                        // Positioned off its own measured height, so it stays
-                        // hidden until there is one rather than opening at a
-                        // guessed spot and jumping.
                         .opacity(calloutSize.height > 0 ? 1 : 0)
                         .position(x: geo.size.width / 2,
-                                  y: calloutY(below, geo.size.height))
+                                  y: clampedCalloutY(below, geo.size.height))
                 }
             }
         }
     }
 
-    // Clamped into the transcript, so a callout that would run off the top or
-    // bottom slides back in rather than being cut.
-    private func calloutY(_ below: Bool, _ height: CGFloat) -> CGFloat {
+    private func clampedCalloutY(_ below: Bool,
+                                 _ height: CGFloat) -> CGFloat {
         let h = calloutSize.height
         let want = below ? peek.anchor.maxY + 6 + h / 2
                          : peek.anchor.minY - 6 - h / 2
@@ -1031,8 +940,6 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
 
-    // The tail spacer, not the last message: while the inset is open, that is
-    // what keeps the streaming text lifted above the composer.
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
         proxy.scrollTo("chat-tail", anchor: .bottom)
     }
@@ -1138,8 +1045,6 @@ struct ContentView: View {
             .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    // Offered ONLY to the turn it came from: speech follows one answer, and a
-    // stale highlight on an earlier bubble would point at the wrong words.
     private func spoken(_ m: ChatModel.Message) -> String? {
         m.id == model.messages.last?.id ? model.speech.spokenText : nil
     }
@@ -1149,23 +1054,18 @@ struct ContentView: View {
         Group {
             if !m.fromUser && model.renderMarkdown
                 && !m.answerDoc.items.isEmpty {
-                // The transcript owns the scroll, so scrolls: false.
                 MarkdownTextView(m.answerDoc,
                                  style: ContentView.scaled(
                                      ContentView.answerStyle, by: textScale),
                                  find: findController, findId: m.id,
                                  scrolls: false, speaking: spoken(m))
             } else if !m.fromUser {
-                // The doc trails the raw text by one ticker beat, so this
-                // covers the gap as well as plain-text mode.
                 PlainTextView(answer,
                               style: ContentView.scaled(
                                   ContentView.answerStyle, by: textScale),
                               find: findController, findId: m.id,
                               scrolls: false, speaking: spoken(m))
             } else {
-                // The ANSWER's body size, not .body, so a question and its
-                // reply read the same at every zoom stop on both platforms.
                 Text(answer)
                     .font(.system(
                         size: ContentView.answerStyle.bodySize * textScale))
@@ -1185,25 +1085,13 @@ struct ContentView: View {
             .modifier(Shimmer(active: true))
     }
 
-    // nil while the turn has no content, so a stopped turn shows no bubble
-    // and the reasoning header carries the live state.
-
     private func answerText(_ m: ChatModel.Message) -> String? {
         m.text.isEmpty ? nil : m.text
     }
 
-    // A settled turn that made tool calls and committed no answer. The
-    // session commits nothing there by design, so the transcript has to say
-    // so rather than show Thoughts over silence.
-
     private func isAnswerless(_ m: ChatModel.Message) -> Bool {
         !m.fromUser && !m.toolRounds.isEmpty && !isLive(m)
     }
-
-    // Everything transient about a bubble hangs off this. A state that
-    // outlives its turn is a stale label, or -- where it drives an
-    // animation -- a commit on every display refresh for the rest of the
-    // conversation.
 
     private func isLive(_ m: ChatModel.Message) -> Bool {
         model.busy && m.id == model.messages.last?.id
@@ -1228,19 +1116,11 @@ struct ContentView: View {
         isLive(m) && model.prefilling
     }
 
-    // `isLive` and not "text is empty" alone: an interrupted turn keeps an
-    // empty answer, so the marquee would never stop.
-
     private func isThinking(_ m: ChatModel.Message) -> Bool {
         isLive(m) && m.text.isEmpty
     }
 
 }
-
-// Built on APPEAR, never at init: a bubble is re-evaluated on every streamed
-// token, and an AVPlayer per evaluation would be a decoder per token. A
-// restored path can be stale, so the file is tested once when the row
-// appears and named rather than offered when it has gone.
 
 private struct ClipPlayer: View {
 
@@ -1270,9 +1150,11 @@ private struct ClipPlayer: View {
         }
         .onDisappear { player?.pause() }
     }
+
 }
 
 private struct SampleCardStyle: ButtonStyle {
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .opacity(configuration.isPressed ? 0.55 : 1)
@@ -1280,9 +1162,11 @@ private struct SampleCardStyle: ButtonStyle {
             .animation(.easeOut(duration: 0.12),
                        value: configuration.isPressed)
     }
+
 }
 
 private struct ReasoningView: View {
+
     let text: String
     let doc: Markdown.Document
     let style: MarkdownStyle
@@ -1301,11 +1185,6 @@ private struct ReasoningView: View {
             }
         }
     }
-
-    // The ticker is a SIBLING of the Button, never inside its label: a
-    // GeometryReader in a label swallows the leftover width (which can go
-    // negative before layout settles), and a TimelineView there may skip
-    // scheduling.
 
     private var header: some View {
         HStack(spacing: 6) {
@@ -1362,14 +1241,10 @@ private struct ReasoningView: View {
     }
 }
 
-// A tool row reports its frame in this space and the callout is placed in the
-// same one, so the two agree while the transcript scrolls under them.
 private let transcriptSpace = "transcript"
 
-// ONE owner, because the row and the callout both open and close it: a
-// pointer travelling from one to the other leaves both, and two independent
-// timers would race to dismiss what the user is reaching for.
 @MainActor @Observable final class ToolPeek {
+
     private(set) var messageId: UUID?
     private(set) var roundId = 0
     private(set) var anchor: CGRect = .zero
@@ -1405,8 +1280,6 @@ private let transcriptSpace = "transcript"
         messageId = nil
     }
 
-    // The gap between the row and its callout is not a decision to dismiss,
-    // so leaving either only starts a grace period.
     func fade() {
         dismiss?.cancel()
         dismiss = Task { @MainActor in
@@ -1414,9 +1287,11 @@ private let transcriptSpace = "transcript"
             if !Task.isCancelled { messageId = nil }
         }
     }
+
 }
 
 private struct Callout: Shape {
+
     let tailAt: CGFloat
     let tailOnBottom: Bool
     private static let radius: CGFloat = 12
@@ -1448,10 +1323,6 @@ private struct ToolCallStrip: View {
     let messageId: UUID
     let rounds: [ChatModel.ToolRound]
     let peek: ToolPeek
-    // A stopped or failed turn leaves a round's result nil for good, so the
-    // shimmer needs this as well: an indefinite animation drives a view-graph
-    // update and a synchronous render-server round trip on every display
-    // refresh, for the rest of the conversation.
     let live: Bool
     @State private var frames: [Int: CGRect] = [:]
 
@@ -1486,7 +1357,7 @@ private struct ToolCallStrip: View {
             }
         }
         .foregroundStyle(.secondary)
-        .modifier(Shimmer(active: live && round.result == nil))
+        .modifier(Shimmer(active: running(round)))
         .contentShape(Rectangle())
         .onGeometryChange(for: CGRect.self, of: { geo in
             geo.frame(in: .named(transcriptSpace))
@@ -1510,9 +1381,15 @@ private struct ToolCallStrip: View {
     private func errored(_ round: ChatModel.ToolRound) -> Bool {
         round.result?.hasPrefix("error") == true
     }
+
+    private func running(_ round: ChatModel.ToolRound) -> Bool {
+        live && round.result == nil
+    }
+
 }
 
 private struct ToolRoundDetail: View {
+
     let round: ChatModel.ToolRound
     let size: CGFloat
     let k: CGFloat
@@ -1548,14 +1425,14 @@ private struct ToolRoundDetail: View {
         }
         .padding(12)
     }
+
 }
 
 private struct ThinkingTicker: View {
+
     let text: String
 
     var body: some View {
-        // No fixedSize: it would pin the Text to its full intrinsic width and
-        // spill past the row.
         Text(String(text.suffix(120)))
             .appFont(.caption)
             .foregroundStyle(Color(white: 0.53))
@@ -1570,11 +1447,8 @@ private struct ThinkingTicker: View {
     }
 }
 
-// Explicit per-frame opacity, never an implicit repeatForever animation: an
-// in-flight implicit animation bleeds into unrelated changes on the same
-// view, cross-fading text into overlapping glyphs.
-
 private struct Shimmer: ViewModifier {
+
     let active: Bool
 
     func body(content: Content) -> some View {
@@ -1587,4 +1461,5 @@ private struct Shimmer: ViewModifier {
             content
         }
     }
+
 }

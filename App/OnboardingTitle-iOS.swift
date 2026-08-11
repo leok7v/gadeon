@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct OnboardingTitle: ViewModifier {
+
     func body(content: Content) -> some View {
         VStack(spacing: 0) {
             Text(Bundle.appName)
@@ -11,4 +12,5 @@ struct OnboardingTitle: ViewModifier {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
+
 }

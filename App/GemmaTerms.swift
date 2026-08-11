@@ -3,8 +3,6 @@ import SwiftUI
 
 enum GemmaTerms {
 
-    // Empty is deliberate: gemma-4 is Apache-2.0 and ungated, unlike gemma-3.
-
     static let modelNames: Set<String> = []
 
     static func applies(to name: String) -> Bool { modelNames.contains(name) }

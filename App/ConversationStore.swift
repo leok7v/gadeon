@@ -19,9 +19,8 @@ import Foundation
         let rounds: [Round]
         let images: [Data]
         let loopStopped: Bool
-        // Optional: a synthesized Codable throws, rather than falling back
-        // to a property's default, on a missing key -- so a field added
-        // after records already exist on disk must be Optional to decode.
+        // A synthesized Codable throws on a missing key instead of using
+        // the property default, so every added field must be Optional.
         let clips: [String]?
         let docs: [StoredDoc]?
     }
@@ -31,9 +30,6 @@ import Foundation
         let bytes: Int
         let short: Bool?
     }
-
-    // `text` drops the multi-KB verbatim render/decode payload; trimmed for
-    // debug-on-reopen to timings, metrics, and tool results.
 
     struct Trace: Codable {
         let kind: String
@@ -143,4 +139,5 @@ import Foundation
     private func fileURL(_ id: UUID) -> URL {
         conversationsDir().appendingPathComponent("\(id.uuidString).json")
     }
+
 }

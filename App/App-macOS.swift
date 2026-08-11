@@ -2,22 +2,23 @@ import AppKit
 import SwiftUI
 
 @main struct GadeonApp: App {
-    // Owned here, not in ContentView, so ViewCommands binds the same instance.
+
     @State private var model = ChatModel()
+
     var body: some Scene {
         Window(Bundle.appName, id: "main") {
             ContentView(model: model).frame(minWidth: 800, minHeight: 600)
         }
         .commands { ViewCommands(model: model) }
     }
+
 }
 
 struct ViewCommands: Commands {
+
     @Bindable var model: ChatModel
+
     var body: some Commands {
-        // Replaces the default Settings item: this app has no Settings scene
-        // (settings live in a window view), so Command-, would otherwise be
-        // dead.
         CommandGroup(replacing: .appSettings) {
             Button {
                 model.openSettings()
@@ -26,9 +27,6 @@ struct ViewCommands: Commands {
             }
             .keyboardShortcut(",", modifiers: .command)
         }
-        // A group, not CommandMenu("View"): SwiftUI already builds a View
-        // menu (Enter Full Screen lives there), and a same-named CommandMenu
-        // adds a second one instead of merging into it.
         CommandGroup(after: .toolbar) {
             Button { model.resetZoom() } label: {
                 Label("Reset Zoom", systemImage: "1.magnifyingglass")
@@ -55,6 +53,7 @@ struct ViewCommands: Commands {
             }
         }
     }
+
 }
 
 @MainActor func quitApp() { NSApp.terminate(nil) }

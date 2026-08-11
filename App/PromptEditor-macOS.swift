@@ -9,17 +9,10 @@ struct PromptEditor: NSViewRepresentable {
     var disabled: Bool
     var minLines: Int
     var maxLines: Int
-    // NSTextView takes a font, not an environment; preferredFont(for
-    // TextStyle:) is a fixed 13pt on macOS regardless of the app's
-    // text-size setting, so `scale` compensates.
     var scale: CGFloat = 1
     var onSubmit: () -> Void
-    // A dropped file is routed to the chat's attach handler (chip +
-    // @reference) instead of pasted as text.
     var onDropFiles: ([URL]) -> Void = { _ in }
 
-    // The body point size at a given scale, shared with the SwiftUI
-    // placeholder drawn over the field so the two cannot drift apart.
     static func points(_ scale: CGFloat) -> CGFloat {
         NSFont.preferredFont(forTextStyle: .body).pointSize * scale
     }
@@ -43,7 +36,6 @@ struct PromptEditor: NSViewRepresentable {
         tv.isVerticallyResizable = true
         tv.isHorizontallyResizable = false
         tv.textContainer?.widthTracksTextView = true
-        // x=0 origin so the SwiftUI placeholder overlay lines up.
         tv.textContainer?.lineFragmentPadding = 0
         tv.string = text
 
@@ -59,9 +51,6 @@ struct PromptEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         if let tv = scroll.documentView as? SubmitTextView {
-            // On an external change (send/clear, or a dropped reference) put
-            // the caret where the model wants it; comparing first keeps
-            // local typing from resetting it each keystroke.
             if tv.string != text {
                 tv.string = text
                 let len = (text as NSString).length
@@ -76,10 +65,6 @@ struct PromptEditor: NSViewRepresentable {
             }
         }
     }
-
-    // Grow with the text, clamped to [min, max] lines. Returning the size here
-    // (not feeding a measured height back through a resizing binding) is what
-    // keeps SwiftUI's AttributeGraph from cycling.
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView,
                       context: Context) -> CGSize? {
@@ -104,8 +89,6 @@ struct PromptEditor: NSViewRepresentable {
 
         init(_ parent: PromptEditor) { self.parent = parent }
 
-        // What the last measurement was taken from, so the same question is
-        // not asked of CoreText twice.
         private struct Measured {
             let text: String
             let width: CGFloat
@@ -114,9 +97,6 @@ struct PromptEditor: NSViewRepresentable {
         }
 
         private var last: Measured?
-
-        // Clamped to `ceiling`: once a prefix already exceeds it, more text
-        // cannot bring it back down, so the rest need not be measured.
 
         func height(of text: String, width: CGFloat, font: NSFont,
                     atMost ceiling: CGFloat) -> CGFloat {
@@ -132,28 +112,30 @@ struct PromptEditor: NSViewRepresentable {
             return result
         }
 
-        // The sentinel keeps a trailing empty line, which boundingRect drops.
         private static func measure(_ text: String, width: CGFloat,
                                     font: NSFont,
                                     atMost ceiling: CGFloat) -> CGFloat {
-            let box = NSSize(width: width, height: .greatestFiniteMagnitude)
-            let options: NSString.DrawingOptions = [.usesLineFragmentOrigin,
-                                                    .usesFontLeading]
-            let attributes: [NSAttributedString.Key: Any] = [.font: font]
-            let head = String(text.prefix(sampleLength)) + " "
-            var result = (head as NSString).boundingRect(
-                with: box, options: options, attributes: attributes).height
-            if result < ceiling, text.count > sampleLength {
-                result = ((text + " ") as NSString).boundingRect(
-                    with: box, options: options,
-                    attributes: attributes).height
+            let probe = String(text.prefix(overflowProbeLength))
+            var result = boundingHeight(probe, width: width, font: font)
+            if result < ceiling, text.count > overflowProbeLength {
+                result = boundingHeight(text, width: width, font: font)
             }
             return result
         }
 
-        // Enough characters to overflow any sane maxLines at any sane width,
-        // and short enough that measuring it costs nothing.
-        private static let sampleLength = 2048
+        // boundingRect drops a trailing empty line; the space keeps it.
+
+        private static func boundingHeight(_ text: String, width: CGFloat,
+                                           font: NSFont) -> CGFloat {
+            let box = NSSize(width: width, height: .greatestFiniteMagnitude)
+            let options: NSString.DrawingOptions = [.usesLineFragmentOrigin,
+                                                    .usesFontLeading]
+            let attributes: [NSAttributedString.Key: Any] = [.font: font]
+            return ((text + " ") as NSString).boundingRect(
+                with: box, options: options, attributes: attributes).height
+        }
+
+        private static let overflowProbeLength = 2048
 
         func textDidChange(_ notification: Notification) {
             if let tv = textView, parent.text != tv.string {
@@ -182,9 +164,8 @@ struct PromptEditor: NSViewRepresentable {
 
 final class SubmitTextView: NSTextView {
     var onSubmit: (() -> Void)?
-    // NSTextView accepts file drops through its built-in text-drag
-    // machinery, not the overridable registerForDraggedTypes, so drops
-    // are intercepted here instead of refused.
+    // NSTextView takes file drops through its built-in text-drag machinery,
+    // which registerForDraggedTypes does not reach.
     var onDropFiles: (([URL]) -> Void)?
 
     private func droppedFileURLs(_ sender: NSDraggingInfo) -> [URL] {

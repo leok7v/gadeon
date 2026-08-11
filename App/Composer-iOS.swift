@@ -3,20 +3,19 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ComposerMenuStyle: ViewModifier {
+
     func body(content: Content) -> some View {
         content.menuStyle(.automatic)
     }
+
 }
 
 struct AttachButton: View {
+
     let model: ChatModel
     @State private var showImporter = false
     @State private var showPhotos = false
     @State private var photos: [PhotosPickerItem] = []
-
-    // A PhotosPicker placed directly as a Menu item never presents (SwiftUI
-    // only renders plain buttons in a menu), so a menu Button arms the picker
-    // through the .photosPicker(isPresented:) modifier instead.
 
     var body: some View {
         Group {
@@ -58,9 +57,6 @@ struct AttachButton: View {
             .frame(width: 22, height: 22)
     }
 
-    // A picked movie must not be handed to attachImage: its bytes would
-    // arrive as Data like a photo's and be patchified as a still.
-
     private func load(_ items: [PhotosPickerItem]) {
         if !items.isEmpty {
             Task { @MainActor in
@@ -85,11 +81,8 @@ struct AttachButton: View {
     }
 }
 
-// PhotosPicker hands a movie over as a file it owns and then deletes; this
-// copies it somewhere with our lifetime so the decode at send still finds it.
-// Transferable is the only way to receive one -- loadTransferable(type:
-// URL.self) yields a path that is already gone by the time it is read.
 struct PickedMovie: Transferable {
+
     let url: URL
 
     static var transferRepresentation: some TransferRepresentation {
@@ -102,4 +95,5 @@ struct PickedMovie: Transferable {
             return PickedMovie(url: copy)
         }
     }
+
 }

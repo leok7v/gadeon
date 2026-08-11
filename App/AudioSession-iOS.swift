@@ -1,10 +1,6 @@
 import AVFoundation
 import Foundation
 
-// Playback no-ops while `recording` is true: its idle callback can land
-// after the mic has already claimed the session, and deactivating then
-// would kill a live tap.
-
 enum AudioSession {
 
     nonisolated(unsafe) private static var recording = false
@@ -29,9 +25,9 @@ enum AudioSession {
 
     static func beginPlayback() {
         lock.lock()
-        let busy = recording
+        let micActive = recording
         lock.unlock()
-        if !busy {
+        if !micActive {
             let session = AVAudioSession.sharedInstance()
             try? session.setCategory(.playback, mode: .spokenAudio)
             try? session.setActive(true)
@@ -40,9 +36,9 @@ enum AudioSession {
 
     static func endPlayback() {
         lock.lock()
-        let busy = recording
+        let micActive = recording
         lock.unlock()
-        if !busy {
+        if !micActive {
             try? AVAudioSession.sharedInstance().setActive(
                 false, options: [.notifyOthersOnDeactivation])
         }
@@ -61,4 +57,5 @@ enum AudioSession {
             s.sampleRate, route.isEmpty ? "none" : route,
             s.inputNumberOfChannels)
     }
+
 }

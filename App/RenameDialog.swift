@@ -1,9 +1,5 @@
 import SwiftUI
 
-// Centred over everything rather than edited in the row: on a phone the soft
-// keyboard takes half the screen and an in-place editor lands under it, so
-// the dialog is the one shape that needs no scrolling to stay visible.
-
 struct RenameDialog: View {
 
     let title: String
@@ -56,10 +52,9 @@ struct RenameDialog: View {
         .padding(24)
     }
 
-    // An empty name keeps the old one, which is the same answer Esc gives.
-
     private func commit() {
         let name = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if name.isEmpty { onCancel() } else { onCommit(name) }
     }
+
 }

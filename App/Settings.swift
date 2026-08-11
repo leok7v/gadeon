@@ -425,7 +425,7 @@ struct SettingsView: View {
                 Text("A").font(.system(size: 21))
                 Spacer()
             }
-            sample
+            draftSample
         }
     }
 
@@ -435,10 +435,6 @@ struct SettingsView: View {
                     draftZoom = ChatModel.clampZoom(Int(value))
                 })
     }
-
-    // Spacers BETWEEN the marks, so the first and last land on the ends of
-    // the travel. An equal slice per mark centres it in that slice, which
-    // puts the outer pair a tenth of the track in from the value it names.
 
     private var detents: some View {
         HStack(spacing: 0) {
@@ -451,16 +447,11 @@ struct SettingsView: View {
                            height: notch == 0 ? 9 : 5)
             }
         }
-        // The thumb cannot reach the ends of the track,
-        // so the marks are inset by its radius.
         .padding(.horizontal, isOS ? 13 : 5)
         .allowsHitTesting(false)
     }
 
-    // Drawn at the DRAFT size; everything else in the app uses the committed
-    // one.
-
-    private var sample: some View {
+    private var draftSample: some View {
         Text("Text and controls throughout the app. This adjusts your "
             + "device's own text size rather than replacing it.")
             .font(appTextFont(.callout, draftScale))
@@ -520,7 +511,6 @@ struct SettingsView: View {
                 + "weather. Search terms based on your question are sent to "
                 + "the search engine, and pages the model picks are fetched. "
                 + "Weather uses your approximate location.")
-            // TODO: surface ChatModel.overthinkLambda as a setting.
             Toggle("Confirm before deleting a conversation",
                    isOn: $model.confirmDeleteConversation)
                 .toggleStyle(.switch)

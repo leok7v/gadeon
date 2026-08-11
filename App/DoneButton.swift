@@ -9,9 +9,12 @@ struct DoneButton: View {
             .modifier(TintedOnPhone())
             .keyboardShortcut(.defaultAction)
     }
+
 }
 
-// buttonBorderShape has no effect on the toolbar glass capsule.
+// The TOOLBAR draws the item's capsule, so neither buttonStyle nor
+// buttonBorderShape reshapes it; only sharedBackgroundVisibility(.hidden)
+// removes it.
 
 private struct TintedOnPhone: ViewModifier {
 
@@ -23,9 +26,8 @@ private struct TintedOnPhone: ViewModifier {
             content
         }
     }
-}
 
-// The capsule is toolbar-drawn; sharedBackgroundVisibility(.hidden) removes it.
+}
 
 struct DoneToolbar: ToolbarContent {
 
@@ -43,6 +45,7 @@ struct DoneToolbar: ToolbarContent {
             }
         }
     }
+
 }
 
 struct EscapeToClose: View {
@@ -54,4 +57,5 @@ struct EscapeToClose: View {
             .keyboardShortcut(.cancelAction)
             .hidden()
     }
+
 }

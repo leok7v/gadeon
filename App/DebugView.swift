@@ -2,9 +2,6 @@ import ImageIO
 import LLM
 import SwiftUI
 
-// Elapsed since app start, not time of day: a trace reads as "how long in"
-// and "how far apart". Hours appear only once there are any.
-
 private func elapsed(_ t: Date, since zero: Date) -> String {
     let ms = Int((max(t.timeIntervalSince(zero), 0) * 1000).rounded())
     let out: String
@@ -23,10 +20,6 @@ struct DebugView: View {
     let model: ChatModel
     let onClose: () -> Void
     @State private var selected: UUID?
-
-    // Zero is app launch, unless the trace predates it: a reopened
-    // conversation's events would otherwise clamp to 00:00.000, so a
-    // trace's own first event becomes zero instead.
 
     private var zero: Date {
         min(Instrument.launched, model.traceEvents.first?.t1
@@ -107,8 +100,6 @@ struct DebugView: View {
 
     private var footer: some View {
         HStack(spacing: 8) {
-            // A Release build writes no transcript, so this row is skipped
-            // rather than naming an empty path.
             if !model.tracePath.isEmpty {
                 logButton("Transcript", model.tracePath)
                 Text("\u{00B7}").foregroundStyle(.tertiary)
@@ -147,9 +138,6 @@ struct DebugView: View {
         }
     }
 
-    // Every run writes to the same `current.txt`; the folder, not the file
-    // name, is what tells sessions apart.
-
     private static func folder(_ path: String) -> String {
         URL(fileURLWithPath: path).deletingLastPathComponent()
             .lastPathComponent
@@ -169,8 +157,6 @@ private struct TraceGraph: View {
     @Binding var selected: UUID?
     @State private var hovered: TraceEvent?
     @State private var hoverAt: CGPoint = .zero
-    // Canvas draws Text values, not views, so its labels can't take
-    // `.appFont` and read the scale directly instead.
     @Environment(\.appTextScale) private var textScale
 
     private static let pad: CGFloat = 8
@@ -208,10 +194,6 @@ private struct TraceGraph: View {
         }
     }
 
-    // Anchored at the first event's t1, not t0: t0 would spend the opening
-    // event's whole duration as blank canvas, and that event is the ~15s
-    // system prefill.
-
     private var span: (start: Date, seconds: Double) {
         let start = events.first?.t1 ?? Date()
         let end = events.last?.t1 ?? start
@@ -229,9 +211,10 @@ private struct TraceGraph: View {
     }
 
     private func y(_ ctx: Int, _ h: CGFloat) -> CGFloat {
-        let top = 24.0                    // marker lane above the line
+        let markerLane = 24.0
         let f = CGFloat(ctx) / CGFloat(maxCtx)
-        return h - TraceGraph.pad - f * (h - top - 2 * TraceGraph.pad)
+        return h - TraceGraph.pad
+            - f * (h - markerLane - 2 * TraceGraph.pad)
     }
 
     private static func markerColor(_ kind: TraceEvent.Kind) -> Color? {
@@ -243,8 +226,6 @@ private struct TraceGraph: View {
         default: return nil
         }
     }
-
-    // Tokens per second of a prefill / decode event; 0 = not a rate event.
 
     private static func rate(_ e: TraceEvent) -> Double {
         let dur = e.t1.timeIntervalSince(e.t0)
@@ -280,7 +261,6 @@ private struct TraceGraph: View {
                 ctx.stroke(rule, with: .color(.accentColor.opacity(0.5)),
                            style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
             }
-            // pp/tg overlay on its own scale: prefill hollow, decode solid.
             let r = TraceGraph.rate(e)
             if r > 0 {
                 let ry = y(Int(r / rateTop * Double(maxCtx)), size.height)
@@ -310,9 +290,6 @@ private struct TraceGraph: View {
                      .font(label).foregroundStyle(.green.opacity(0.7)),
                  at: CGPoint(x: size.width - 34, y: 22))
     }
-
-    // Nearest event by x, biased toward markers: within tap slop a marker
-    // beats a prefill/decode sharing its instant.
 
     private func nearest(_ tapX: CGFloat, _ size: CGSize) -> TraceEvent? {
         var best: (e: TraceEvent, d: CGFloat)? = nil
@@ -440,10 +417,6 @@ private struct TraceRow: View {
         .contentShape(Rectangle())
     }
 
-    // Scrolls inside a capped frame: a row that balloons to an expanded
-    // payload collapses the transcript's scroll geometry when it shrinks
-    // back.
-
     @ViewBuilder private var payload: some View {
         let text = Text(e.text)
             .appFont(.caption2).monospaced()
@@ -471,4 +444,5 @@ private struct TraceRow: View {
             }
         }
     }
+
 }

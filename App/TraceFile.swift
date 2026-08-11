@@ -3,13 +3,12 @@ import LLM
 import os
 
 final class TraceFile {
+
     private let log = Logger(subsystem: "io.github.leok7v.gadeon",
                              category: "trace")
     private let url: URL
     private let fmt: DateFormatter
     private var handle: FileHandle?
-
-    // A stable `current.txt`, so a devicectl pull needs no per-run name.
 
     init() {
         url = Diag.startRun(folder: "transcript.log")
@@ -30,8 +29,6 @@ final class TraceFile {
         write(line(e) + "\n")
     }
 
-    // "HH:mm:ss.SSS [kind] N tok ctx N 1.23s | summary" + indented payload.
-
     private func line(_ e: TraceEvent) -> String {
         let dur = e.t1.timeIntervalSince(e.t0)
         var head = fmt.string(from: e.t1) + " [" + e.kind.rawValue + "]"
@@ -48,9 +45,6 @@ final class TraceFile {
         }
         return head
     }
-
-    // Lazily (re)creates the file on first write of the launch, truncating
-    // whatever the previous launch left.
 
     private func write(_ s: String) {
         let fm = FileManager.default

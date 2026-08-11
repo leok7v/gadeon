@@ -134,9 +134,6 @@ struct Sidebar: View {
         .padding(24)
     }
 
-    // A phone's List row carries far more padding than a Mac's, so the same
-    // two lines of text stand in twice the height and a screenful holds five
-    // conversations. nil keeps the desktop's own defaults, which are right.
     private var rowInsets: EdgeInsets? {
         isOS ? EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8) : nil
     }
@@ -172,8 +169,6 @@ struct Sidebar: View {
         .modifier(TightSections())
     }
 
-    // The conversation on screen, which is the live one once it has been
-    // committed and a reopened one from the moment it is opened.
     private func isCurrent(_ convo: ConversationStore.Convo) -> Bool {
         convo.id == model.currentConversationId
     }
@@ -216,9 +211,6 @@ struct Sidebar: View {
                                      : .clear,
                     in: RoundedRectangle(cornerRadius: 7))
         .animation(.easeInOut(duration: 0.15), value: armedDelete)
-        // Right-click on macOS, long-press on iOS, from one modifier.
-        // Rename is offered mid-turn where Open and Delete are not: a title
-        // touches neither the engine nor the live transcript.
         .contextMenu {
             Button { onRename(convo) } label: {
                 Label("Rename\u{2026}", systemImage: "pencil")
@@ -231,8 +223,6 @@ struct Sidebar: View {
                    : "Delete conversation"
     }
 
-    // A running turn holds an index into the live transcript; opening
-    // another conversation would redirect it there instead of stopping it.
     private var rowHelp: String {
         model.busy ? "Available once this turn has finished"
                    : "Open this conversation"
@@ -266,8 +256,6 @@ struct Sidebar: View {
         let items: [ConversationStore.Convo]
         var title: String { id }
     }
-
-    // The list is already newest-first, so a stable bucketing keeps order.
 
     private static func groups(_ list: [ConversationStore.Convo]) -> [Group] {
         let cal = Calendar.current
@@ -312,9 +300,6 @@ struct Sidebar: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
-
-    // Snapshot the ids before deleting: it mutates the store's list, so
-    // the offsets would otherwise index a shifting array.
 
     private func delete(_ offsets: IndexSet,
                         in items: [ConversationStore.Convo]) {

@@ -19,9 +19,9 @@ struct EULAView: View {
                 .frame(maxWidth: 640)
                 .frame(maxWidth: .infinity)
             }
-            // visibleRect accounts for safe-area insets and trips at the true
-            // bottom; contentOffset + containerSize under-counts by the top
-            // inset and only crosses on overscroll.
+            // visibleRect, not contentOffset + containerSize: that form
+            // under-counts by the top inset and only crosses on overscroll,
+            // which leaves Accept unreachable.
             .onScrollGeometryChange(for: Bool.self) { geo in
                 geo.visibleRect.maxY >= geo.contentSize.height - 24
             } action: { _, bottom in
@@ -50,6 +50,7 @@ struct EULAView: View {
                 interpretedSyntax: .inlineOnlyPreservingWhitespace)))
                 ?? AttributedString(part)
         }
+
 }
 
 private let agreement = """

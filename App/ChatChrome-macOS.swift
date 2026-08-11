@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ChatChrome<Leading: View, Center: View, Trailing: View>: ViewModifier {
+
     let leading: Leading
     let center: Center
     let trailing: Trailing
@@ -12,4 +13,5 @@ struct ChatChrome<Leading: View, Center: View, Trailing: View>: ViewModifier {
             ToolbarItem(placement: .primaryAction) { trailing }
         }
     }
+
 }

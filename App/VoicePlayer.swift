@@ -4,10 +4,6 @@ import LLM
 
 final class VoicePlayer: @unchecked Sendable {
 
-    // How many sentences may be synthesized ahead of the one being spoken.
-    // Enough that playback never waits on the engine, few enough that a
-    // barge-in throws away almost nothing.
-
     private static let readAhead = 2
     private let engine = AVAudioEngine()
     private let node = AVAudioPlayerNode()
@@ -16,38 +12,24 @@ final class VoicePlayer: @unchecked Sendable {
                                            qos: .userInitiated)
     private let lock = NSLock()
 
-    // Transport calls (stop/pause/resume) run here, off the main actor:
-    // AVAudioPlayerNode.stop() blocks until the render thread drains.
-    // `qos: .default` cannot be dropped -- a queue built without one is
+    // AVAudioPlayerNode.stop() blocks on the render thread, so transport runs
+    // here and not on the main actor; a queue built without `qos:` is
     // UNSPECIFIED and inherits the submitter's class.
 
     private let nodeQueue = DispatchQueue(label: "gadeon.tts.node",
                                           qos: .default)
     private var speech: Speech?
-    // Each segment's tag is opaque here; the caller uses it to track which
-    // piece of its own text is playing.
-    private var pending: [(text: String, tag: Int)] = []
-    // The tags of buffers handed to the node, oldest first: the head is what
-    // is audible now.
-    private var playing: [Int] = []
-    private var inFlight = 0
-    private var scheduled = 0
-    // Bumped by every stop, so a synthesis that was already running when the
-    // user interrupted cannot schedule its result into the new silence.
+    private var unsynthesized: [(text: String, tag: Int)] = []
+    private var bufferedTags: [Int] = []
+    private var synthesizing = 0
+    private var buffered = 0
     private var epoch = 0
     private var running = false
-    // A sentence finishing synthesis must not restart playback that the
-    // listener paused -- schedule() calls play() on every buffer.
     private var isPaused = false
 
-    // Told whenever the busy/idle state changes, so the UI can show that
-    // sound is still trailing the finished transcript.
     var onActivity: (@Sendable (Bool) -> Void)?
-    // Told the tag of whatever is audible now, or nil for silence.
     var onSpeaking: (@Sendable (Int?) -> Void)?
 
-    // 4 GB avoids jetsam from KittenTTS plus the audio engine alongside a
-    // resident model.
     static let speechFloorGB = 4
 
     init?() {
@@ -62,9 +44,6 @@ final class VoicePlayer: @unchecked Sendable {
             return nil
         }
     }
-
-    // Built lazily off the main thread: loading the weights is tens of
-    // milliseconds, paid only if speech is used.
 
     private func ready() -> Speech? {
         lock.lock()
@@ -84,7 +63,7 @@ final class VoicePlayer: @unchecked Sendable {
     var isActive: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return inFlight > 0 || scheduled > 0 || !pending.isEmpty
+        return synthesizing > 0 || buffered > 0 || !unsynthesized.isEmpty
     }
 
     private func log(_ what: @autoclosure () -> String) {
@@ -94,8 +73,8 @@ final class VoicePlayer: @unchecked Sendable {
     private func counts() -> String {
         lock.lock()
         defer { lock.unlock() }
-        return "inFlight \(inFlight) scheduled \(scheduled) "
-            + "pending \(pending.count) epoch \(epoch) "
+        return "synthesizing \(synthesizing) buffered \(buffered) "
+            + "unsynthesized \(unsynthesized.count) epoch \(epoch) "
             + "paused \(isPaused) running \(running)"
     }
 
@@ -103,7 +82,7 @@ final class VoicePlayer: @unchecked Sendable {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
             lock.lock()
-            pending.append((trimmed, tag))
+            unsynthesized.append((trimmed, tag))
             lock.unlock()
             log("enqueue \(trimmed.count) chars | \(counts())")
             pump(voice: voice, speed: speed)
@@ -112,15 +91,12 @@ final class VoicePlayer: @unchecked Sendable {
 
     func stop() {
         lock.lock()
-        pending.removeAll()
+        unsynthesized.removeAll()
         epoch += 1
-        scheduled = 0
+        buffered = 0
         isPaused = false
-        playing.removeAll()
+        bufferedTags.removeAll()
         lock.unlock()
-        // The epoch bump above makes this immediate -- nothing new schedules
-        // once it moves -- so silencing the node a queue hop later costs no
-        // correctness.
         nodeQueue.async { [weak self] in
             self?.node.stop()
             self?.node.reset()
@@ -138,9 +114,6 @@ final class VoicePlayer: @unchecked Sendable {
         log("pause | \(counts())")
     }
 
-    // startEngine rides the SAME hop as the play it must precede: it starts
-    // the engine and the audio session, which are hardware calls, and this is
-    // a transport call off the main actor like the two above.
     func resume() {
         lock.lock()
         isPaused = false
@@ -152,12 +125,12 @@ final class VoicePlayer: @unchecked Sendable {
         log("resume | \(counts())")
     }
 
-    // Re-entered on every completion, so the queue drains without a timer.
     private func pump(voice: String, speed: Float) {
         lock.lock()
-        let room = inFlight + scheduled < VoicePlayer.readAhead
-        let next = (room && !pending.isEmpty) ? pending.removeFirst() : nil
-        if next != nil { inFlight += 1 }
+        let room = synthesizing + buffered < VoicePlayer.readAhead
+        let next = (room && !unsynthesized.isEmpty)
+            ? unsynthesized.removeFirst() : nil
+        if next != nil { synthesizing += 1 }
         let mark = epoch
         lock.unlock()
         if let next {
@@ -175,7 +148,7 @@ final class VoicePlayer: @unchecked Sendable {
         let t0 = Date()
         let pcm = ready()?.synthesize(text, voice: picked, speed: speed) ?? []
         lock.lock()
-        inFlight -= 1
+        synthesizing -= 1
         let stale = mark != epoch
         lock.unlock()
         log(String(format: "render %d chars -> %d samples in %.2fs, %@ | %@",
@@ -189,10 +162,6 @@ final class VoicePlayer: @unchecked Sendable {
         }
     }
 
-    // The claim on `scheduled` is taken in the SAME lock as the staleness
-    // test: `render` tests `mark` and releases the lock, so a stop can
-    // land in the gap this closes.
-
     private func schedule(_ pcm: [Float], tag: Int, mark: Int, voice: String,
                           speed: Float) {
         let frames = AVAudioFrameCount(pcm.count)
@@ -205,8 +174,8 @@ final class VoicePlayer: @unchecked Sendable {
             }
             lock.lock()
             let live = mark == epoch
-            if live { scheduled += 1; playing.append(tag) }
-            let held = isPaused
+            if live { buffered += 1; bufferedTags.append(tag) }
+            let paused = isPaused
             lock.unlock()
             if live {
                 startEngine()
@@ -214,7 +183,7 @@ final class VoicePlayer: @unchecked Sendable {
                                         .dataPlayedBack) { [weak self] _ in
                     self?.finished(mark: mark, voice: voice, speed: speed)
                 }
-                if !held { node.play() }
+                if !paused { node.play() }
             }
             notify()
             notifySpeaking()
@@ -224,8 +193,10 @@ final class VoicePlayer: @unchecked Sendable {
 
     private func finished(mark: Int, voice: String, speed: Float) {
         lock.lock()
-        if mark == epoch && scheduled > 0 { scheduled -= 1 }
-        if mark == epoch && !playing.isEmpty { playing.removeFirst() }
+        if mark == epoch && buffered > 0 { buffered -= 1 }
+        if mark == epoch && !bufferedTags.isEmpty {
+            bufferedTags.removeFirst()
+        }
         lock.unlock()
         notify()
         notifySpeaking()
@@ -243,12 +214,10 @@ final class VoicePlayer: @unchecked Sendable {
         }
     }
 
-    // The engine keeps running between sentences on purpose -- restarting
-    // it per sentence is audible as a click.
-
     func idle() {
         lock.lock()
-        let quiet = inFlight == 0 && scheduled == 0 && pending.isEmpty
+        let quiet = synthesizing == 0 && buffered == 0
+            && unsynthesized.isEmpty
         let wasRunning = running
         if quiet { running = false }
         lock.unlock()
@@ -266,9 +235,9 @@ final class VoicePlayer: @unchecked Sendable {
 
     private func notifySpeaking() {
         lock.lock()
-        let head = playing.first
+        let audible = bufferedTags.first
         lock.unlock()
-        onSpeaking?(head)
+        onSpeaking?(audible)
     }
 
 }

@@ -5,8 +5,6 @@ struct RenameField: UIViewRepresentable {
 
     @Binding var text: String
     let onSubmit: () -> Void
-    // Symbol parity with the macOS twin, which takes Esc. A phone keyboard
-    // has no such key, so Cancel in the dialog is the only way out.
     let onCancel: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -47,25 +45,23 @@ struct RenameField: UIViewRepresentable {
     }
 }
 
-// Focus follows the field INTO the window. updateUIView cannot carry it:
-// it runs before the view has a window, and a representable whose inputs
-// never change again is never updated a second time, so a claim deferred
-// to it is a claim that never happens.
-
 final class SelectingTextField: UITextField {
 
     private var claimed = false
+
+    // A representable whose inputs never change is never updated again, so
+    // updateUIView cannot claim focus. The hop keeps the claim off the
+    // update pass, where it would cycle the AttributeGraph.
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window != nil, !claimed {
             claimed = true
-            // One hop: selectAll needs the field to be first responder, and
-            // that is not true until becomeFirstResponder has settled.
             Task { @MainActor in
                 self.becomeFirstResponder()
                 self.selectAll(nil)
             }
         }
     }
+
 }

@@ -1,15 +1,10 @@
 import CoreGraphics
 import SwiftUI
 
-// CGImage is not Sendable but is immutable in practice.
-
 struct VideoPeek: @unchecked Sendable, Equatable {
 
     let index: Int
     let image: CGImage
-
-    // Compared by index only: two visually-identical frames can differ,
-    // onChange needs equality.
 
     static func == (a: VideoPeek, b: VideoPeek) -> Bool {
         a.index == b.index
@@ -47,8 +42,6 @@ struct VideoPeek: @unchecked Sendable, Equatable {
 struct FilmFrame: View {
 
     let image: CGImage
-    // This layer's own alpha; the pair applies dim, not each member.
-    // 0.70: the mask, not the dim, protects the controls at the edges.
     let fade: Double
     static let dim: Double = 0.70
     var blur: CGFloat = 1
@@ -61,8 +54,6 @@ struct FilmFrame: View {
             .mask(FilmFrame.edges)
             .opacity(fade)
     }
-
-    // Masking a mask multiplies alphas: a corner is faded by both gradients.
 
     static var edges: some View {
         LinearGradient(

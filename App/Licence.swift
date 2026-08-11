@@ -1,6 +1,5 @@
-// Embedded, not linked: Apache-2.0 section 4(a) and GPL-3.0 section 4 both
-// require a COPY to travel with what they cover, and an offline device
-// cannot follow a link.
+// Apache-2.0 4(a) and GPL-3.0 4 require a COPY of the licence to travel with
+// what it covers, so the text is embedded rather than linked.
 
 enum Licence {
 
@@ -885,4 +884,5 @@ the library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.  But first, please read
 <https://www.gnu.org/licenses/why-not-lgpl.html>.
 """#
+
 }

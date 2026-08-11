@@ -1,9 +1,6 @@
 import MD
 import SwiftUI
 
-// MarkdownFindController targets a SINGLE MarkdownTextView, which the live
-// per-block transcript cannot offer.
-
 struct ReadingView: View {
 
     let document: Markdown.Document

@@ -37,9 +37,6 @@ struct RenameField: NSViewRepresentable {
             }
         }
 
-        // Returning false hands the key back to AppKit, which is what lets
-        // everything except Return and Esc behave as an ordinary field.
-
         func control(_ control: NSControl, textView: NSTextView,
                      doCommandBy selector: Selector) -> Bool {
             var handled = true
@@ -55,26 +52,23 @@ struct RenameField: NSViewRepresentable {
     }
 }
 
-// Focus follows the field INTO the window. updateNSView cannot carry it:
-// it runs before the view has a window, and a representable whose inputs
-// never change again is never updated a second time, so a claim deferred
-// to it is a claim that never happens.
-
 final class SelectingTextField: NSTextField {
 
     private var claimed = false
+
+    // A representable whose inputs never change is never updated again, so
+    // updateNSView cannot claim focus. The hop waits for the field editor
+    // selectText needs, which the window installs after this call.
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window != nil, !claimed {
             claimed = true
-            // One hop: the responder graph is mid-update here, and the
-            // field editor selectText needs does not exist until the
-            // window has installed it.
             Task { @MainActor in
                 self.window?.makeFirstResponder(self)
                 self.selectText(nil)
             }
         }
     }
+
 }

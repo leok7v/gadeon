@@ -12,7 +12,8 @@ struct Credit: Identifiable {
 
 enum Credits {
 
-    // Apache-2.0 5(b) requires this notice on every modified model below.
+    // Apache-2.0 5(b) requires `changed` to state the modification on every
+    // model below.
 
     static let app = Credit(
         name: "Gadeon",
@@ -72,4 +73,5 @@ enum Credits {
                changed: "Article titles are indexed on device; article text "
                    + "is fetched only for the article the model chose."),
     ]
+
 }

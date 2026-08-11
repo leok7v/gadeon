@@ -5,7 +5,9 @@ import Observation
 @MainActor @Observable final class VoiceSession {
 
     enum Mode: String, CaseIterable, Identifiable, Sendable {
+
         case off, replies, everything
+
         var id: String { rawValue }
 
         var label: String {
@@ -78,40 +80,22 @@ import Observation
         didSet { UserDefaults.standard.set(speed, forKey: "voiceSpeed") }
     }
 
-    // Distinct from the chat's `busy`: the answer can be complete while the
-    // voice is halfway through.
     private(set) var speaking = false
     private(set) var paused = false
-    // Answer text only: reasoning and wait cues are spoken too but have no
-    // on-screen anchor to point at.
     private(set) var spokenText: String?
 
-    // Distinct from `speaking`: `speaking` flickers off between the wait cue
-    // and each sentence, `engaged` spans the whole turn until the queue
-    // drains.
     private(set) var engaged = false
-    @ObservationIgnored private var turnRunning = false
-    // Silences the rest of this turn: clearing the queue alone is not
-    // enough, since the turn keeps producing sentences that would restart
-    // the voice.
-    @ObservationIgnored private var muted = false
+    @ObservationIgnored private var generating = false
+    @ObservationIgnored private var turnSilenced = false
 
     @ObservationIgnored private let player = VoicePlayer()
     @ObservationIgnored private var answer = SpeakableText()
     @ObservationIgnored private var reasoning = SpeakableText()
-    // A wait cue is spoken at most once per wait, and only when the wait is
-    // long enough to read as silence rather than as a pause.
     @ObservationIgnored private var cueTask: Task<Void, Never>?
     @ObservationIgnored private var cued = false
     private static let cueDelay = 3.5
 
-    // Reads `player.isActive` rather than trusting a callback's own value: a
-    // stale notify can land after a stop, and re-deriving from the player
-    // keeps the callback idempotent regardless of arrival order.
-
-    // Answer segments only, by tag; cues and reasoning get no entry, so the
-    // transcript is never asked to point at words it does not contain.
-    @ObservationIgnored private var spoken: [Int: String] = [:]
+    @ObservationIgnored private var answerByTag: [Int: String] = [:]
     @ObservationIgnored private var nextTag = 0
 
     init() {
@@ -119,9 +103,6 @@ import Observation
             Task { @MainActor in
                 let active = self?.player?.isActive ?? false
                 self?.speaking = active
-                // `engaged` is only ever raised here; `settle` is the only
-                // place that lowers it, once the turn ends and the queue
-                // drains.
                 if active { self?.engaged = true }
                 if !active {
                     self?.player?.idle()
@@ -131,37 +112,27 @@ import Observation
         }
         player?.onSpeaking = { [weak self] tag in
             Task { @MainActor in
-                self?.spokenText = tag.flatMap { t in self?.spoken[t] }
+                self?.spokenText = tag.flatMap { t in self?.answerByTag[t] }
             }
         }
     }
 
-    // The turn is over once generation has finished AND the queue has run
-    // dry; either alone still owes the listener sound.
-
     private func settle() {
-        if !turnRunning && !(player?.isActive ?? false) { engaged = false }
+        if !generating && !(player?.isActive ?? false) { engaged = false }
     }
 
     var available: Bool { player != nil }
-
-    // ---- turn lifecycle -------------------------------------------------
-
-    // The previous turn's sound is stale the moment a new one starts, so it
-    // is stopped rather than queued behind.
 
     func beginTurn(cue: SpokenCue.Kind = .thinking) {
         cueKind = cue
         stopSpeaking()
         answer = SpeakableText()
         reasoning = SpeakableText()
-        // The ledger belongs to one turn: carrying over prior entries would
-        // grow unbounded across a long conversation.
-        spoken = [:]
-        muted = false
+        answerByTag = [:]
+        turnSilenced = false
         if enabled {
             engaged = true
-            turnRunning = true
+            generating = true
         }
         armCue()
     }
@@ -172,9 +143,6 @@ import Observation
             for segment in answer.push(piece) { say(segment, shown: true) }
         }
     }
-
-    // Any reasoning at all means the thinking wait is over, whether or not
-    // it is being read aloud.
 
     func reasoningArrived(_ piece: String) {
         disarmCue()
@@ -191,13 +159,10 @@ import Observation
         }
         answer = SpeakableText()
         reasoning = SpeakableText()
-        turnRunning = false
+        generating = false
         settle()
     }
 
-    // the wait cue:
-    // Set by the turn that arms it, so the cue names what is actually being
-    // worked on rather than always claiming to think.
     @ObservationIgnored private var cueKind: SpokenCue.Kind = .thinking
 
     private func armCue() {
@@ -233,31 +198,23 @@ import Observation
         disarmCue()
     }
 
-    // controls:
-
-    // Silences audio only; the model keeps generating so the answer still
-    // completes and can be read back.
-
     func stopSpeaking() {
         disarmCue()
         player?.stop()
         paused = false
         speaking = false
         spokenText = nil
-        turnRunning = false
+        generating = false
         engaged = false
-        muted = true
+        turnSilenced = true
     }
 
-    // `shown` records the segment before `terminated` adds its full stop, so
-    // the transcript holds only the model's own words.
-
     private func say(_ text: String, shown: Bool = false) {
-        if !muted {
+        if !turnSilenced {
             let tag = nextTag
             nextTag += 1
             if shown {
-                spoken[tag] = text
+                answerByTag[tag] = text
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
             player?.enqueue(terminated(text), tag: tag, voice: voiceName,
@@ -266,7 +223,7 @@ import Observation
     }
 
     // The synthesizer renders the last phoneme's release off the terminal
-    // punctuation, so unterminated text comes back cut short.
+    // punctuation; unterminated text comes back cut short.
 
     private func terminated(_ text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -285,9 +242,6 @@ import Observation
         player?.resume()
         paused = false
     }
-
-    // Goes straight to the player, bypassing `say`, so a preview still plays
-    // while a turn is muted.
 
     func preview(_ voice: SpeechVoice) {
         player?.stop()
