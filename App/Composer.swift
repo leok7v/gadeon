@@ -377,6 +377,9 @@ struct Composer: View {
             .appFont(.caption2)
             .foregroundStyle(quiet ? .secondary : .tertiary)
             .frame(maxWidth: .infinity)
+            // The colour fades; the STRING must not, or the animation
+            // cross-fades the old sentence over the new one.
+            .contentTransition(.identity)
             .animation(.easeInOut(duration: 0.2), value: quiet)
     }
 

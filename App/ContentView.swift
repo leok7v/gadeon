@@ -743,8 +743,8 @@ struct ContentView: View {
                 .font(.system(size: statusPoints))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
-                .lineLimit(isOS ? 2 : 1)
-                .minimumScaleFactor(isOS ? 1 : 0.6)
+                .lineLimit(1)
+                .minimumScaleFactor(0.5)
                 .modifier(Shimmer(active: model.prefilling))
             Spacer()
         }
@@ -757,12 +757,11 @@ struct ContentView: View {
         model.statsLabel.isEmpty ? modelSummary : Text(model.statsLabel)
     }
 
+    // A point under footnote on a phone, where the line has one width to
+    // fit in: at the old size a zoom step overflowed and was scaled back
+    // past where it started, so a larger setting rendered smaller.
     private var statusPoints: CGFloat {
-        (appTextPoints(.footnote) + 1) * model.textScale
-    }
-
-    private var statusSymbol: Font {
-        .system(size: statusPoints - 2)
+        (appTextPoints(.footnote) + (isOS ? -1 : 1)) * model.textScale
     }
 
     private var modelSummary: Text {
@@ -770,7 +769,7 @@ struct ContentView: View {
         for tower in model.modelTowers {
             let gap = tower.id == 0 ? "" : " "
             out = out + Text(gap)
-                + Text(Image(systemName: tower.symbol)).font(statusSymbol)
+                + Text(Image(systemName: tower.symbol))
                 + Text(" \(tower.weight)")
         }
         for fact in model.modelFacts {
@@ -986,10 +985,13 @@ struct ContentView: View {
                     ToolCallStrip(messageId: m.id, rounds: m.toolRounds,
                                   peek: peek, live: isLive(m))
                 }
-                if !m.fromUser, isPrefilling(m) {
-                    prefillWhimsical
-                } else if let answer = answerText(m) {
+                // Answer text already on screen outranks the status line: a
+                // tool round raises `prefilling` again, and swapping the
+                // bubble out for it blinks the answer away once per call.
+                if let answer = answerText(m) {
                     answerBubble(m, answer)
+                } else if !m.fromUser, isPrefilling(m) {
+                    prefillWhimsical
                 } else if isAnswerless(m) {
                     noAnswerNote
                 } else if m.loopStopped {

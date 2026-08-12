@@ -549,6 +549,13 @@ final class ChatSessionTests: XCTestCase {
         let answer = await drain(session.reply("loop"))
         XCTAssertEqual(runner.calls.count, ChatSession.maxToolRounds)
         XCTAssertEqual(answer, "")
+        // ANSWERLESS, not stopped: the rounds are work the user watched, and
+        // the app deletes the two transcript bubbles only for `.stopped`.
+        let outcome = await session.turnOutcome
+        XCTAssertEqual(outcome, .answerless,
+                       "a turn that ran \(ChatSession.maxToolRounds) tool "
+                       + "rounds and reached no answer was reported as if "
+                       + "nothing had happened")
     }
 
     // At the round cap, the budget nudge gives the model one last generation:
@@ -571,6 +578,8 @@ final class ChatSessionTests: XCTestCase {
         let answer = await drain(session.reply("loop then answer"))
         XCTAssertEqual(runner.calls.count, ChatSession.maxToolRounds)
         XCTAssertEqual(answer, "Answering from what I have.")
+        let outcome = await session.turnOutcome
+        XCTAssertEqual(outcome, .answered)
     }
 
     // O(delta) proof: turn two rewinds to the prior mark and re-prefills only the

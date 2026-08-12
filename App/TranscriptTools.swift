@@ -3,21 +3,6 @@ import MD
 import SwiftUI
 import UniformTypeIdentifiers
 
-private struct ExportFile: FileDocument {
-
-    static let readableContentTypes: [UTType] = []
-    static let writableContentTypes: [UTType] = [.pdf, .html]
-    let data: Data
-
-    init(data: Data) { self.data = data }
-    init(configuration: ReadConfiguration) throws { data = Data() }
-
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: data)
-    }
-
-}
-
 struct TranscriptActions: View {
 
     let document: Markdown.Document
@@ -76,8 +61,10 @@ struct TranscriptActions: View {
         .task(id: document) { await prepareExports() }
         .fileExporter(isPresented: $showExporter, document: exportFile,
                       contentType: exportType,
-                      defaultFilename: sanitizedFilename(title)) { _ in }
+                      defaultFilename: exportName) { _ in }
     }
+
+    private var exportName: String { ConversationExport.filename(title) }
 
     @ViewBuilder
     private func saveRow(_ label: String, _ url: URL?,
@@ -120,7 +107,7 @@ struct TranscriptActions: View {
     }
 
     private func prepareExports() async {
-        let safe = sanitizedFilename(title)
+        let safe = exportName
         async let pdf = MarkdownPDF.export(document, title: title)
         async let html = Markdown.htmlPrefetching(document, title: title)
         let (pdfData, htmlText) = await (pdf, html)
@@ -128,12 +115,6 @@ struct TranscriptActions: View {
             writeTemp(data, name: "\(safe).pdf")
         }
         htmlURL = writeTemp(Data(htmlText.utf8), name: "\(safe).html")
-    }
-
-    private func sanitizedFilename(_ s: String) -> String {
-        let base = s.isEmpty ? "Conversation" : s
-        return base.replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: ":", with: "_")
     }
 
     private func writeTemp(_ data: Data, name: String) -> URL? {

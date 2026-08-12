@@ -71,11 +71,19 @@ public actor ChatSession {
     // whether the turn is a vision turn both steer it, per the model card.
     private let presets: SamplingPresets
     private let vocabSize: Int
-    // Reasoning-effort on/off. Toggleable live: it only selects the current
-    // turn's gen-prompt think prefix, so a New Chat is not needed -- past
-    // turns are stripped either way and the next turn renders with the new
-    // value.
+    // Reasoning-effort on/off as the TEMPLATE spells it. Whether flipping it
+    // live reaches the model is the template's choice, not ours: Qwen renders
+    // it into every generation prompt, so the next turn takes it; gemma-4
+    // spends it on a marker in the FIRST system turn, which is already in the
+    // KV and is subtracted from every later delta, so a flip there changes
+    // nothing until the conversation restarts.
     private var enableThinking: Bool
+    // Reasoning the template opened, which this turn must spend none of --
+    // what reaches a conversation already under way when enableThinking
+    // cannot. The loop closes the channel at its first token and the sampler
+    // takes the instruct cell, so the turn decodes prose the way a
+    // never-opened one does instead of at reasoning temperature.
+    private var suppressReasoning = false
     // Per-turn safety cap on decoded tokens (a small model can loop without
     // ever emitting EOS). Default unbounded -- the app stops a run by
     // cancelling the consuming task, which the decode loop below observes via
@@ -214,11 +222,20 @@ public actor ChatSession {
     // of the template, by rendering with and without add_generation_prompt
     // and taking suffixes. The template is the single authority on chat
     // markup.
-    // Set when the LAST turn was cancelled during prefill and fully rolled back
-    // (state restored, the user turn dropped from history). The app reads it
-    // after the stream ends to remove the two transcript bubbles. Cleared at
-    // the start of every turn.
-    public private(set) var turnRolledBack = false
+    // How the LAST turn ended. Both rolled-back cases restore the state and
+    // drop the user turn from history identically; they differ only in what
+    // the app owes the user. `.stopped` produced nothing, so its two
+    // transcript bubbles go with it. `.answerless` spent tool rounds the user
+    // WATCHED and then reached no final answer -- deleting that erases
+    // seconds of visible work and the question behind it, so those bubbles
+    // stay and the transcript says what happened. Cleared at every turn.
+    public enum TurnOutcome: String, Sendable {
+        case answered, stopped, answerless
+    }
+
+    public private(set) var turnOutcome: TurnOutcome = .answered
+
+    public var turnRolledBack: Bool { turnOutcome != .answered }
     public private(set) var lastMetrics: TurnMetrics
     // The system message split for the precooked-prefix cache: `systemStable`
     // is everything whose bytes survive across sessions (persona, tools tier,
@@ -313,6 +330,13 @@ public actor ChatSession {
     // button).
     public func setThinking(_ on: Bool) {
         enableThinking = on
+    }
+
+    // Spend no reasoning from the next turn on, whatever the template already
+    // laid down. Takes effect mid-conversation, which setThinking cannot on a
+    // template that carries the flag in its system block.
+    public func setSuppressReasoning(_ on: Bool) {
+        suppressReasoning = on
     }
 
     // Swap the tool runner live (the Web-access / airplane toggle); takes effect
@@ -824,9 +848,12 @@ public actor ChatSession {
             // think block through into the title.
             // The two token counts ARE the diagnosis. A few words of title
             // costing hundreds of think tokens means the model reasoned its
-            // way there -- which gemma-4 does whatever enable_thinking says,
-            // since it opens that channel itself, and which the raw.count
-            // brake above cannot reach because raw only ever sees content.
+            // way there, which the raw.count brake above cannot reach because
+            // raw only ever sees content. The `enableThinking = false` above
+            // does not prevent it on a template that spells reasoning in its
+            // system block: that block is already in the KV. titleSeed is
+            // what actually starts the turn past the channel, and
+            // suppressReasoning is what closes it if the model opens its own.
             Diag.shared.report(String(
                 format: "makeTitle raw=%@ -> %@ think=%d content=%d in %.1fs",
                 raw.debugDescription, title.debugDescription,
@@ -1073,7 +1100,13 @@ public actor ChatSession {
             let empty = history.last.map { last in
                 last.role == "assistant" && last.content.isEmpty
             } ?? false
-            if empty { await rollbackTurn(saved) }
+            // Rounds ran means the user watched real work: keep the turn on
+            // screen and say it reached no answer, rather than deleting the
+            // question along with it.
+            if empty {
+                await rollbackTurn(saved,
+                                   why: round > 0 ? .answerless : .stopped)
+            }
         }
     }
 
@@ -1317,26 +1350,27 @@ public actor ChatSession {
     }
 
     private func enterTurn() async -> SavedTurn {
-        turnRolledBack = false
+        turnOutcome = .answered
         runner?.beginTurn()
         let checkpoint = try? await backend.checkpoint()
         return SavedTurn(checkpoint: checkpoint, history: history,
                          committed: committed)
     }
 
-    // Undo a turn cancelled during prefill: restore the engine (state + mark)
-    // and the conversation bookkeeping, and flag it so the app drops the two
-    // transcript bubbles. Decode-phase cancels do NOT come here -- they keep the
-    // partial answer.
-    private func rollbackTurn(_ saved: SavedTurn) async {
+    // Undo a turn: restore the engine (state + mark) and the conversation
+    // bookkeeping, and record WHY, which is what the app keys its transcript
+    // on. Decode-phase cancels do NOT come here -- they keep the partial
+    // answer.
+    private func rollbackTurn(_ saved: SavedTurn,
+                              why: TurnOutcome = .stopped) async {
         if let checkpoint = saved.checkpoint {
             try? await backend.rollback(checkpoint)
         }
         history = saved.history
         committed = saved.committed
-        turnRolledBack = true
+        turnOutcome = why
         trace(.rewind, ctx: await backend.position,
-              summary: "turn rollback (prefill stop)")
+              summary: "turn rollback (\(why.rawValue))")
     }
 
     // Per-turn sampler: the model card's preset for this turn's mode (thinking
@@ -1349,9 +1383,10 @@ public actor ChatSession {
     }()
 
     private func installTurnSampler(vision: Bool) async {
+        let reasons = enableThinking && !suppressReasoning
         var turnConfig = titleMode
             ? ChatSession.greedyConfig
-            : presets.select(thinking: enableThinking, vision: vision)
+            : presets.select(thinking: reasons, vision: vision)
         // DRY is the degeneration guard, not a taste knob: the card presets
         // leave some cells penalty-free (thinking+vision runs presence 0,
         // repeat 1.0), and a small model there re-emits whole sentences
@@ -1364,7 +1399,7 @@ public actor ChatSession {
         }
         var sampler = Sampler(vocabSize: vocabSize, config: turnConfig)
         sampler.penaltyExempt = wireTokens
-        if overthinkLambda != 0 && enableThinking && !overthinkTokens.isEmpty {
+        if overthinkLambda != 0 && reasons && !overthinkTokens.isEmpty {
             sampler.overthinkTokens = overthinkTokens
             sampler.overthinkLambda = overthinkLambda
         }
@@ -1727,7 +1762,7 @@ public actor ChatSession {
             // toolAt non-nil suppresses injection: a call is mid-flight and
             // </think> must not land inside its markup.
             let overflow = inThink && toolAt == nil && (forceEndThink ||
-                softOver || loopRescue
+                suppressReasoning || softOver || loopRescue
                 || (maxReasoning > 0 && think >= maxReasoning))
             // A completed tool call ends the decode; the caller runs it and
             // re-seeds. The opener is searched only in the ANSWER region, so

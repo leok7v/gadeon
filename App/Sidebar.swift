@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum AppTheme: String, CaseIterable, Identifiable {
     case system, light, dark
@@ -32,15 +33,27 @@ struct Sidebar: View {
     @State private var armedDelete: UUID?
     @State private var disarmTask: Task<Void, Never>?
     @State private var query = ""
+    @State private var showingTrash = false
+    @State private var armedEmpty = false
+    @State private var exportFile: ExportFile?
+    @State private var showExporter = false
+    @State private var exportName = "Conversation"
 
     private var hasHistory: Bool { !ConversationStore.shared.list.isEmpty }
+    private var trash: [ConversationStore.Convo] {
+        ConversationStore.shared.trashed
+    }
 
     var body: some View {
         let items = shown
         return VStack(spacing: 0) {
             closeRow
             newChatRow
-            if hasHistory {
+            if showingTrash {
+                trashHeader
+                Divider()
+                if trash.isEmpty { emptyTrash } else { history(trash) }
+            } else if hasHistory {
                 searchField
                 Divider()
                 if items.isEmpty {
@@ -52,8 +65,12 @@ struct Sidebar: View {
                 emptyState
             }
             Divider()
+            trashRow
             footer
         }
+        .fileExporter(isPresented: $showExporter, document: exportFile,
+                      contentType: .pdf,
+                      defaultFilename: exportName) { _ in }
     }
 
     private var shown: [ConversationStore.Convo] {
@@ -61,6 +78,99 @@ struct Sidebar: View {
         return ConversationSearch.active(query)
             ? ConversationSearch.rank(store.list, store.words, query)
             : store.list
+    }
+
+    // The trash's own list replaces the history rather than sitting under
+    // it, so the date sections and the search field do not have to explain
+    // which of the two they are filtering.
+    private var trashHeader: some View {
+        HStack(spacing: 8) {
+            Button(action: toggleTrash) {
+                Label("Trash", systemImage: "chevron.left")
+                    .appFont(.callout)
+            }
+            .buttonStyle(.plain)
+            Spacer()
+            emptyButton
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .animation(.easeInOut(duration: 0.15), value: armedEmpty)
+    }
+
+    @ViewBuilder
+    private var emptyButton: some View {
+        if !trash.isEmpty {
+            if armedEmpty {
+                Button { model.emptyTrash(); armedEmpty = false } label: {
+                    capsuleLabel("Empty")
+                }
+                .buttonStyle(.plain)
+                .help("Click to empty the trash; this cannot be undone")
+            } else {
+                Button { armedEmpty = true; scheduleDisarmEmpty() } label: {
+                    Image(systemName: "trash").foregroundStyle(.tint)
+                }
+                .buttonStyle(.plain)
+                .help("Empty the trash")
+            }
+        }
+    }
+
+    // Shaped after the system's own swipe action, which is drawn by the
+    // list and cannot be restyled to match this one.
+    private func capsuleLabel(_ text: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: "trash")
+            Text(text)
+        }
+        .appFont(.caption)
+        .fontWeight(.semibold)
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.red, in: Capsule())
+    }
+
+    @ViewBuilder
+    private var trashRow: some View {
+        if !trash.isEmpty, !showingTrash {
+            HStack {
+                Button(action: toggleTrash) {
+                    Text("Trash")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                emptyButton
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .animation(.easeInOut(duration: 0.15), value: armedEmpty)
+        }
+    }
+
+    private func toggleTrash() {
+        showingTrash.toggle()
+        armedEmpty = false
+        armedDelete = nil
+    }
+
+    private var emptyTrash: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "trash")
+                .appFont(.largeTitle)
+                .foregroundStyle(.tertiary)
+            Text("Trash is empty")
+                .appFont(.callout)
+                .foregroundStyle(.secondary)
+            Text("Deleted chats are kept for 30 days.")
+                .appFont(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(24)
     }
 
     private var emptyState: some View {
@@ -140,7 +250,7 @@ struct Sidebar: View {
 
     private func history(_ items: [ConversationStore.Convo]) -> some View {
         List {
-            if ConversationSearch.active(query) {
+            if ConversationSearch.active(query) || showingTrash {
                 ForEach(items) { convo in
                     historyRow(convo)
                         .listRowBackground(Color.clear)
@@ -175,34 +285,27 @@ struct Sidebar: View {
 
     private func historyRow(_ convo: ConversationStore.Convo) -> some View {
         HStack(spacing: 6) {
-            Button { armedDelete = nil; onOpen(convo.id) } label: { row(convo) }
+            Button { armedDelete = nil; open(convo) } label: { row(convo) }
                 .buttonStyle(.plain)
                 .disabled(model.busy)
                 .help(rowHelp)
-            if !isOS {
-                if armedDelete == convo.id {
-                    Button { confirmArmed(convo) } label: {
-                        Text("Delete")
-                            .appFont(.caption)
-                            .fontWeight(.semibold)
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(Color.red, in: Capsule())
-                    }
+            // The armed capsule is the confirmation BOTH the trash button
+            // and the context menu route into, so it is not macOS-only the
+            // way the trash button beside it is.
+            if armedDelete == convo.id {
+                Button { confirmArmed(convo) } label: { capsuleLabel("Delete") }
                     .buttonStyle(.plain)
                     .disabled(model.busy)
                     .help("Click to delete; this cannot be undone")
-                } else {
-                    Button { requestDelete(convo) } label: {
-                        Image(systemName: "trash")
-                            .appFont(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(model.busy)
-                    .help(trashHelp)
+            } else if !isOS {
+                Button { requestDelete(convo) } label: {
+                    Image(systemName: "trash")
+                        .appFont(.caption)
+                        .foregroundStyle(.secondary)
                 }
+                .buttonStyle(.plain)
+                .disabled(model.busy)
+                .help(trashHelp)
             }
         }
         .padding(.horizontal, 8)
@@ -211,16 +314,73 @@ struct Sidebar: View {
                                      : .clear,
                     in: RoundedRectangle(cornerRadius: 7))
         .animation(.easeInOut(duration: 0.15), value: armedDelete)
-        .contextMenu {
+        .contextMenu { menu(convo) }
+    }
+
+    @ViewBuilder
+    private func menu(_ convo: ConversationStore.Convo) -> some View {
+        if showingTrash {
+            Button { model.restoreConversation(convo.id) } label: {
+                Label("Restore", systemImage: "arrow.uturn.backward")
+            }
+            Divider()
+            Button(role: .destructive) { requestDelete(convo) } label: {
+                Label("Delete Forever", systemImage: "trash")
+            }
+        } else {
             Button { onRename(convo) } label: {
                 Label("Rename\u{2026}", systemImage: "pencil")
+            }
+            ShareLink(item: ConversationPDF(convo: exportable(convo)),
+                      preview: SharePreview(convo.title)) {
+                Label("Share PDF", systemImage: "square.and.arrow.up")
+            }
+            if !isOS {
+                Button { save(convo) } label: {
+                    Label("Save PDF\u{2026}",
+                          systemImage: "square.and.arrow.down")
+                }
+            }
+            Divider()
+            Button(role: .destructive) { requestDelete(convo) } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            .disabled(model.busy)
+        }
+    }
+
+    // The row carries the STORED copy, which lags the live transcript until
+    // the turn commits, so exporting the open conversation would drop its
+    // last turn.
+    private func exportable(
+        _ convo: ConversationStore.Convo) -> ConversationStore.Convo {
+        var out = convo
+        if convo.id == model.currentConversationId {
+            model.commitCurrent()
+            out = ConversationStore.shared.load(convo.id) ?? convo
+        }
+        return out
+    }
+
+    private func save(_ convo: ConversationStore.Convo) {
+        let ready = exportable(convo)
+        exportName = ConversationExport.filename(ready.title)
+        Task { @MainActor in
+            if let data = await ConversationExport.pdf(ready) {
+                exportFile = ExportFile(data: data)
+                showExporter = true
             }
         }
     }
 
+    private func open(_ convo: ConversationStore.Convo) {
+        onOpen(convo.id)
+    }
+
     private var trashHelp: String {
-        model.busy ? "Available once this turn has finished"
-                   : "Delete conversation"
+        let what = showingTrash ? "Delete this conversation forever"
+                                : "Delete conversation"
+        return model.busy ? "Available once this turn has finished" : what
     }
 
     private var rowHelp: String {
@@ -233,21 +393,41 @@ struct Sidebar: View {
             armedDelete = convo.id
             scheduleDisarm(convo.id)
         } else {
-            model.deleteConversation(convo.id)
+            remove(convo.id)
         }
     }
 
     private func confirmArmed(_ convo: ConversationStore.Convo) {
         disarmTask?.cancel()
         armedDelete = nil
-        model.deleteConversation(convo.id)
+        remove(convo.id)
     }
+
+    private func remove(_ id: UUID) {
+        if showingTrash {
+            model.deleteForever(id)
+        } else {
+            model.deleteConversation(id)
+        }
+    }
+
+    // Six, not four: from the context menu the row is only visible again
+    // once the menu has finished dismissing.
+    private static let disarmSeconds = 6.0
 
     private func scheduleDisarm(_ id: UUID) {
         disarmTask?.cancel()
         disarmTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(4))
+            try? await Task.sleep(for: .seconds(Sidebar.disarmSeconds))
             if !Task.isCancelled, armedDelete == id { armedDelete = nil }
+        }
+    }
+
+    private func scheduleDisarmEmpty() {
+        disarmTask?.cancel()
+        disarmTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(Sidebar.disarmSeconds))
+            if !Task.isCancelled { armedEmpty = false }
         }
     }
 
@@ -304,7 +484,7 @@ struct Sidebar: View {
     private func delete(_ offsets: IndexSet,
                         in items: [ConversationStore.Convo]) {
         let ids = offsets.map { i in items[i].id }
-        for id in ids { model.deleteConversation(id) }
+        for id in ids { remove(id) }
     }
 
     private var footer: some View {
@@ -322,7 +502,9 @@ struct Sidebar: View {
             .buttonStyle(.plain)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(16)
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 16)
     }
 
     private static func when(_ date: Date) -> String {

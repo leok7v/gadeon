@@ -193,6 +193,7 @@ enum GemmaCLIError: Error, CustomStringConvertible {
         try await gemmaChat(chat, backend, turns, cap,
                             thinking: args.contains("--think"),
                             system: valueAfter(args, "--system"),
+                            title: args.contains("--title"),
                             attach: try await gemmaAttachments(chat, args,
                                                                ctx))
         exit(0)
@@ -298,14 +299,28 @@ private struct GemmaAttachments {
                                   _ backend: any AgentBackend,
                                   _ turns: [String],
                                   _ cap: Int?, thinking: Bool,
-                                  system: String?,
+                                  system: String?, title: Bool,
                                   attach: GemmaAttachments) async throws {
     let session = ChatSession(
         backend: backend,
         template: chat.chatTemplate,
         system: system ?? "You are a helpful assistant.",
         vocabSize: chat.vocabCount, presets: chat.samplingPresets,
-        enableThinking: thinking, maxTokens: cap ?? 128)
+        enableThinking: thinking, maxTokens: cap ?? 128,
+        maxReasoning: maxReasoning, softReasoningCap: softReasoning)
+    await session.setSuppressReasoning(suppressReasoning)
+    if let pkVal {
+        let url = URL(fileURLWithPath: pkVal)
+        let t0 = Date()
+        if await session.prime(from: url) {
+            err(String(format: "[precook] primed in %.2fs\n",
+                       Date().timeIntervalSince(t0)))
+        } else {
+            try await session.precook(to: url)
+            err(String(format: "[precook] cooked + saved in %.1fs\n",
+                       Date().timeIntervalSince(t0)))
+        }
+    }
     err("[chat] thinking \(thinking), template reasons "
         + "\(templateSupportsThinking(chat.chatTemplate)), soft tokens "
         + "\(await session.supportsSoftTokens())\n")
@@ -331,6 +346,12 @@ private struct GemmaAttachments {
         err(String(format: "[chat] %@ | ctx %d, think %d, content %d, "
             + "%.2f t/s, %.0fs\n", m.endReason, m.ctx, m.thinkTokens,
             m.contentTokens, m.tg, Date().timeIntervalSince(t0)))
+    }
+    // The title turn's own think/content split rides Diag (makeTitle mutes
+    // the trace), which is what says whether asking for four words spent
+    // hundreds of tokens reasoning first.
+    if title {
+        err("[title] \"\(await session.makeTitle())\"\n")
     }
 }
 

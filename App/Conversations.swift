@@ -30,7 +30,8 @@ extension ChatModel {
 
     func openConversation(_ id: UUID) {
         commitCurrent()
-        if !busy, let convo = ConversationStore.shared.load(id) {
+        let store = ConversationStore.shared
+        if !busy, let convo = store.load(id) ?? store.loadTrashed(id) {
             messages = convo.messages.map { s in ChatModel.restored(s) }
             traceEvents = (convo.trace ?? []).map { t in
                 ChatModel.restoredTrace(t)
@@ -52,7 +53,31 @@ extension ChatModel {
     }
 
     func deleteConversation(_ id: UUID) {
-        ConversationStore.shared.delete(id)
+        ConversationStore.shared.trash(id)
+        closeIfShowing(id)
+        sweepAttachments()
+    }
+
+    func restoreConversation(_ id: UUID) {
+        ConversationStore.shared.restore(id)
+    }
+
+    func deleteForever(_ id: UUID) {
+        ConversationStore.shared.deleteForever(id)
+        closeIfShowing(id)
+        sweepAttachments()
+    }
+
+    func emptyTrash() {
+        let gone = ConversationStore.shared.trashed.map { convo in convo.id }
+        ConversationStore.shared.emptyTrash()
+        for id in gone { closeIfShowing(id) }
+        sweepAttachments()
+    }
+
+    // The trash can be read before it is emptied, so a destroyed
+    // conversation may be the one on screen.
+    private func closeIfShowing(_ id: UUID) {
         if id == currentConversationId {
             currentConversationId = nil
             generatedTitle = nil
@@ -60,11 +85,10 @@ extension ChatModel {
             traceEvents = []
             newChat()
         }
-        sweepAttachments()
     }
 
     func clearAllConversations() {
-        ConversationStore.shared.deleteAll()
+        ConversationStore.shared.trashAll()
         currentConversationId = nil
         if readOnly { newChat() }
         sweepAttachments()
@@ -72,7 +96,10 @@ extension ChatModel {
 
     func sweepAttachments() {
         var cited = Set<String>()
-        for convo in ConversationStore.shared.list {
+        let store = ConversationStore.shared
+        // TRASHED conversations cite their attachments too, or a restore
+        // 30 days later returns a transcript whose documents are gone.
+        for convo in store.list + store.trashed {
             for doc in convo.messages.flatMap({ m in m.docs ?? [] }) {
                 if let name = ChatModel.keptDocName(
                     ChatModel.restoredURL(doc.path)) {

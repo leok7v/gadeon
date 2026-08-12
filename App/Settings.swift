@@ -69,8 +69,8 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("Deletes every saved conversation from this device. This "
-               + "cannot be undone.")
+            Text("Moves every saved conversation to the trash, where it "
+               + "stays for 30 days.")
         }
     }
 
@@ -522,7 +522,7 @@ struct SettingsView: View {
                     Label("Clear all conversations", systemImage: "trash")
                 }
                 .disabled(model.busy)
-                explain("Delete every saved conversation from this device.")
+                explain("Move every saved conversation to the trash.")
             }
             if optionDown {
                 Divider().padding(.vertical, 4)

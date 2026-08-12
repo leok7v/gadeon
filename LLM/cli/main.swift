@@ -51,6 +51,11 @@ let maxReasoning = stripValue(&rawArgs, "--max-reasoning", Int.init) ?? 0
 // --soft-reasoning N: SOFT cap -- end <think> at the next paragraph break once
 // it passes N tokens (0 = off), a cleaner cut than the hard --max-reasoning.
 let softReasoning = stripValue(&rawArgs, "--soft-reasoning", Int.init) ?? 0
+// --no-reason: leave the template's reasoning block open but spend none of it
+// -- close the channel at its first token and sample as instruct. What a
+// system-block template (gemma-4) takes mid-conversation, where the flag
+// itself no longer reaches the model.
+let suppressReasoning = rawArgs.contains("--no-reason")
 // --vl-gate DIR runs the vision roundtrip: load the fixture (patches.bin +
 // vl_ref.json dumped by scripts/convert/vl_gate.py), fuse-prefill the image +
 // prompt, greedy-decode, and check the first token against HF's argmax.

@@ -376,6 +376,9 @@ extension NativeText: UIViewRepresentable {
                 let source = id == nil ? nil : textStorage.attribute(
                     atomicCopyKey, at: range.location,
                     effectiveRange: nil) as? String
+                let kind = id == nil ? nil : textStorage.attribute(
+                    atomicKindKey, at: range.location,
+                    effectiveRange: nil) as? String
                 if let id, source != nil {
                     let gr = layoutManager.glyphRange(
                         forCharacterRange: range, actualCharacterRange: nil)
@@ -388,10 +391,20 @@ extension NativeText: UIViewRepresentable {
                     // starts below its cell padding.
                     let line = layoutManager.lineFragmentUsedRect(
                         forGlyphAt: gr.location, effectiveRange: nil)
+                    // A code fence and a table start at the left margin, so
+                    // a button just inside their right edge lands in empty
+                    // corner. A display is CENTRED, so that same inset lands
+                    // ON the formula: it anchors to the line fragment, which
+                    // spans the full width.
+                    let right = kind == AtomicKind.math.rawValue
+                        ? layoutManager.lineFragmentRect(
+                            forGlyphAt: gr.location,
+                            effectiveRange: nil).maxX
+                        : block.maxX
                     let side = CopyRunButton.side
                     let btn = copyButtons[id] ?? makeCopyButton(id)
                     btn.frame = CGRect(
-                        x: block.maxX + inset.left - side - 4,
+                        x: right + inset.left - side - 4,
                         y: line.minY + inset.top + (line.height - side) / 2,
                         width: side, height: side)
                     copyButtons[id] = btn

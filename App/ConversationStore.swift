@@ -48,9 +48,13 @@ import Foundation
         var updated: Date
         var messages: [Msg]
         var trace: [Trace]? = nil
+        var trashedAt: Date? = nil
     }
 
+    static let trashRetention: TimeInterval = 30 * 24 * 3600
+
     private(set) var list: [Convo] = []
+    private(set) var trashed: [Convo] = []
 
     private(set) var words: [UUID: [String: Int]] = [:]
 
@@ -59,7 +63,16 @@ import Foundation
     }
 
     func reload() {
-        let dir = conversationsDir()
+        purgeExpired()
+        list = read(conversationsDir()).sorted { a, b in a.updated > b.updated }
+        trashed = read(trashDir()).sorted { a, b in
+            (a.trashedAt ?? a.updated) > (b.trashedAt ?? b.updated)
+        }
+        words = [:]
+        for convo in list { words[convo.id] = Self.wordCounts(convo) }
+    }
+
+    private func read(_ dir: URL) -> [Convo] {
         let names = (try? FileManager.default
             .contentsOfDirectory(atPath: dir.path)) ?? []
         var convos: [Convo] = []
@@ -68,9 +81,7 @@ import Foundation
                 convos.append(convo)
             }
         }
-        list = convos.sorted { a, b in a.updated > b.updated }
-        words = [:]
-        for convo in list { words[convo.id] = Self.wordCounts(convo) }
+        return convos
     }
 
     func save(_ convo: Convo) {
@@ -80,22 +91,68 @@ import Foundation
         upsert(convo)
     }
 
-    func delete(_ id: UUID) {
-        try? FileManager.default.removeItem(at: fileURL(id))
-        list.removeAll { convo in convo.id == id }
-        words[id] = nil
+    func trash(_ id: UUID) {
+        if var convo = decodeConvo(fileURL(id)) {
+            convo.trashedAt = Date()
+            if let data = try? JSONEncoder().encode(convo) {
+                try? data.write(to: trashURL(id))
+                try? FileManager.default.removeItem(at: fileURL(id))
+                list.removeAll { existing in existing.id == id }
+                words[id] = nil
+                trashed.insert(convo, at: 0)
+            }
+        }
     }
 
-    func deleteAll() {
-        for convo in list {
-            try? FileManager.default.removeItem(at: fileURL(convo.id))
+    func trashAll() {
+        for convo in list { trash(convo.id) }
+    }
+
+    func restore(_ id: UUID) {
+        if var convo = decodeConvo(trashURL(id)) {
+            convo.trashedAt = nil
+            if let data = try? JSONEncoder().encode(convo) {
+                try? data.write(to: fileURL(id))
+                try? FileManager.default.removeItem(at: trashURL(id))
+                trashed.removeAll { existing in existing.id == id }
+                upsert(convo)
+            }
         }
-        list = []
-        words = [:]
+    }
+
+    func deleteForever(_ id: UUID) {
+        try? FileManager.default.removeItem(at: trashURL(id))
+        trashed.removeAll { convo in convo.id == id }
+    }
+
+    func emptyTrash() {
+        for convo in trashed {
+            try? FileManager.default.removeItem(at: trashURL(convo.id))
+        }
+        trashed = []
+    }
+
+    // A stamp rather than the file's mtime, which a copy or a restore from
+    // backup would reset.
+    private func purgeExpired() {
+        let now = Date()
+        for convo in read(trashDir()) {
+            let since = now.timeIntervalSince(convo.trashedAt ?? now)
+            if since > Self.trashRetention {
+                try? FileManager.default.removeItem(at: trashURL(convo.id))
+            }
+        }
     }
 
     func load(_ id: UUID) -> Convo? {
         decodeConvo(fileURL(id))
+    }
+
+    // Separate from `load`, which every writer pairs with `save`: reading a
+    // trashed conversation through that path and saving it back would file
+    // it under `list` and undelete it.
+    func loadTrashed(_ id: UUID) -> Convo? {
+        decodeConvo(trashURL(id))
     }
 
     private func upsert(_ convo: Convo) {
@@ -136,8 +193,22 @@ import Foundation
         return base
     }
 
+    // A subdirectory, which `read` skips for free: it takes only names
+    // ending .json, and this one is a directory.
+    private func trashDir() -> URL {
+        let fm = FileManager.default
+        let base = conversationsDir()
+            .appendingPathComponent("trash", isDirectory: true)
+        try? fm.createDirectory(at: base, withIntermediateDirectories: true)
+        return base
+    }
+
     private func fileURL(_ id: UUID) -> URL {
         conversationsDir().appendingPathComponent("\(id.uuidString).json")
+    }
+
+    private func trashURL(_ id: UUID) -> URL {
+        trashDir().appendingPathComponent("\(id.uuidString).json")
     }
 
 }

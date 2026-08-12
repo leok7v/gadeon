@@ -793,7 +793,10 @@ import UniformTypeIdentifiers
             ? Models.start : Models.all.first { isOnDisk($0) }
     }
 
+    // Named for this: the outgoing conversation is SAVED before the switch
+    // clears it, exactly as New Chat saves before starting one.
     private func commitSwitch(_ name: String) {
+        commitCurrent()
         genTask?.cancel()
         session?.requestStop()
         primer.cancel()
@@ -814,7 +817,12 @@ import UniformTypeIdentifiers
         compiling = false
         compileDoneLoC = 0
         loadError = nil
+        // The identity goes with the messages, or the next conversation
+        // commits into this one's id and overwrites it.
         messages = []
+        traceEvents = []
+        currentConversationId = nil
+        readOnly = false
         generatedTitle = nil
         statsLabel = ""
         modelName = name
@@ -845,7 +853,9 @@ import UniformTypeIdentifiers
         let fm = FileManager.default
         try? fm.removeItem(
             at: Bundle.modelStore().appendingPathComponent(name))
-        try? fm.removeItem(at: precookURL(name))
+        for on in [true, false] {
+            try? fm.removeItem(at: precookURL(name, thinking: on))
+        }
         if let sha = ModelCatalog.source(name)?.revision {
             let d = UserDefaults.standard
             for k in d.dictionaryRepresentation().keys
@@ -1006,8 +1016,17 @@ import UniformTypeIdentifiers
             .appendingPathComponent("precook", isDirectory: true)
     }
 
-    private static func precookURL(_ name: String) -> URL {
-        precookDir.appendingPathComponent(name + ".ctx")
+    // Keyed by the reasoning flag as well as the model: a template that spells
+    // thinking inside its system block renders two different blocks, so they
+    // are two caches rather than one that misses every time the flag moves.
+    private static func precookURL(_ name: String, thinking: Bool) -> URL {
+        precookDir.appendingPathComponent(
+            name + (thinking ? ".think" : "") + ".ctx")
+    }
+
+    private static func ensurePrecookDir() {
+        try? FileManager.default.createDirectory(
+            at: precookDir, withIntermediateDirectories: true)
     }
 
     static func wipePrecook() {
@@ -1016,12 +1035,19 @@ import UniformTypeIdentifiers
 
     private func primeSession(resetFirst: Bool = false) {
         if let s = session {
-            let url = ChatModel.precookURL(modelName)
-            try? FileManager.default.createDirectory(
-                at: ChatModel.precookDir, withIntermediateDirectories: true)
+            let on = thinkingActive
+            primedThinking = on
+            ChatModel.ensurePrecookDir()
+            let url = ChatModel.precookURL(modelName, thinking: on)
             Task { await s.primeOrCook(at: url, resetFirst: resetFirst) }
         }
     }
+
+    // The reasoning flag the live conversation's system block was rendered
+    // with. Reasoning can always be turned OFF later by closing the channel as
+    // it opens, but never ON: the marker some templates carry lives in that
+    // block, which is in the KV and is subtracted from every later delta.
+    @ObservationIgnored private var primedThinking = true
 
     func newChat() {
         lastTurnSpoken = false
@@ -1084,9 +1110,29 @@ import UniformTypeIdentifiers
             thinking.toggle()
             let s = session
             let on = thinking
-            Task { await s?.setThinking(on) }
-            flashHUD(thinking ? "Thinking: On" : "Thinking: Off")
+            // An empty conversation can be re-primed onto the other system
+            // block, which is the only way to OPEN reasoning; one already
+            // under way takes the closing route instead.
+            let fresh = messages.isEmpty
+            ChatModel.ensurePrecookDir()
+            let url = ChatModel.precookURL(modelName, thinking: on)
+            let hud = thinkingFlash(on, fresh: fresh)
+            if fresh { primedThinking = on }
+            Task {
+                await s?.setThinking(on)
+                await s?.setSuppressReasoning(!on)
+                if fresh { await s?.primeOrCook(at: url, resetFirst: true) }
+            }
+            flashHUD(hud)
         }
+    }
+
+    private func thinkingFlash(_ on: Bool, fresh: Bool) -> String {
+        var out = on ? "Thinking: On" : "Thinking: Off"
+        if on, !fresh, !primedThinking {
+            out = "Thinking: On, from the next chat"
+        }
+        return out
     }
 
     func quickAnswer() {
@@ -1681,6 +1727,7 @@ import UniformTypeIdentifiers
             }
             speech.beginTurn(cue: cue)
             genTask = Task {
+                let began = Date()
                 let phrases = phraseCycler()
                 let ticker = statsTicker(session)
                 await session.setReasoningCaps(soft: thinkTokenCap,
@@ -1708,15 +1755,7 @@ import UniformTypeIdentifiers
                     speech.endTurn()
                     flushLive(idx, force: true)
                     finishDocs(idx)
-                    if await session.turnRolledBack {
-                        if messages.count >= 2 { messages.removeLast(2) }
-                    } else {
-                        await refreshStats(session)
-                        recordTG(await session.lastMetrics.tg)
-                        noteLoopStop(await session.lastMetrics, idx)
-                        commitCurrent()
-                        maybeGenerateTitle()
-                    }
+                    await finishTurn(session, idx, began)
                 } catch {
                     if messages.indices.contains(idx) {
                         messages[idx].text = ChatModel.attachmentFailed(error)
@@ -2041,6 +2080,7 @@ import UniformTypeIdentifiers
             }
             speech.beginTurn(cue: .looking)
             genTask = Task {
+                let began = Date()
                 let phrases = phraseCycler()
                 let ticker = statsTicker(session)
                 await session.setReasoningCaps(soft: thinkTokenCap,
@@ -2071,15 +2111,7 @@ import UniformTypeIdentifiers
                     speech.endTurn()
                     flushLive(idx, force: true)
                     finishDocs(idx)
-                    if await session.turnRolledBack {
-                        if messages.count >= 2 { messages.removeLast(2) }
-                    } else {
-                        await refreshStats(session)
-                        recordTG(await session.lastMetrics.tg)
-                        noteLoopStop(await session.lastMetrics, idx)
-                        commitCurrent()
-                        maybeGenerateTitle()
-                    }
+                    await finishTurn(session, idx, began)
                 } catch {
                     if messages.indices.contains(idx) {
                         messages[idx].text = "Could not process the image."
@@ -2152,6 +2184,7 @@ import UniformTypeIdentifiers
             }
             speech.beginTurn()
             genTask = Task {
+                let began = Date()
                 let phrases = phraseCycler()
                 let ticker = statsTicker(session)
                 await session.setReasoningCaps(soft: thinkTokenCap,
@@ -2177,17 +2210,59 @@ import UniformTypeIdentifiers
                 genTask = nil
                 prefilling = false
                 consulting = false
-                if await session.turnRolledBack {
-                    if messages.count >= 2 { messages.removeLast(2) }
-                } else {
-                    await refreshStats(session)
-                    recordTG(await session.lastMetrics.tg)
-                    noteLoopStop(await session.lastMetrics, idx)
-                    commitCurrent()
-                    maybeGenerateTitle()
-                }
+                await finishTurn(session, idx, began)
             }
         }
+    }
+
+    // A turn that produced nothing at all takes its two bubbles with it; one
+    // that spent tool rounds keeps them, so the transcript can say it reached
+    // no answer instead of erasing the question.
+    private func finishTurn(_ session: ChatSession, _ idx: Int,
+                            _ since: Date) async {
+        let outcome = await session.turnOutcome
+        if outcome == .stopped {
+            if messages.count >= 2 { messages.removeLast(2) }
+        } else {
+            await refreshStats(session)
+            recordTG(await session.lastMetrics.tg)
+            noteLoopStop(await session.lastMetrics, idx)
+            commitCurrent()
+            maybeGenerateTitle()
+        }
+        reportTurn(await session.lastMetrics, outcome, idx, since)
+    }
+
+    // One line per turn, so a sweep across models and thinking modes diffs by
+    // grepping rather than by reading a whole trace.
+    private func reportTurn(_ m: TurnMetrics,
+                            _ outcome: ChatSession.TurnOutcome,
+                            _ idx: Int, _ since: Date) {
+        Diag.shared.report(String(
+            format: "[turn] %@ thinking=%@ outcome=%@ end=%@ tools=%@ "
+                + "think=%d content=%d ctx=%d %.1fs",
+            modelName, thinkingActive ? "on" : "off", outcome.rawValue,
+            m.endReason, toolDigest(idx), m.thinkTokens, m.contentTokens,
+            m.ctx, Date().timeIntervalSince(since)))
+    }
+
+    // How many calls and how many of them were DISTINCT. A model re-asking
+    // one expression is what spends a whole tool budget without progress,
+    // and a count alone cannot show it.
+    private func toolDigest(_ idx: Int) -> String {
+        var out = "none"
+        let rounds = messages.indices.contains(idx)
+            ? messages[idx].toolRounds : []
+        if !rounds.isEmpty {
+            var counts: [String: Int] = [:]
+            for round in rounds { counts[round.label, default: 0] += 1 }
+            let names = counts.sorted { a, b in a.value > b.value }
+                .map { pair in "\(pair.key)x\(pair.value)" }
+                .joined(separator: ",")
+            let distinct = Set(rounds.map { r in r.label + r.args }).count
+            out = "\(names)/\(distinct)distinct"
+        }
+        return out
     }
 
     private func noteLoopStop(_ m: TurnMetrics, _ idx: Int) {
