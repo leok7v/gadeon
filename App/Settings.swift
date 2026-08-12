@@ -489,6 +489,15 @@ struct SettingsView: View {
                     + "answer: about \(Int(model.thinkBudget.seconds)) "
                     + "seconds.")
             }
+            Toggle("Suggest follow-up questions",
+                   isOn: $model.suggestFollowups)
+                .toggleStyle(.switch)
+            explain(model.offersFollowupHint || !model.suggestFollowups
+                ? "After each reply, offer the question you are most likely "
+                    + "to ask next under the message box. Press Tab or the "
+                    + "right arrow to use it."
+                : "\(Models.display(model.modelName)) is too small to suggest "
+                    + "a useful question, so this does nothing here.")
             Toggle("Wikipedia", isOn: Binding(
                 get: { model.wikipedia },
                 set: { on in

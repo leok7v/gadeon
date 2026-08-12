@@ -115,10 +115,11 @@ struct ContentView: View {
                 .overlay { hudOverlay }
                 .animation(.easeInOut(duration: 0.4), value: model.hud)
                 .navigationTitle("")
-                .modifier(ChatChrome(leading: foldersButton,
-                                     center: centerBar,
-                                     trailing: trailingButtons))
                 .disabled(sidebarOpen)
+                .modifier(ChatChrome(
+                    leading: foldersButton,
+                    center: centerBar.disabled(sidebarOpen),
+                    trailing: trailingButtons.disabled(sidebarOpen)))
             drawer
             renameOverlay
         }
@@ -369,7 +370,10 @@ struct ContentView: View {
     }
 
     private func toggleSidebar() {
-        if !sidebarOpen { hideSoftKeyboard() }
+        if !sidebarOpen {
+            hideSoftKeyboard()
+            model.commitCurrent()
+        }
         withAnimation(.snappy) { sidebarOpen.toggle() }
     }
 

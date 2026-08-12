@@ -58,18 +58,11 @@ struct Composer: View {
             PromptEditor(text: $model.input, focused: $focused,
                          caret: $model.caret, disabled: isOS && model.busy,
                          minLines: 2, maxLines: Composer.maxLines,
-                         scale: editorScale,
+                         scale: editorScale, hasHint: hinting,
                          onSubmit: submitReturn,
+                         onAcceptHint: acceptHint,
                          onDropFiles: { model.handleDrop($0, at: model.caret) })
-                .overlay(alignment: .topLeading) {
-                    if model.input.isEmpty {
-                        Text("Write a message…")
-                            .font(editorFont)
-                            .foregroundStyle(.tertiary)
-                            .padding(.top, 2)
-                            .allowsHitTesting(false)
-                    }
-                }
+                .overlay(alignment: .topLeading) { ghost }
                 .onChange(of: model.input) { _, _ in
                     model.reconcileAttachments()
                 }
@@ -87,6 +80,40 @@ struct Composer: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.separator, lineWidth: 0.5)
         }
+    }
+
+    private var hinting: Bool {
+        model.input.isEmpty && !model.followupHint.isEmpty && !model.busy
+    }
+
+    @ViewBuilder
+    private var ghost: some View {
+        if hinting {
+            Text(model.followupHint)
+                .font(editorFont)
+                .foregroundStyle(.tertiary)
+                .lineLimit(2)
+                .padding(.top, 2)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 24).onEnded { swipe in
+                    if swipe.translation.width > 48,
+                       abs(swipe.translation.height) < 48 {
+                        acceptHint()
+                    }
+                })
+                .allowsHitTesting(isOS)
+        } else if model.input.isEmpty {
+            Text("Write a message…")
+                .font(editorFont)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 2)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func acceptHint() {
+        model.acceptFollowupHint()
+        focused = true
     }
 
     private var composing: Bool {
@@ -405,9 +432,14 @@ struct Composer: View {
     }
 
     private var plainFootnote: String {
-        model.typing || isOS
+        var text = model.typing || isOS
             ? Composer.caveat
             : "Shift+Return for a new line.  " + Composer.caveat
+        if hinting {
+            text = isOS ? "Swipe right to ask this"
+                        : "Tab or \u{2192} to ask this"
+        }
+        return text
     }
 
 }

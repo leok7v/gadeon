@@ -50,6 +50,14 @@ func traceWrite(_ obj: [String: Any]) {
 }
 
 @MainActor
+func reportHints(_ s: ChatSession) async {
+    let title = await s.makeTitle()
+    let hint = await s.makeFollowup()
+    err("[hint] title    = \(title.debugDescription)\n")
+    err("[hint] followup = \(hint.debugDescription)\n")
+}
+
+@MainActor
 func runSession(_ s: ChatSession, _ user: String) async {
     let turn = traceCounter.next()
     let t0 = Date()
@@ -438,6 +446,7 @@ func runLongDoc(_ user: String) async throws {
             line = readLine(strippingNewline: true)
         }
     }
+    if rawArgs.contains("--hint") { await reportHints(bsession) }
     exit(0)
 }
 

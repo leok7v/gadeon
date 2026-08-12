@@ -10,7 +10,9 @@ struct PromptEditor: NSViewRepresentable {
     var minLines: Int
     var maxLines: Int
     var scale: CGFloat = 1
+    var hasHint = false
     var onSubmit: () -> Void
+    var onAcceptHint: () -> Void = { }
     var onDropFiles: ([URL]) -> Void = { _ in }
 
     static func points(_ scale: CGFloat) -> CGFloat {
@@ -27,6 +29,7 @@ struct PromptEditor: NSViewRepresentable {
         let tv = SubmitTextView()
         tv.delegate = context.coordinator
         tv.onSubmit = { context.coordinator.parent.onSubmit() }
+        tv.onAcceptHint = { context.coordinator.parent.onAcceptHint() }
         tv.onDropFiles = { context.coordinator.parent.onDropFiles($0) }
         tv.isRichText = false
         tv.allowsUndo = true
@@ -58,6 +61,7 @@ struct PromptEditor: NSViewRepresentable {
                     NSRange(location: max(0, min(caret, len)), length: 0))
             }
             if tv.font != font { tv.font = font }
+            tv.hasHint = hasHint
             tv.isEditable = !disabled
             tv.isSelectable = !disabled
             if focused, tv.window != nil, tv.window?.firstResponder !== tv {
@@ -164,6 +168,8 @@ struct PromptEditor: NSViewRepresentable {
 
 final class SubmitTextView: NSTextView {
     var onSubmit: (() -> Void)?
+    var onAcceptHint: (() -> Void)?
+    var hasHint = false
     // NSTextView takes file drops through its built-in text-drag machinery,
     // which registerForDraggedTypes does not reach.
     var onDropFiles: (([URL]) -> Void)?
@@ -194,11 +200,17 @@ final class SubmitTextView: NSTextView {
     override func doCommand(by selector: Selector) {
         let isReturn = selector == #selector(NSResponder.insertNewline(_:))
         let shift = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
+        let takesHint = selector == #selector(NSResponder.insertTab(_:))
+            || selector == #selector(NSResponder.moveRight(_:))
+        var handled = false
         if isReturn && !shift {
             onSubmit?()
-        } else {
-            super.doCommand(by: selector)
+            handled = true
+        } else if takesHint, hasHint, string.isEmpty {
+            onAcceptHint?()
+            handled = true
         }
+        if !handled { super.doCommand(by: selector) }
     }
 
 }

@@ -4,18 +4,6 @@ import Testing
 
 // What a title turn appends to the generation prompt, per template.
 //
-// The seed exists because naming a conversation cost 255 reasoning tokens
-// against 1 of content on gemma-4, and on a capped turn produced no title at
-// all. `enableThinking = false` cannot reach that: the flag rides the jinja
-// template and gemma opens the channel itself as its first decoded output,
-// so the KV is the only place to answer it.
-//
-// Three templates hand over three different states, and only the gemma
-// branch had ever executed -- the other two were written from the documented
-// shapes and never run. A wrong branch is SILENT: a doubled or malformed
-// marker goes into the KV and surfaces only as degraded output nobody
-// attributes to it.
-//
 // No weights and no engine here. The seed is chosen from the rendered
 // generation prompt by two string predicates, so the branch is decidable
 // from the template alone -- which is also why it is per-TEMPLATE and not
@@ -45,16 +33,13 @@ struct TitleSeedTests {
             ? String(full.dropFirst(closed.count)) : ""
     }
 
-    // gemma-4 says nothing about reasoning in its generation prompt, so the
-    // seed has to supply the whole block.
-    @Test func gemmaGetsBothMarkers() throws {
+    @Test func gemmaGetsNothing() throws {
         let template = try TitleSeedTests.fixture("gemma4-chat-template.jinja")
         let wire = ChatWire.derive(template)
         let gen = try TitleSeedTests.genSuffix(template)
         #expect(!wire.opensReasoning(gen), "gen: \(gen.debugDescription)")
         #expect(!wire.closesReasoning(gen), "gen: \(gen.debugDescription)")
-        #expect(ChatSession.titleSeed(gen, wire)
-                == wire.reasoningOpen + wire.reasoningClose)
+        #expect(ChatSession.titleSeed(gen, wire) == "")
     }
 
     // Qwen3.5 OPENS the marker and leaves it open, so the seed closes it and

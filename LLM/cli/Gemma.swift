@@ -194,6 +194,7 @@ enum GemmaCLIError: Error, CustomStringConvertible {
                             thinking: args.contains("--think"),
                             system: valueAfter(args, "--system"),
                             title: args.contains("--title"),
+                            hint: args.contains("--hint"),
                             attach: try await gemmaAttachments(chat, args,
                                                                ctx))
         exit(0)
@@ -299,7 +300,7 @@ private struct GemmaAttachments {
                                   _ backend: any AgentBackend,
                                   _ turns: [String],
                                   _ cap: Int?, thinking: Bool,
-                                  system: String?, title: Bool,
+                                  system: String?, title: Bool, hint: Bool,
                                   attach: GemmaAttachments) async throws {
     let session = ChatSession(
         backend: backend,
@@ -353,6 +354,7 @@ private struct GemmaAttachments {
     if title {
         err("[title] \"\(await session.makeTitle())\"\n")
     }
+    if hint { await reportHints(session) }
 }
 
 // Metal against SIMD over the reference dump's own ids. The SIMD engine is

@@ -38,6 +38,7 @@ extension ChatModel {
             }
             currentConversationId = id
             generatedTitle = nil
+            followupHint = ""
             readOnly = true
             statsLabel = ""
         }

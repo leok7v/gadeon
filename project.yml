@@ -123,6 +123,8 @@ targets:
         # file access out-of-process.
         CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: config/macos.entitlements
         CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]: config/ios.entitlements
+        LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]: $(inherited) @executable_path/../Frameworks
+        LD_RUNPATH_SEARCH_PATHS[sdk=iphoneos*]: $(inherited) @executable_path/Frameworks
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Mac App Store validation rejects an archive without a category.
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity

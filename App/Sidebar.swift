@@ -189,16 +189,21 @@ struct Sidebar: View {
         .padding(24)
     }
 
+    @ViewBuilder
     private var closeRow: some View {
-        HStack {
-            Button(action: onClose) {
-                Image(systemName: "xmark")
+        if isOS {
+            HStack {
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                Spacer()
             }
-            .buttonStyle(.plain)
-            Spacer()
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+        } else {
+            Color.clear.frame(height: 12)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 12)
     }
 
     private var newChatRow: some View {
@@ -331,7 +336,7 @@ struct Sidebar: View {
             Button { onRename(convo) } label: {
                 Label("Rename\u{2026}", systemImage: "pencil")
             }
-            ShareLink(item: ConversationPDF(convo: exportable(convo)),
+            ShareLink(item: ConversationPDF(convo: convo),
                       preview: SharePreview(convo.title)) {
                 Label("Share PDF", systemImage: "square.and.arrow.up")
             }
@@ -349,21 +354,12 @@ struct Sidebar: View {
         }
     }
 
-    // The row carries the STORED copy, which lags the live transcript until
-    // the turn commits, so exporting the open conversation would drop its
-    // last turn.
-    private func exportable(
-        _ convo: ConversationStore.Convo) -> ConversationStore.Convo {
-        var out = convo
+    private func save(_ convo: ConversationStore.Convo) {
+        var ready = convo
         if convo.id == model.currentConversationId {
             model.commitCurrent()
-            out = ConversationStore.shared.load(convo.id) ?? convo
+            ready = ConversationStore.shared.load(convo.id) ?? convo
         }
-        return out
-    }
-
-    private func save(_ convo: ConversationStore.Convo) {
-        let ready = exportable(convo)
         exportName = ConversationExport.filename(ready.title)
         Task { @MainActor in
             if let data = await ConversationExport.pdf(ready) {

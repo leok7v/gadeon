@@ -288,3 +288,5 @@ if let vlDir {
         line = readLine(strippingNewline: true)
     }
 }
+
+if rawArgs.contains("--hint"), let session { await reportHints(session) }

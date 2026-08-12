@@ -10,7 +10,9 @@ struct PromptEditor: UIViewRepresentable {
     var minLines: Int
     var maxLines: Int
     var scale: CGFloat = 1
+    var hasHint = false
     var onSubmit: () -> Void
+    var onAcceptHint: () -> Void = { }
     var onDropFiles: ([URL]) -> Void = { _ in }
 
     static func points(_ scale: CGFloat) -> CGFloat {

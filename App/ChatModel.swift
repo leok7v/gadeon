@@ -824,6 +824,7 @@ import UniformTypeIdentifiers
         currentConversationId = nil
         readOnly = false
         generatedTitle = nil
+        followupHint = ""
         statsLabel = ""
         modelName = name
         UserDefaults.standard.set(name, forKey: "modelName")
@@ -1050,6 +1051,7 @@ import UniformTypeIdentifiers
     @ObservationIgnored private var primedThinking = true
 
     func newChat() {
+        followupHint = ""
         lastTurnSpoken = false
         speech.stopSpeaking()
         commitCurrent()
@@ -1074,19 +1076,59 @@ import UniformTypeIdentifiers
         }
     }
 
-    private func maybeGenerateTitle() {
+    @ObservationIgnored private var metaTask: Task<Void, Never>?
+
+    private func runMetaTurns() {
         let chars = messages.reduce(0) { sum, m in sum + m.text.count }
-        let worth = !readOnly && generatedTitle == nil && genTask == nil
+        let titled = !readOnly && generatedTitle == nil
             && messages.count >= 2 && chars > 200
-        if worth, let session {
-            genTask = Task { @MainActor in
-                let t = await session.makeTitle()
-                if !t.isEmpty {
-                    generatedTitle = t
-                    commitCurrent()
+        if let session, !readOnly, titled || offersFollowupHint {
+            let running = metaTask
+            metaTask = Task { @MainActor in
+                await running?.value
+                if titled, !Task.isCancelled {
+                    let t = await session.makeTitle()
+                    if !t.isEmpty {
+                        generatedTitle = t
+                        commitCurrent()
+                    }
                 }
-                genTask = nil
+                if offersFollowupHint, !Task.isCancelled {
+                    followupHint = await session.makeFollowup()
+                }
+                metaTask = nil
             }
+        }
+    }
+
+    private func drainMeta() async {
+        if let running = metaTask {
+            metaTask = nil
+            session?.requestStop()
+            running.cancel()
+            await running.value
+        }
+    }
+
+    var suggestFollowups: Bool = UserDefaults.standard
+        .object(forKey: "suggestFollowups") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(suggestFollowups,
+                                      forKey: "suggestFollowups")
+            if !suggestFollowups { followupHint = "" }
+        }
+    }
+
+    var offersFollowupHint: Bool {
+        suggestFollowups && modelName != Models.fallback
+    }
+
+    var followupHint = ""
+
+    func acceptFollowupHint() {
+        if !followupHint.isEmpty {
+            input = followupHint
+            caret = input.utf16.count
         }
     }
 
@@ -1594,6 +1636,7 @@ import UniformTypeIdentifiers
     }
 
     func send() {
+        followupHint = ""
         let attached = !attachedImages.isEmpty || !attachedClips.isEmpty
         if attached, ready, !busy {
             if modelSupportsSoftTokens {
@@ -1727,6 +1770,7 @@ import UniformTypeIdentifiers
             }
             speech.beginTurn(cue: cue)
             genTask = Task {
+                await drainMeta()
                 let began = Date()
                 let phrases = phraseCycler()
                 let ticker = statsTicker(session)
@@ -2080,6 +2124,7 @@ import UniformTypeIdentifiers
             }
             speech.beginTurn(cue: .looking)
             genTask = Task {
+                await drainMeta()
                 let began = Date()
                 let phrases = phraseCycler()
                 let ticker = statsTicker(session)
@@ -2184,6 +2229,7 @@ import UniformTypeIdentifiers
             }
             speech.beginTurn()
             genTask = Task {
+                await drainMeta()
                 let began = Date()
                 let phrases = phraseCycler()
                 let ticker = statsTicker(session)
@@ -2228,7 +2274,7 @@ import UniformTypeIdentifiers
             recordTG(await session.lastMetrics.tg)
             noteLoopStop(await session.lastMetrics, idx)
             commitCurrent()
-            maybeGenerateTitle()
+            runMetaTurns()
         }
         reportTurn(await session.lastMetrics, outcome, idx, since)
     }

@@ -205,9 +205,7 @@ public actor ChatSession {
     // a press that lands after the model already left reasoning is a no-op.
     // Cleared each turn.
     private var forceEndThink = false
-    // While a title turn runs, installTurnSampler picks a greedy sampler so the
-    // title is deterministic (stable across regenerations) rather than sampled.
-    private var titleMode = false
+    private var metaTurn = false
     // Whether the last generation prompt leaves decoding INSIDE the reasoning
     // region. Set per turn from the rendered gen prompt, because the template
     // is the authority and the three shipped answers differ: Qwen3.5 opens the
@@ -802,17 +800,16 @@ public actor ChatSession {
 
     static func titleSeed(_ gen: String, _ wire: ChatWire) -> String {
         var out = ""
-        if !wire.closesReasoning(gen) {
-            out = wire.opensReasoning(gen)
-                ? wire.reasoningClose
-                : wire.reasoningOpen + wire.reasoningClose
+        if !wire.closesReasoning(gen), wire.opensReasoning(gen) {
+            out = wire.reasoningClose
         }
         return out
     }
 
-    public func makeTitle() async -> String {
+    private func oneShot(_ instruction: String, stopAfter: Int,
+                         _ label: String) async -> String {
         await priming?.value
-        var title = ""
+        var raw = ""
         if history.count > 1, let save = try? await backend.checkpoint() {
             let began = Date()
             let savedThinking = enableThinking
@@ -820,47 +817,69 @@ public actor ChatSession {
             let savedHistory = history
             let savedCommitted = committed
             let savedMetrics = lastMetrics
+            let savedOutcome = turnOutcome
             let savedSink = traceSink
+            let savedSuppress = suppressReasoning
             enableThinking = false
+            suppressReasoning = true
             runner = nil
             traceSink = nil
-            titleMode = true
-            var raw = ""
-            for await piece in reply(ChatSession.titleInstruction) {
+            metaTurn = true
+            for await piece in reply(instruction) {
                 raw += piece
-                if raw.count > 160 { backend.requestStop() }
+                if raw.count > stopAfter { backend.requestStop() }
             }
-            titleMode = false
-            // Read BEFORE the restore below puts the answering turn's numbers
-            // back: this is what the title itself cost.
+            metaTurn = false
             let spent = lastMetrics
             enableThinking = savedThinking
+            suppressReasoning = savedSuppress
             runner = savedRunner
             traceSink = savedSink
             history = savedHistory
             committed = savedCommitted
             lastMetrics = savedMetrics
+            turnOutcome = savedOutcome
             try? await backend.rollback(save)
-            title = ChatSession.cleanTitle(raw)
-            // The title turn is not in the session trace (muted above), so log
-            // the model's raw content-channel output and the cleaned title --
-            // a "<think>" here means the reasoning/content split let a stray
-            // think block through into the title.
-            // The two token counts ARE the diagnosis. A few words of title
-            // costing hundreds of think tokens means the model reasoned its
-            // way there, which the raw.count brake above cannot reach because
-            // raw only ever sees content. The `enableThinking = false` above
-            // does not prevent it on a template that spells reasoning in its
-            // system block: that block is already in the KV. titleSeed is
-            // what actually starts the turn past the channel, and
-            // suppressReasoning is what closes it if the model opens its own.
             Diag.shared.report(String(
-                format: "makeTitle raw=%@ -> %@ think=%d content=%d in %.1fs",
-                raw.debugDescription, title.debugDescription,
-                spent.thinkTokens, spent.contentTokens,
+                format: "%@ raw=%@ think=%d content=%d in %.1fs", label,
+                raw.debugDescription, spent.thinkTokens, spent.contentTokens,
                 Date().timeIntervalSince(began)))
         }
-        return title
+        return raw
+    }
+
+    public func makeTitle() async -> String {
+        let raw = await oneShot(ChatSession.titleInstruction, stopAfter: 160,
+                                "makeTitle")
+        return ChatSession.cleanTitle(raw)
+    }
+
+    public func makeFollowup() async -> String {
+        let raw = await oneShot(ChatSession.followUpInstruction,
+                                stopAfter: 280, "makeFollowup")
+        let hint = ChatSession.cleanFollowup(raw)
+        return alreadyAsked(hint) ? "" : hint
+    }
+
+    private func alreadyAsked(_ hint: String) -> Bool {
+        let candidate = ChatSession.bagOfWords(hint)
+        var repeated = candidate.isEmpty
+        for m in history where m.role == "user" && !repeated {
+            let prior = ChatSession.bagOfWords(m.content)
+            let union = candidate.union(prior).count
+            repeated = union > 0
+                && Double(candidate.intersection(prior).count)
+                    / Double(union) >= ChatSession.echoOverlap
+        }
+        return repeated
+    }
+
+    static let echoOverlap = 0.6
+
+    static func bagOfWords(_ s: String) -> Set<String> {
+        Set(s.lowercased()
+            .split(whereSeparator: { c in !c.isLetter && !c.isNumber })
+            .map(String.init))
     }
 
     // Name the SUBJECT. Left to itself a model will happily title a turn by
@@ -896,6 +915,63 @@ public actor ChatSession {
             chars += word.count + 1
         }
         return words.joined(separator: " ")
+    }
+
+    static let followUpInstruction =
+        ProcessInfo.processInfo.environment["GADEON_FOLLOWUP"]
+            ?? defaultFollowUpInstruction
+
+    static let defaultFollowUpInstruction =
+        "Pick one specific detail from your last answer that the user would "
+        + "most want to know more about, and write the question they would "
+        + "type to ask about it. One sentence ending in a question mark. "
+        + "Never repeat a question already asked. Output only the question."
+
+    static let followupMin = 12
+    static let followupMax = 140
+
+    static func cleanFollowup(_ raw: String) -> String {
+        let lines = raw.split(whereSeparator: \.isNewline)
+            .map { line in line.trimmingCharacters(in: .whitespaces) }
+            .filter { line in !line.isEmpty }
+        let asked = lines.filter { line in line.contains("?") }
+        var out = ""
+        if asked.count == 1, let line = asked.first {
+            out = ChatSession.oneQuestion(line)
+        }
+        return out
+    }
+
+    private static let assistantVoice = [
+        "would you like", "do you want", "shall i", "can i help",
+        "is there anything", "let me know", "should i", "like me to",
+        "your last answer",
+    ]
+
+    private static func oneQuestion(_ line: String) -> String {
+        var body = line
+        if let mark = body.firstIndex(of: "?") {
+            body = String(body[...mark])
+        }
+        if let colon = body.range(of: ": "),
+           !body[..<colon.lowerBound].contains("?"),
+           body.distance(from: body.startIndex, to: colon.lowerBound) <= 40 {
+            body = String(body[colon.upperBound...])
+        }
+        body = body.trimmingCharacters(
+            in: CharacterSet(charactersIn: " \t\"'`*_-#>0123456789."))
+        let lower = body.lowercased()
+        let markup = body.contains(where: { c in "{}<>\"".contains(c) })
+        let aboutTheUser = lower.hasPrefix("the user")
+            || lower.hasPrefix("user ")
+        let assistant = ChatSession.assistantVoice.contains { phrase in
+            lower.contains(phrase)
+        }
+        let usable = !aboutTheUser && !assistant && !markup
+            && body.hasSuffix("?")
+            && body.count >= ChatSession.followupMin
+            && body.count <= ChatSession.followupMax
+        return usable ? body : ""
     }
 
     // A text turn: append the user message, seed the KV by rendering ONLY this
@@ -1219,15 +1295,7 @@ public actor ChatSession {
         }
         var genText = fullText.hasPrefix(closedText)
             ? String(fullText.dropFirst(closedText.count)) : ""
-        // A TITLE turn seeds a closed, empty reasoning block -- exactly what
-        // the dense Qwen3 template bakes on every turn. gemma-4 opens that
-        // channel itself as its first decoded output whatever
-        // `enable_thinking` says, so the flag cannot reach it, and reasoning
-        // about four words is pure cost: measured 255 think tokens against 1
-        // of content, which on a capped turn yields no title at all. Seeding
-        // the block closed starts the decode in content, where the caller is
-        // already watching and the length brake can fire.
-        if titleMode { genText += ChatSession.titleSeed(genText, wire) }
+        if metaTurn { genText += ChatSession.titleSeed(genText, wire) }
         genStartsThink = wire.startsInReasoning(genPrompt: genText,
                                                 enabled: true)
         let expanded = Continuation.expandPads(
@@ -1384,7 +1452,7 @@ public actor ChatSession {
 
     private func installTurnSampler(vision: Bool) async {
         let reasons = enableThinking && !suppressReasoning
-        var turnConfig = titleMode
+        var turnConfig = metaTurn
             ? ChatSession.greedyConfig
             : presets.select(thinking: reasons, vision: vision)
         // DRY is the degeneration guard, not a taste knob: the card presets
@@ -2150,15 +2218,7 @@ public actor ChatSession {
             ? String(closedText.dropFirst(prefix.count)) : closedText
         var genText = fullText.hasPrefix(closedText)
             ? String(fullText.dropFirst(closedText.count)) : ""
-        // A TITLE turn seeds a closed, empty reasoning block -- exactly what
-        // the dense Qwen3 template bakes on every turn. gemma-4 opens that
-        // channel itself as its first decoded output whatever
-        // `enable_thinking` says, so the flag cannot reach it, and reasoning
-        // about four words is pure cost: measured 255 think tokens against 1
-        // of content, which on a capped turn yields no title at all. Seeding
-        // the block closed starts the decode in content, where the caller is
-        // already watching and the length brake can fire.
-        if titleMode { genText += ChatSession.titleSeed(genText, wire) }
+        if metaTurn { genText += ChatSession.titleSeed(genText, wire) }
         genStartsThink = wire.startsInReasoning(genPrompt: genText,
                                                 enabled: true)
         var seed = backend.eos
