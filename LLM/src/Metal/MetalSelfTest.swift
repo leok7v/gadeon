@@ -470,7 +470,7 @@ public enum MetalSelfTest {
         for c in 0..<n {
             let col = Array(xflat[c * k ..< (c + 1) * k])
             var ref = [Float](repeating: 0, count: m)
-            Q2_0.matvec(w, x: col, out: &ref)
+            QB.matvec(w, x: col, out: &ref)
             for j in 0..<m {
                 d = max(d, abs(gpu[c * m + j] - ref[j]))
                 mag = max(mag, abs(ref[j]))
@@ -497,7 +497,7 @@ public enum MetalSelfTest {
         let x = fill(k, seed: 1)
 
         var ref = [Float](repeating: 0, count: m)
-        Q2_0.matvec(w, x: x, out: &ref)
+        QB.matvec(w, x: x, out: &ref)
 
         let gpu = try gemv(ctx, weight: w, mapBase: model.gguf.map, x: x)
         let d = maxAbsDiff(ref, gpu)
@@ -516,10 +516,13 @@ public enum MetalSelfTest {
             UInt64((t.base - model.gguf.map) + id * rowBytes))
 
         var ref = [Float](repeating: 0, count: k)
-        Q2_0.dequant(t.base + id * rowBytes, count: k, into: &ref)
+        ref.withUnsafeMutableBufferPointer { rb in
+            QB.dequant(t, at: id * rowBytes, count: k, into: rb.baseAddress!)
+        }
 
         let out = ctx.makeF32(k)
-        let enc = try dispatch(ctx, "q2_0_dequant_row", threads: k) { e in
+        let dq = t.type == .q2_x ? "q2_x_dequant_row" : "q2_0_dequant_row"
+        let enc = try dispatch(ctx, dq, threads: k) { e in
             e.setBuffer(row.buf, offset: 0, index: 0)
             e.setBuffer(out, offset: 0, index: 1)
             var a = GemvArgs(woff: row.local, K: UInt32(k), M: UInt32(k))
@@ -540,7 +543,8 @@ public enum MetalSelfTest {
         let ref = ctx.window(UInt64(w.base - mapBase))
         let xb = ctx.makeF32(x)
         let out = ctx.makeF32(m)
-        let cb = try dispatch(ctx, "q2_0_gemv", groups: m, threadsPerGroup: 32) {
+        let kernel = w.type == .q2_x ? "q2_x_gemv" : "q2_0_gemv"
+        let cb = try dispatch(ctx, kernel, groups: m, threadsPerGroup: 32) {
             e in
             e.setBuffer(ref.buf, offset: 0, index: 0)
             e.setBuffer(xb, offset: 0, index: 1)

@@ -121,7 +121,7 @@ final class AneCache: @unchecked Sendable {
                     + "\(directoryBytes(sdir) >> 20) MB at \(sdir.path)")
             }
             pruneDeadClaims(build)
-            collect(dir, build, names)
+            collect(dir, build, names.union(entries(shadowDir(build))))
             if AneCache.cacheMode == .hardlink { pruneStaleShadows(build) }
         } else {
             report("OS build not parsed; cache keeper IDLE")
@@ -180,16 +180,12 @@ final class AneCache: @unchecked Sendable {
             var deleted = 0
             var bytes: Int64 = 0
             for name in names.subtracting(claimed) {
-                let url = dir.appendingPathComponent(name)
-                let born = seen.first[name] ?? now
-                let mtime = (try? fm.attributesOfItem(atPath: url.path)[
-                    .modificationDate] as? Date)?.timeIntervalSince1970 ?? now
+                let copies = both(name, build)
+                let born = seen.first[name] ?? modified(copies)
                 if now - born > AneCache.minOrphanAge,
-                   now - mtime > AneCache.minOrphanAge {
-                    bytes += directoryBytes(url)
-                    try? fm.removeItem(at: url)
-                    try? fm.removeItem(
-                        at: shadowDir(build).appendingPathComponent(name))
+                   now - modified(copies) > AneCache.minOrphanAge {
+                    bytes += entryBytes(copies)
+                    for copy in copies { try? fm.removeItem(at: copy) }
                     deleted += 1
                 }
             }
@@ -250,6 +246,53 @@ final class AneCache: @unchecked Sendable {
 
     private func fileBytes(_ url: URL) -> Int {
         (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+    }
+
+    private func both(_ name: String, _ build: String) -> [URL] {
+        [cacheRoot().appendingPathComponent(build)
+            .appendingPathComponent(name),
+         shadowDir(build).appendingPathComponent(name)]
+    }
+
+    private func entryBytes(_ copies: [URL]) -> Int64 {
+        let fm = FileManager.default
+        var out: Int64 = 0
+        for url in copies where out == 0 && fm.fileExists(atPath: url.path) {
+            out = directoryBytes(url)
+        }
+        return out
+    }
+
+    private func modified(_ copies: [URL]) -> TimeInterval {
+        let fm = FileManager.default
+        var newest: TimeInterval = 0
+        for url in copies {
+            newest = max(newest, (try? fm.attributesOfItem(atPath: url.path)[
+                .modificationDate] as? Date)?.timeIntervalSince1970 ?? 0)
+        }
+        return newest
+    }
+
+    func releaseSet(_ setDir: URL) {
+        if let build = osBuild() {
+            let key = setKey(setDir)
+            lock.lock()
+            var claims = loadClaims(build)
+            let mine = Set(claims.sets.removeValue(forKey: key) ?? [])
+            saveClaims(claims, build)
+            let held = Set(claims.sets.values.flatMap { names in names })
+            lock.unlock()
+            let fm = FileManager.default
+            let dropped = mine.subtracting(held)
+            var bytes: Int64 = 0
+            for name in dropped {
+                let copies = both(name, build)
+                bytes += entryBytes(copies)
+                for copy in copies { try? fm.removeItem(at: copy) }
+            }
+            report("release \(key): dropped \(dropped.count) of "
+                + "\(mine.count) claimed, \(bytes >> 20) MB freed")
+        }
     }
 
     func purgeSet(_ setDir: URL) {

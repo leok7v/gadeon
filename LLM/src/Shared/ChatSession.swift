@@ -84,6 +84,7 @@ public actor ChatSession {
     // takes the instruct cell, so the turn decodes prose the way a
     // never-opened one does instead of at reasoning temperature.
     private var suppressReasoning = false
+    private var reasoningEffort: String?
     // Per-turn safety cap on decoded tokens (a small model can loop without
     // ever emitting EOS). Default unbounded -- the app stops a run by
     // cancelling the consuming task, which the decode loop below observes via
@@ -137,6 +138,8 @@ public actor ChatSession {
         default: return .structural
         }
     }()
+    static let digitsExempt =
+        ProcessInfo.processInfo.environment["LLM_DIGIT_EXEMPT"] != "off"
     private var gate: GrammarGate?
     private var grammarVocab: GrammarVocab?
     // The tool-call dialect the model's template speaks. XML (<function=NAME>
@@ -255,8 +258,9 @@ public actor ChatSession {
 
     public init(backend: any AgentBackend, template: String, system: String,
                 systemTail: String = "", vocabSize: Int,
-                presets: SamplingPresets = .qwen35,
-                enableThinking: Bool = false, maxTokens: Int = .max,
+                presets: SamplingPresets = .greedy,
+                enableThinking: Bool = false,
+                reasoningEffort: String? = nil, maxTokens: Int = .max,
                 maxReasoning: Int = 0, softReasoningCap: Int = 0,
                 overthink: Float = 0, runner: (any ToolRunner)? = nil) {
         self.backend = backend
@@ -275,6 +279,7 @@ public actor ChatSession {
         self.presets = presets
         self.vocabSize = max(vocabSize, 1)
         self.enableThinking = enableThinking
+        self.reasoningEffort = reasoningEffort
         self.maxTokens = maxTokens
         self.maxReasoning = maxReasoning
         self.softReasoningCap = softReasoningCap
@@ -305,7 +310,7 @@ public actor ChatSession {
         // NOT the comma: exempting it freed a ",000,000,..." group cycle
         // to run to the loop breaker (observed), and a comma appears once
         // per group, so penalties never flip it the way they flip digits.
-        for ch in "0123456789." {
+        for ch in "0123456789." where ChatSession.digitsExempt {
             let ids = backend.encode(String(ch))
             if ids.count == 1 { specials.insert(ids[0]) }
         }
@@ -335,6 +340,10 @@ public actor ChatSession {
     // template that carries the flag in its system block.
     public func setSuppressReasoning(_ on: Bool) {
         suppressReasoning = on
+    }
+
+    public func setReasoningEffort(_ level: String?) {
+        reasoningEffort = level
     }
 
     // Swap the tool runner live (the Web-access / airplane toggle); takes effect
@@ -537,6 +546,7 @@ public actor ChatSession {
             template: template, messages: [], tools: [],
             addGenerationPrompt: false,
             enableThinking: enableThinking,
+            reasoningEffort: reasoningEffort,
             bosToken: backend.bosToken)) ?? ""
     }
 
@@ -546,10 +556,12 @@ public actor ChatSession {
             template: template, messages: [history[0], probe],
             tools: toolSpecs, addGenerationPrompt: false,
             enableThinking: enableThinking,
+            reasoningEffort: reasoningEffort,
             bosToken: backend.bosToken)) ?? ""
         var probeText = (try? renderPrompt(
             template: template, messages: [probe], tools: [],
             addGenerationPrompt: false, enableThinking: enableThinking,
+            reasoningEffort: reasoningEffort,
             bosToken: backend.bosToken)) ?? ""
         // Subtract the probe's own TURN, not its whole render: on a template
         // with a leading block (above) the probe render carries one too and
@@ -1075,6 +1087,7 @@ public actor ChatSession {
             var round = 0
             var pagedURL: String? = nil
             var paged = 0
+            var spent: [String: String] = [:]
             var step = await decodeStep(seed: first.seed, pp: pp,
                                         onReasoning: onReasoning, yield)
             while let call = step.pending, round < ChatSession.maxToolRounds {
@@ -1112,7 +1125,18 @@ public actor ChatSession {
                     + " | raw="
                     + call.rawBlock.replacingOccurrences(of: "\n", with: "\\n"))
                 let toolT0 = Date()
-                let result = await runTool(call, resolved: resolved)
+                let signature = ChatSession.callSignature(
+                    resolved ?? call.functionName,
+                    sanitizedArgs(call, resolved))
+                var result = spent[signature].map { prior in
+                    ChatSession.repeatedCall(prior)
+                } ?? ""
+                if result.isEmpty {
+                    result = await runTool(call, resolved: resolved)
+                    spent[signature] = result
+                } else {
+                    toolLog("tool call \(round): REFUSED as an exact repeat")
+                }
                 onToolRound?(ToolRoundEvent(
                     round: round, name: call.functionName,
                     resolved: resolved, params: call.params, result: result))
@@ -1176,12 +1200,9 @@ public actor ChatSession {
             let empty = history.last.map { last in
                 last.role == "assistant" && last.content.isEmpty
             } ?? false
-            // Rounds ran means the user watched real work: keep the turn on
-            // screen and say it reached no answer, rather than deleting the
-            // question along with it.
             if empty {
-                await rollbackTurn(saved,
-                                   why: round > 0 ? .answerless : .stopped)
+                await rollbackTurn(saved, why: ChatSession.userStopped(
+                    lastMetrics.endReason) ? .stopped : .answerless)
             }
         }
     }
@@ -1268,11 +1289,13 @@ public actor ChatSession {
         var closedText = (try? renderPrompt(
             template: template, messages: deltaMsgs, tools: tools,
             addGenerationPrompt: false, enableThinking: enableThinking,
+            reasoningEffort: reasoningEffort,
             addVisionId: numberImages,
             bosToken: backend.bosToken)) ?? ""
         var fullText = (try? renderPrompt(
             template: template, messages: deltaMsgs, tools: tools,
             addGenerationPrompt: true, enableThinking: enableThinking,
+            reasoningEffort: reasoningEffort,
             addVisionId: numberImages,
             bosToken: backend.bosToken)) ?? ""
         // The delta model holds only while rendering [prev assistant, new
@@ -1415,6 +1438,10 @@ public actor ChatSession {
         let checkpoint: (any BackendState)?
         let history: [AgentMessage]
         let committed: [Int32]
+    }
+
+    static func userStopped(_ endReason: String) -> Bool {
+        endReason == "cancelled" || endReason == "stop"
     }
 
     private func enterTurn() async -> SavedTurn {
@@ -1794,11 +1821,27 @@ public actor ChatSession {
                     }
                 }
                 if wsDone {
-                    let end = min(toolAt ?? Int.max, n - openHold)
-                    if end > emitted {
-                        yield(String(decoding: bytes[emitted ..< end],
+                    var hold = openHold
+                    var markAt = Int.max
+                    var markLen = 0
+                    for pat in [thinkClose, thinkOpen] where !pat.isEmpty {
+                        hold = max(hold,
+                                   ChatSession.partialSuffix(bytes, pat, n))
+                        if let at = ChatSession.index(bytes, pat, emitted),
+                           at < markAt {
+                            markAt = at
+                            markLen = pat.count
+                        }
+                    }
+                    let end = min(toolAt ?? Int.max, n - hold)
+                    let stop = min(end, markAt)
+                    if stop > emitted {
+                        yield(String(decoding: bytes[emitted ..< stop],
                                      as: UTF8.self))
-                        emitted = end
+                        emitted = stop
+                    }
+                    if markAt == emitted, markAt + markLen <= n {
+                        emitted = markAt + markLen
                     }
                 }
             }
@@ -2083,6 +2126,17 @@ public actor ChatSession {
         return out
     }
 
+    static func callSignature(_ name: String, _ args: [ToolArg]) -> String {
+        name + "\u{1}" + args.map { a in a.name + "=" + a.value }
+            .sorted().joined(separator: "\u{1}")
+    }
+
+    static func repeatedCall(_ prior: String) -> String {
+        "You already made this exact call. It returned: \(prior)\n"
+            + "Do NOT repeat it. Change the arguments, use a different tool, "
+            + "or answer the user now from what you already have."
+    }
+
     private func runTool(_ call: ToolCall,
                          resolved: String?) async -> String {
         var result = "error: no tool runner"
@@ -2203,16 +2257,19 @@ public actor ChatSession {
             template: template, messages: [user], tools: [],
             addGenerationPrompt: false,
             enableThinking: enableThinking,
+            reasoningEffort: reasoningEffort,
             bosToken: backend.bosToken)) ?? ""
         let closedText = (try? renderPrompt(
             template: template, messages: round, tools: [],
             addGenerationPrompt: false,
             enableThinking: enableThinking,
+            reasoningEffort: reasoningEffort,
             bosToken: backend.bosToken)) ?? ""
         let fullText = (try? renderPrompt(
             template: template, messages: round, tools: [],
             addGenerationPrompt: true,
             enableThinking: enableThinking,
+            reasoningEffort: reasoningEffort,
             bosToken: backend.bosToken)) ?? ""
         let head = closedText.hasPrefix(prefix)
             ? String(closedText.dropFirst(prefix.count)) : closedText

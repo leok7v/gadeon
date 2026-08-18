@@ -23,14 +23,14 @@ enum GDN {
         let kc = cfg.dConv                      // 4
 
         var qkvMix = [Float](repeating: 0, count: convDim)
-        Q2_0.matvec(L.wqkv!, x: n, out: &qkvMix)          // [convDim]
+        QB.matvec(L.wqkv!, x: n, out: &qkvMix)          // [convDim]
         var z = [Float](repeating: 0, count: valDim)
-        Q2_0.matvec(L.wqkvGate!, x: n, out: &z)           // [valueDim]
+        QB.matvec(L.wqkvGate!, x: n, out: &z)           // [valueDim]
 
         var betaPre = [Float](repeating: 0, count: nV)
-        Q2_0.matvec(L.ssmBeta!, x: n, out: &betaPre)
+        QB.matvec(L.ssmBeta!, x: n, out: &betaPre)
         var alphaPre = [Float](repeating: 0, count: nV)
-        Q2_0.matvec(L.ssmAlpha!, x: n, out: &alphaPre)
+        QB.matvec(L.ssmAlpha!, x: n, out: &alphaPre)
 
         let dt = F32T.ptr(L.ssmDt!)               // [nV]
         let aNeg = F32T.ptr(L.ssmA!)              // [nV]  (= -exp(A_log))
@@ -115,7 +115,7 @@ enum GDN {
         for i in 0..<valDim { o[i] *= silu(z[i]) }
 
         var out = [Float](repeating: 0, count: cfg.nEmbd)
-        Q2_0.matvec(L.ssmOut!, x: o, out: &out)
+        QB.matvec(L.ssmOut!, x: o, out: &out)
         return out
     }
 }

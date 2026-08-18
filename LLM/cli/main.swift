@@ -42,6 +42,9 @@ let metalGoldenDir = stripValue(&rawArgs, "--metal-golden")
 // the direct-answer default).
 let reVal = stripValue(&rawArgs, "--reasoning-effort")
 let enableThinking = reVal.map { $0 != "none" } ?? false
+let reasoningEffort = reVal.flatMap { v in
+    ["none", "on"].contains(v) ? nil : v
+}
 // --overthink LAMBDA: bias the curated branch-opening tokens down while
 // thinking to shorten chain-of-thought (arxiv 2606.00206). Absent / 0 -> off.
 let overthink = stripValue(&rawArgs, "--overthink", Float.init) ?? 0
@@ -117,8 +120,6 @@ let pkVal = stripValue(&rawArgs, "--precook")
 // --fit feeds a vl-image as ONE fit-to-tile image (no detail tiling), the A/B
 // counterpart to the default AnyRes tiling.
 let fitImage = rawArgs.contains("--fit")
-// --greedy forces temperature-0 (argmax) decode so a vl-image A/B is
-// deterministic -- the tower is then the only variable across runs.
 let greedyDecode = rawArgs.contains("--greedy")
 rawArgs.removeAll {
     ["--longdoc", "--ingest", "--no-carry", "--cpu", "--fit",
@@ -221,11 +222,13 @@ let fallbackTemplate = """
 let templateURL = modelsDir.appendingPathComponent("chat_template.jinja")
 let template = (try? String(contentsOf: templateURL, encoding: .utf8))
     ?? fallbackTemplate
-// The set's own sampling matrix (the app reads the same file): thinking on/off
-// x text/vision, selected per turn. Fall back to the Qwen3.5/QwenPaw card.
 let genCfgURL = modelsDir.appendingPathComponent("generation_config.json")
-let activePresets = (try? SamplingPresets.from(generationConfig: genCfgURL,
-                                               fallback: .qwen35)) ?? .qwen35
+let loadedPresets = try SamplingPresets.from(generationConfig: genCfgURL)
+if loadedPresets == nil {
+    err("\(genCfgURL.path) suggests no sampling\n")
+    exit(1)
+}
+let activePresets = greedyDecode ? SamplingPresets.greedy : loadedPresets!
 let shownConfig = activePresets.select(thinking: enableThinking, vision: false)
 err(String(format: "sampler[%@]: temp=%.2f top_p=%.2f top_k=%d " +
     "presence=%.1f repeat=%.2f\n", enableThinking ? "thinking" : "instruct",
@@ -244,7 +247,7 @@ let session: ChatSession? = (longDoc || forceIngest) ? nil : ChatSession(
     system: systemPrompt, systemTail: systemTimeTail,
     vocabSize: tok.vocabCount,
     presets: activePresets, enableThinking: enableThinking,
-    maxTokens: maxTokens,
+    reasoningEffort: reasoningEffort, maxTokens: maxTokens,
     maxReasoning: maxReasoning, softReasoningCap: softReasoning,
     overthink: overthink, runner: toolRunner)
 if let pkVal, let session {

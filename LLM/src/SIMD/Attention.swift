@@ -79,10 +79,10 @@ enum Attn {
         var q = [Float](repeating: 0, count: hd * nH)
         var gate: [Float] = []
         if cfg.dense {
-            Q2_0.matvec(L.wq!, x: n, out: &q)
+            QB.matvec(L.wq!, x: n, out: &q)
         } else {
             var qFull = [Float](repeating: 0, count: hd * 2 * nH)
-            Q2_0.matvec(L.wq!, x: n, out: &qFull)
+            QB.matvec(L.wq!, x: n, out: &qFull)
             gate = [Float](repeating: 0, count: hd * nH)
             for h in 0..<nH {
                 let src = h * hd * 2
@@ -93,9 +93,9 @@ enum Attn {
             }
         }
         var kCur = [Float](repeating: 0, count: hd * nKV)
-        Q2_0.matvec(L.wk!, x: n, out: &kCur)
+        QB.matvec(L.wk!, x: n, out: &kCur)
         var vCur = [Float](repeating: 0, count: hd * nKV)
-        Q2_0.matvec(L.wv!, x: n, out: &vCur)
+        QB.matvec(L.wv!, x: n, out: &vCur)
 
         let qn = F32T.ptr(L.qNorm!), kn = F32T.ptr(L.kNorm!)
         Kern.rmsnormRows(&q, d: hd, rows: nH, w: qn, eps: cfg.eps)
@@ -134,7 +134,7 @@ enum Attn {
         }
 
         var out = [Float](repeating: 0, count: cfg.nEmbd)
-        Q2_0.matvec(L.wo!, x: attnOut, out: &out)
+        QB.matvec(L.wo!, x: attnOut, out: &out)
         return out
     }
 }

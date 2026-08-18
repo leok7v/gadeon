@@ -137,18 +137,21 @@ public final class BonsaiEngine {
     func embed(_ token: Int) -> [Float] {
         var out = [Float](repeating: 0, count: cfg.nEmbd)
         let rowBytes = cfg.nEmbd / Q2_0.qk * Q2_0.blockBytes
-        Q2_0.dequant(model.tokEmbd.base + token * rowBytes, count: cfg.nEmbd, into: &out)
+        out.withUnsafeMutableBufferPointer { ob in
+            QB.dequant(model.tokEmbd, at: token * rowBytes, count: cfg.nEmbd,
+                       into: ob.baseAddress!)
+        }
         return out
     }
 
     func ffn(_ x: [Float], _ L: BonsaiLayer) -> [Float] {
         var gate = [Float](repeating: 0, count: cfg.nFF)
         var up = [Float](repeating: 0, count: cfg.nFF)
-        Q2_0.matvec(L.ffnGate, x: x, out: &gate)
-        Q2_0.matvec(L.ffnUp, x: x, out: &up)
+        QB.matvec(L.ffnGate, x: x, out: &gate)
+        QB.matvec(L.ffnUp, x: x, out: &up)
         for i in 0..<cfg.nFF { gate[i] = silu(gate[i]) * up[i] }
         var out = [Float](repeating: 0, count: cfg.nEmbd)
-        Q2_0.matvec(L.ffnDown, x: gate, out: &out)
+        QB.matvec(L.ffnDown, x: gate, out: &out)
         return out
     }
 
@@ -183,7 +186,7 @@ public final class BonsaiEngine {
     // logits = output @ hidden  (tied Q2_0 lm_head), returns [nVocab]
     public func logits(_ hidden: [Float]) -> [Float] {
         var out = [Float](repeating: 0, count: cfg.nVocab)
-        Q2_0.matvec(model.output, x: hidden, out: &out)
+        QB.matvec(model.output, x: hidden, out: &out)
         return out
     }
 

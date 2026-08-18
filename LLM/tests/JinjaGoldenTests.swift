@@ -164,6 +164,19 @@ final class JinjaGoldenTests: XCTestCase {
         }
     }
 
+    func testTupleMembership() {
+        expect("{{ 'low' in ('xhigh', 'medium', 'low') }}", "True")
+        expect("{{ 'medium' in ('xhigh', 'medium', 'low') }}", "True")
+        expect("{{ 'xhigh' in ('xhigh', 'medium', 'low') }}", "True")
+        expect("{{ 'other' in ('xhigh', 'medium', 'low') }}", "False")
+        expect("{{ 'low' not in ('xhigh', 'medium', 'low') }}", "False")
+        expect("{{ 2 in (1, 2, 3) }}", "True")
+        expect("{{ (1 + 2) * 2 }}", "6")
+        expect("{{ 'a' in ('a',) }}", "True")
+        expect("{{ ('a', 'b')|length }}", "2")
+        expect("{{ ('a', 'b')|join('-') }}", "a-b")
+    }
+
     func testSequenceFilters() {
         let m = Model()
         expect("{{ items|count }}", "3",

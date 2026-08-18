@@ -321,6 +321,7 @@ final class AgentJinjaHost: JinjaHost {
 public func renderPrompt(template: String, messages: [AgentMessage],
                          tools: [ToolSpec], addGenerationPrompt: Bool,
                          enableThinking: Bool,
+                         reasoningEffort: String? = nil,
                          addVisionId: Bool = false,
                          bosToken: String = "") throws -> String {
     let host = AgentJinjaHost(messages: messages, tools: tools)
@@ -329,9 +330,22 @@ public func renderPrompt(template: String, messages: [AgentMessage],
         ("tools", host.toolsValue),
         ("add_generation_prompt", .bool(addGenerationPrompt)),
         ("enable_thinking", .bool(enableThinking)),
+        ("reasoning_effort",
+         reasoningEffort.map { level in JinjaValue.str(level) } ?? .undefined),
         ("add_vision_id", .bool(addVisionId)),
         ("bos_token", .str(bosToken)),
     ])
+}
+
+public func templateTakesReasoningEffort(_ template: String) -> Bool {
+    let probe = [AgentMessage(role: "user", content: "x")]
+    func render(_ level: String) -> String {
+        (try? renderPrompt(template: template, messages: probe, tools: [],
+                           addGenerationPrompt: true, enableThinking: true,
+                           reasoningEffort: level)) ?? ""
+    }
+    let low = render("low")
+    return !low.isEmpty && low != render("medium")
 }
 
 // Whether a model reasons at all, asked of its OWN template rather than of its

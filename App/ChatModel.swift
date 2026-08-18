@@ -416,7 +416,8 @@ import UniformTypeIdentifiers
     }
 
     private static func visionMode(for name: String) -> VisionMode {
-        let def: VisionMode = ["QwenPaw-Flash-9B", "Ternary-Bonsai-27B"]
+        let def: VisionMode = ["QwenPaw-Flash-9B", "Ternary-Bonsai-27B",
+                               "Qwen3.8-27B-Q2_X"]
             .contains(name) ? .fit : .tile
         let raw = UserDefaults.standard.string(forKey: visionKey(name)) ?? ""
         return VisionMode(rawValue: raw) ?? def
@@ -482,6 +483,44 @@ import UniformTypeIdentifiers
         }
     }
 
+    enum ReasoningEffort: String, CaseIterable, Identifiable {
+        case low = "Low", medium = "Medium", high = "High"
+        var id: String { rawValue }
+        var wire: String { rawValue.lowercased() }
+    }
+
+    private static func effortKey(_ name: String) -> String {
+        "reasoningEffort.\(name)"
+    }
+
+    private static func effort(for name: String) -> ReasoningEffort {
+        let raw = UserDefaults.standard.string(forKey: effortKey(name)) ?? ""
+        return ReasoningEffort(rawValue: raw) ?? .medium
+    }
+
+    private(set) var modelSupportsReasoningEffort = false
+
+    private(set) var reasoningEffort: ReasoningEffort =
+        ChatModel.effort(for: ChatModel.startModel())
+
+    func setReasoningEffort(_ level: ReasoningEffort) {
+        if level != reasoningEffort {
+            reasoningEffort = level
+            UserDefaults.standard.set(level.rawValue,
+                                      forKey: Self.effortKey(modelName))
+            ChatModel.wipePrecook()
+            let s = session
+            Task { await s?.setReasoningEffort(level.wire) }
+            flashHUD(messages.isEmpty
+                     ? "Reasoning: \(level.rawValue)"
+                     : "Reasoning: \(level.rawValue), from the next chat")
+        }
+    }
+
+    private var activeEffort: String? {
+        modelSupportsReasoningEffort ? reasoningEffort.wire : nil
+    }
+
     private static func tgKey(_ name: String) -> String { "tg.\(name)" }
 
     var measuredTG: Double {
@@ -514,7 +553,7 @@ import UniformTypeIdentifiers
     private let primer = Primer()
     private var lastPP = 0.0
     private var perImageTokens = 256
-    private var activePresets: SamplingPresets = .qwen35
+    private var activePresets: SamplingPresets?
     @ObservationIgnored private var phaseStart = Date()
     @ObservationIgnored private var optimizeFinish: Date?
 
@@ -829,6 +868,8 @@ import UniformTypeIdentifiers
         modelName = name
         UserDefaults.standard.set(name, forKey: "modelName")
         visionMode = ChatModel.visionMode(for: name)
+        modelSupportsReasoningEffort = false
+        reasoningEffort = ChatModel.effort(for: name)
     }
 
     private func isOnDisk(_ name: String) -> Bool {
@@ -852,6 +893,10 @@ import UniformTypeIdentifiers
 
     private static func erase(_ name: String) {
         let fm = FileManager.default
+        if !ModelCatalog.isGguf(name),
+           let set = ModelCatalog.localSet(name, in: Bundle.modelStore()) {
+            AneCache.shared.releaseSet(set)
+        }
         try? fm.removeItem(
             at: Bundle.modelStore().appendingPathComponent(name))
         for on in [true, false] {
@@ -977,9 +1022,11 @@ import UniformTypeIdentifiers
     }
 
     private func makeSession() {
-        if let chat {
+        if let chat, let activePresets {
             modelSupportsThinking =
                 templateSupportsThinking(chat.chatTemplate)
+            modelSupportsReasoningEffort =
+                templateTakesReasoningEffort(chat.chatTemplate)
             session = ChatSession(
                 backend: EngineBackend(chat),
                 template: chat.chatTemplate,
@@ -988,13 +1035,16 @@ import UniformTypeIdentifiers
                 vocabSize: chat.tokenizer.vocabCount,
                 presets: activePresets,
                 enableThinking: thinkingActive,
+                reasoningEffort: activeEffort,
                 maxReasoning: thinkTokenCap * 2,
                 softReasoningCap: thinkTokenCap,
                 overthink: Self.overthinkLambda,
                 runner: toolRunner)
             hookTrace()
-        } else if let ggufBackend {
+        } else if let ggufBackend, let activePresets {
             modelSupportsThinking = templateSupportsThinking(ggufTemplate)
+            modelSupportsReasoningEffort =
+                templateTakesReasoningEffort(ggufTemplate)
             session = ChatSession(
                 backend: ggufBackend,
                 template: ggufTemplate,
@@ -1003,6 +1053,7 @@ import UniformTypeIdentifiers
                 vocabSize: ggufVocabCount,
                 presets: activePresets,
                 enableThinking: thinkingActive,
+                reasoningEffort: activeEffort,
                 maxReasoning: thinkTokenCap * 2,
                 softReasoningCap: thinkTokenCap,
                 overthink: Self.overthinkLambda,
@@ -2276,20 +2327,32 @@ import UniformTypeIdentifiers
             commitCurrent()
             runMetaTurns()
         }
-        reportTurn(await session.lastMetrics, outcome, idx, since)
+        reportTurn(await session.lastMetrics, outcome, idx, since,
+                   await specDigest())
+    }
+
+    private func specDigest() async -> String {
+        var out = ""
+        if let engine = chat?.engine,
+           let turn = await engine.drainSpecTurn() {
+            out = String(
+                format: " mtp=%.2ftok/cycle accept=%.0f%% cycles=%d",
+                turn.tokensPerCycle, turn.acceptRate * 100, turn.cycles)
+        }
+        return out
     }
 
     // One line per turn, so a sweep across models and thinking modes diffs by
     // grepping rather than by reading a whole trace.
     private func reportTurn(_ m: TurnMetrics,
                             _ outcome: ChatSession.TurnOutcome,
-                            _ idx: Int, _ since: Date) {
+                            _ idx: Int, _ since: Date, _ spec: String) {
         Diag.shared.report(String(
             format: "[turn] %@ thinking=%@ outcome=%@ end=%@ tools=%@ "
-                + "think=%d content=%d ctx=%d %.1fs",
+                + "think=%d content=%d ctx=%d %.1fs%@",
             modelName, thinkingActive ? "on" : "off", outcome.rawValue,
             m.endReason, toolDigest(idx), m.thinkTokens, m.contentTokens,
-            m.ctx, Date().timeIntervalSince(since)))
+            m.ctx, Date().timeIntervalSince(since), spec))
     }
 
     // How many calls and how many of them were DISTINCT. A model re-asking
@@ -2428,8 +2491,11 @@ import UniformTypeIdentifiers
 
     private static func presets(_ setDir: URL) -> SamplingPresets {
         let url = setDir.appendingPathComponent("generation_config.json")
-        return (try? SamplingPresets.from(generationConfig: url,
-                                          fallback: .qwen35)) ?? .qwen35
+        let out = try? SamplingPresets.from(generationConfig: url)
+        if out == nil {
+            fatalError("\(url.path) suggests no sampling")
+        }
+        return out!
     }
 
     var downloadETA: String? { Self.eta(phaseStart, downloadFraction) }

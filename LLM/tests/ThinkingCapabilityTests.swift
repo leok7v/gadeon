@@ -35,6 +35,44 @@ final class ThinkingCapabilityTests: XCTestCase {
         {%- endif %}
         """
 
+    private let effortful = """
+        {%- if enable_thinking is undefined or enable_thinking is true %}
+        {%- set e = reasoning_effort|default('xhigh') %}
+        {%- if e == 'high' %}{%- set e = 'xhigh' %}{%- endif %}
+        {%- if e not in ('xhigh', 'medium', 'low') %}
+        {{- raise_exception('Unexpected reasoning effort ' ~ e) }}
+        {%- endif %}
+        {{- 'effort=' ~ e }}
+        {%- endif %}
+        {% for message in messages %}{{ message.content }}{% endfor %}
+        """
+
+    private let probe = [AgentMessage(role: "user", content: "x")]
+
+    private func render(_ level: String?) throws -> String {
+        try renderPrompt(template: effortful, messages: probe, tools: [],
+                         addGenerationPrompt: true, enableThinking: true,
+                         reasoningEffort: level)
+    }
+
+    func testEffortTemplateReportsSupported() {
+        XCTAssertTrue(templateTakesReasoningEffort(effortful))
+    }
+
+    func testTemplateIgnoringEffortReportsUnsupported() {
+        XCTAssertFalse(templateTakesReasoningEffort(reasoning))
+    }
+
+    func testAbsentEffortTakesTheTemplateDefault() throws {
+        XCTAssertTrue(try render(nil).contains("effort=xhigh"))
+    }
+
+    func testEachLevelReachesTheTemplate() throws {
+        XCTAssertTrue(try render("low").contains("effort=low"))
+        XCTAssertTrue(try render("medium").contains("effort=medium"))
+        XCTAssertTrue(try render("high").contains("effort=xhigh"))
+    }
+
     func testReasoningTemplateReportsThinkingSupported() {
         XCTAssertTrue(templateSupportsThinking(reasoning))
     }

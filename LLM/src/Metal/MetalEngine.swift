@@ -245,7 +245,8 @@ public final class MetalEngine {
             let e = cb.makeComputeCommandEncoder()!
             let f = MetalEnc(ctx: ctx, e: e)
             f.embedBatch(ids: idsBuf, weightOff: off(model.tokEmbd),
-                         out: b.x, nEmbd: c.nEmbd, N: N)
+                         out: b.x, nEmbd: c.nEmbd, N: N,
+                         type: model.tokEmbd.type)
             encodeChunk(f, b, N: N, basePos: basePos, pos3: nil)
             e.endEncoding()
             commitTimed(cb, "prefillBatch")
@@ -658,31 +659,116 @@ public final class MetalEngine {
         let c = cfg
         let rowBytes = c.nEmbd / 128 * 34
         f.dequantRow(weightOff: off(model.tokEmbd) + UInt64(token * rowBytes),
-                     out: bx, n: c.nEmbd)
+                     out: bx, n: c.nEmbd, type: model.tokEmbd.type)
         for il in 0..<min(c.nLayer, maxLayers) {
-            let L = model.layers[il]
-            f.rmsnorm(x: bx, weightOff: off(L.attnNorm), out: bNormed,
-                      n: c.nEmbd, eps: c.eps)
-            if L.recurrent {
-                gdnLayer(f, L, il)
-            } else {
-                attnLayer(f, L, il, pos: pos)
-            }
-            f.add(x: bx, y: bContrib, n: c.nEmbd)
-            f.rmsnorm(x: bx, weightOff: off(L.attnPostNorm), out: bNormed,
-                      n: c.nEmbd, eps: c.eps)
-            if !MetalEngine.skip.contains("ffn") {
-                f.gemv(L.ffnGate, x: bNormed, out: bFfnGate,
-                       off: off(L.ffnGate))
-                f.gemv(L.ffnUp, x: bNormed, out: bFfnUp, off: off(L.ffnUp))
-                f.siluMul(a: bFfnGate, b: bFfnUp, n: c.nFF)
-                f.gemv(L.ffnDown, x: bFfnGate, out: bContrib,
-                       off: off(L.ffnDown))
-            }
-            f.add(x: bx, y: bContrib, n: c.nEmbd)
+            encodeLayer(f, il, pos: pos)
         }
         f.rmsnorm(x: bx, weightOff: off(model.outputNorm), out: bNormed,
                   n: c.nEmbd, eps: c.eps)
+    }
+
+    private var imatrix: [String: MTLBuffer] = [:]
+    private var imatrixWidth: [String: Int] = [:]
+
+    public func imatrixSums() -> [String: [Float]] {
+        var out: [String: [Float]] = [:]
+        for (k, b) in imatrix { out[k] = Array(b.f32(imatrixWidth[k]!)) }
+        return out
+    }
+
+    public func collectImatrix() {
+        let c = cfg
+        for il in 0..<c.nLayer {
+            var sites = ["l\(il).in": c.nEmbd, "l\(il).post": c.nEmbd,
+                         "l\(il).ffn_down": c.nFF]
+            if c.isRecurrent(il) {
+                sites["l\(il).ssm_out"] = c.valueDim
+            } else {
+                sites["l\(il).attn_out"] = c.headDim * c.nHead
+            }
+            for (name, n) in sites {
+                let b = ctx.makeF32(n)
+                memset(b.contents(), 0, b.length)
+                imatrix[name] = b
+                imatrixWidth[name] = n
+            }
+        }
+    }
+
+    private func tally(_ f: MetalEnc, _ key: String, _ src: MTLBuffer,
+                       _ n: Int) {
+        if let dst = imatrix[key] { f.accumSq(dst: dst, src: src, n: n) }
+        if let h = hessian[key] { f.accumOuter(h: h, src: src, n: n) }
+    }
+
+    private var hessian: [String: MTLBuffer] = [:]
+
+    public func collectHessians(from lo: Int, upto hi: Int) {
+        for il in lo..<min(hi, cfg.nLayer) {
+            for site in ["in", "post"] {
+                let b = ctx.device.makeBuffer(
+                    length: cfg.nEmbd * cfg.nEmbd * MemoryLayout<Float>.stride,
+                    options: .storageModeShared)!
+                memset(b.contents(), 0, b.length)
+                hessian["l\(il).\(site)"] = b
+            }
+        }
+    }
+
+    public func hessianNames() -> [String] { Array(hessian.keys).sorted() }
+
+    public func hessianBytes(_ name: String) -> Data {
+        let b = hessian[name]!
+        return Data(bytes: b.contents(), count: b.length)
+    }
+
+    private func encodeLayer(_ f: MetalEnc, _ il: Int, pos: Int) {
+        let c = cfg
+        let L = model.layers[il]
+        f.rmsnorm(x: bx, weightOff: off(L.attnNorm), out: bNormed,
+                  n: c.nEmbd, eps: c.eps)
+        tally(f, "l\(il).in", bNormed, c.nEmbd)
+        if L.recurrent {
+            gdnLayer(f, L, il)
+        } else {
+            attnLayer(f, L, il, pos: pos)
+        }
+        f.add(x: bx, y: bContrib, n: c.nEmbd)
+        f.rmsnorm(x: bx, weightOff: off(L.attnPostNorm), out: bNormed,
+                  n: c.nEmbd, eps: c.eps)
+        tally(f, "l\(il).post", bNormed, c.nEmbd)
+        if !MetalEngine.skip.contains("ffn") {
+            f.gemv(L.ffnGate, x: bNormed, out: bFfnGate, off: off(L.ffnGate))
+            f.gemv(L.ffnUp, x: bNormed, out: bFfnUp, off: off(L.ffnUp))
+            f.siluMul(a: bFfnGate, b: bFfnUp, n: c.nFF)
+            tally(f, "l\(il).ffn_down", bFfnGate, c.nFF)
+            f.gemv(L.ffnDown, x: bFfnGate, out: bContrib, off: off(L.ffnDown))
+        }
+        f.add(x: bx, y: bContrib, n: c.nEmbd)
+    }
+
+    public func tapLayers(token: Int) -> [[Float]] {
+        let c = cfg
+        let rowBytes = c.nEmbd / 128 * 34
+        var out: [[Float]] = []
+        let cb0 = ctx.queue.makeCommandBuffer()!
+        let e0 = cb0.makeComputeCommandEncoder()!
+        MetalEnc(ctx: ctx, e: e0).dequantRow(
+            weightOff: off(model.tokEmbd) + UInt64(token * rowBytes),
+            out: bx, n: c.nEmbd, type: model.tokEmbd.type)
+        e0.endEncoding()
+        commitTimed(cb0, "tap.embed")
+        out.append(Array(bx.f32(c.nEmbd)))
+        for il in 0..<c.nLayer {
+            let cb = ctx.queue.makeCommandBuffer()!
+            let e = cb.makeComputeCommandEncoder()!
+            encodeLayer(MetalEnc(ctx: ctx, e: e), il, pos: pos)
+            e.endEncoding()
+            commitTimed(cb, "tap.l\(il)")
+            out.append(Array(bx.f32(c.nEmbd)))
+        }
+        pos += 1
+        return out
     }
 
     // One token, hidden only (bNormed). Its own command buffer + sync -- used by
@@ -750,6 +836,7 @@ public final class MetalEngine {
         f.rmsnormRows(x: bO, xoff: 0, d: c.dState, rows: c.nVHead,
                       weightOff: off(L.ssmNorm!), eps: c.eps)
         f.mulSilu(a: bO, b: bZ, n: c.valueDim)
+        tally(f, "l\(il).ssm_out", bO, c.valueDim)
         f.gemv(L.ssmOut!, x: bO, out: bContrib, off: off(L.ssmOut!))
     }
 
@@ -792,6 +879,7 @@ public final class MetalEngine {
                         scale: 1 / Float(c.headDim).squareRoot(),
                         gated: c.dense ? 0 : 1)
         }
+        tally(f, "l\(il).attn_out", bAttnOut, c.headDim * c.nHead)
         f.gemv(L.wo!, x: bAttnOut, out: bContrib, off: off(L.wo!))
     }
 

@@ -127,14 +127,12 @@ final class SamplerTests: XCTestCase {
         XCTAssertNotEqual(pick(&guarded, logits), 3)
     }
 
-    func testPresetFields() {
-        let p = SamplerConfig.thinkingGeneral
-        XCTAssertEqual(p.temperature, 1.0)
-        XCTAssertEqual(p.topP, 0.95)
-        XCTAssertEqual(p.topK, 20)
-        XCTAssertEqual(p.minP, 0.0)
-        XCTAssertEqual(p.presencePenalty, 1.5)
-        XCTAssertEqual(p.repeatPenalty, 1.0)
+    func testGreedyPresetFields() {
+        let p = SamplerConfig.greedy
+        XCTAssertEqual(p.temperature, 0.0)
+        XCTAssertEqual(p.topP, 1.0)
+        XCTAssertEqual(p.topK, 0)
+        XCTAssertEqual(p.presencePenalty, 0.0)
         XCTAssertTrue(p.setMask.contains(.temperature))
         XCTAssertTrue(p.setMask.contains(.presencePenalty))
     }
@@ -174,39 +172,56 @@ final class SamplerTests: XCTestCase {
     }
 
     func testPresetsSelectMatrix() {
-        let p = SamplingPresets.qwen35
-        // Each cell is a distinct card row; select() must not collapse them.
-        XCTAssertEqual(p.select(thinking: true, vision: false).presencePenalty,
-                       1.5)
-        XCTAssertEqual(p.select(thinking: true, vision: true).temperature, 0.6)
-        XCTAssertEqual(p.select(thinking: false, vision: false).topP, 1.0)
-        XCTAssertEqual(p.select(thinking: false, vision: false).presencePenalty,
-                       2.0)
-        XCTAssertEqual(p.select(thinking: false, vision: true).topP, 0.8)
-        // Bonsai (Qwen3.6-27B) diverges: zero presence while thinking.
-        XCTAssertEqual(
-            SamplingPresets.bonsai.select(thinking: true, vision: false)
-                .presencePenalty, 0.0)
+        let p = SamplingPresets(
+            thinkingText: SamplerConfig(temperature: 0.1),
+            thinkingVision: SamplerConfig(temperature: 0.2),
+            nonThinkingText: SamplerConfig(temperature: 0.3),
+            nonThinkingVision: SamplerConfig(temperature: 0.4))
+        XCTAssertEqual(p.select(thinking: true, vision: false).temperature, 0.1)
+        XCTAssertEqual(p.select(thinking: true, vision: true).temperature, 0.2)
+        XCTAssertEqual(p.select(thinking: false, vision: false).temperature,
+                       0.3)
+        XCTAssertEqual(p.select(thinking: false, vision: true).temperature, 0.4)
     }
 
-    func testPresetsMatrixParsing() throws {
-        let json = """
-        {"temperature": 1.0, "_sampling_presets": {
-          "thinking_text": {"temperature": 0.9, "presence_penalty": 1.1},
-          "nonthinking_text": {"temperature": 0.3, "top_p": 0.5}}}
-        """
+    private func writeJSON(_ json: String) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("presets_\(UUID().uuidString).json")
         try json.data(using: .utf8)!.write(to: url)
-        let p = try SamplingPresets.from(generationConfig: url,
-                                         fallback: .qwen35)
+        return url
+    }
+
+    func testPresetsMatrixParsing() throws {
+        let url = try writeJSON("""
+        {"temperature": 1.0, "top_p": 0.95, "_sampling_presets": {
+          "thinking_text": {"temperature": 0.9, "presence_penalty": 1.1},
+          "nonthinking_text": {"temperature": 0.3, "top_p": 0.5}}}
+        """)
+        let p = try XCTUnwrap(SamplingPresets.from(generationConfig: url))
         try? FileManager.default.removeItem(at: url)
-        // Overridden cells take the file's values; an absent cell keeps the
-        // fallback; an absent field within a cell keeps the fallback's field.
         XCTAssertEqual(p.thinkingText.temperature, 0.9)
         XCTAssertEqual(p.thinkingText.presencePenalty, 1.1)
         XCTAssertEqual(p.thinkingText.topP, 0.95)
         XCTAssertEqual(p.nonThinkingText.temperature, 0.3)
-        XCTAssertEqual(p.thinkingVision.temperature, 0.6)
+        XCTAssertEqual(p.thinkingVision.temperature, 1.0)
+    }
+
+    func testTopLevelRowFillsEveryCell() throws {
+        let url = try writeJSON("""
+        {"temperature": 0.6, "top_k": 20}
+        """)
+        let p = try XCTUnwrap(SamplingPresets.from(generationConfig: url))
+        try? FileManager.default.removeItem(at: url)
+        XCTAssertEqual(p.nonThinkingVision.temperature, 0.6)
+        XCTAssertEqual(p.thinkingText.topK, 20)
+    }
+
+    func testNoSuggestedSamplingIsNil() throws {
+        let url = try writeJSON("""
+        {"eos_token_id": 7, "transformers_version": "4.0"}
+        """)
+        let p = try SamplingPresets.from(generationConfig: url)
+        try? FileManager.default.removeItem(at: url)
+        XCTAssertNil(p)
     }
 }

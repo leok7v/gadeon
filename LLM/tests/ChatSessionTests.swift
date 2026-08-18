@@ -113,6 +113,7 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
     private var marked = 0
     private var round = -1
     private var cursor = 0
+    private var decoding = false
 
     // The image pad must encode ATOMICALLY (as real tokenizers do): a byte
     // spelling would make its first byte "<" the pad id, and expandPads with
@@ -153,6 +154,7 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
         tape = []
         round += 1
         cursor = 1
+        decoding = false
     }
 
     func useSampler(_ s: Sampler?) async {}
@@ -161,13 +163,20 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
         round >= 0 && round < scripts.count ? scripts[round] : []
     }
 
+    private func nextScripted() -> Int32 {
+        let s = script()
+        let out = cursor < s.count ? s[cursor] : eos
+        cursor += 1
+        return out
+    }
+
     func extend(_ ids: [Int32]) async throws -> Int32 {
         if extendDelayMs > 0 {
             try? await Task.sleep(nanoseconds: extendDelayMs * 1_000_000)
         }
         tape.append(contentsOf: ids)
         let s = script()
-        return s.isEmpty ? eos : s[0]
+        return decoding ? nextScripted() : (s.isEmpty ? eos : s[0])
     }
 
     func mark() async throws { marked = tape.count }
@@ -176,14 +185,13 @@ private final class TapeBackend: AgentBackend, @unchecked Sendable {
         tape = Array(tape.prefix(marked))
         round += 1
         cursor = 1
+        decoding = false
     }
 
     func decode(_ token: Int32) async throws -> Int32 {
         tape.append(token)
-        let s = script()
-        let out = cursor < s.count ? s[cursor] : eos
-        cursor += 1
-        return out
+        decoding = true
+        return nextScripted()
     }
 
     struct State: BackendState { let tape: [Int32]; let marked: Int }
@@ -327,6 +335,24 @@ final class ChatSessionTests: XCTestCase {
                        "empty think block leaked into the title: '\(title)'")
         XCTAssertEqual(title, "",
                        "no real content -> empty title, first-message fallback")
+    }
+
+    func testStrayThinkCloseDoesNotReachTheAnswer() async throws {
+        let bytes = Array("Total is 1.10:\n</think>\n\nSo the ball is 0.05."
+            .utf8).map { b in Int32(b) }
+        let backend = TapeBackend(scripts: [bytes], vocab: vocab([]))
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256, enableThinking: false)
+        let out = await drain(session.reply("how much is the ball"))
+        XCTAssertFalse(out.contains("</think>"),
+                       "stray close marker reached the answer: '\(out)'")
+        XCTAssertFalse(out.contains("</think"),
+                       "a partial close marker leaked: '\(out)'")
+        XCTAssertTrue(out.contains("Total is 1.10:"),
+                      "text before the stray marker was dropped: '\(out)'")
+        XCTAssertTrue(out.contains("So the ball is 0.05."),
+                      "text after the stray marker was dropped: '\(out)'")
     }
 
     // The ASCII-split variant of the same case: the model emits the block as
@@ -536,7 +562,6 @@ final class ChatSessionTests: XCTestCase {
 
     // A model that only ever emits tool calls stops at maxToolRounds: after the
     // budget nudge it STILL only calls, so the turn closes with an empty answer.
-    // maxToolRounds tools ran (the nudge round itself dispatches nothing).
     func testToolLoopStopsAtRoundCap() async throws {
         let call =
             "<tool_call><function=get_current_time></function></tool_call>"
@@ -547,7 +572,7 @@ final class ChatSessionTests: XCTestCase {
             backend: backend, template: template, system: "You are a bot.",
             vocabSize: 256, runner: runner)
         let answer = await drain(session.reply("loop"))
-        XCTAssertEqual(runner.calls.count, ChatSession.maxToolRounds)
+        XCTAssertEqual(runner.calls, ["get_current_time"])
         XCTAssertEqual(answer, "")
         // ANSWERLESS, not stopped: the rounds are work the user watched, and
         // the app deletes the two transcript bubbles only for `.stopped`.
@@ -558,9 +583,42 @@ final class ChatSessionTests: XCTestCase {
                        + "nothing had happened")
     }
 
+    func testIdenticalRepeatIsRefusedNotRerun() async throws {
+        let call = "<tool_call><function=calculator>"
+            + "<parameter=expression>2x + 1.00</parameter>"
+            + "</function></tool_call>"
+        let backend = MockBackend(
+            scripts: [[1]], vocab: vocab([(1, call)]), cycle: true)
+        let runner = RecordingRunner(reply: "error: not a number")
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256, runner: runner)
+        _ = await drain(session.reply("how much is the ball"))
+        XCTAssertEqual(runner.calls, ["calculator"],
+                       "the same call ran more than once")
+    }
+
+    func testDifferentArgumentsStillRun() async throws {
+        func call(_ expr: String) -> String {
+            "<tool_call><function=calculator>"
+                + "<parameter=expression>\(expr)</parameter>"
+                + "</function></tool_call>"
+        }
+        let backend = MockBackend(
+            scripts: [[1], [2], [3]],
+            vocab: vocab([(1, call("1+1")), (2, call("2+2")),
+                          (3, "Done.")]))
+        let runner = RecordingRunner(reply: "4")
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256, runner: runner)
+        let answer = await drain(session.reply("add"))
+        XCTAssertEqual(runner.calls, ["calculator", "calculator"])
+        XCTAssertEqual(answer, "Done.")
+    }
+
     // At the round cap, the budget nudge gives the model one last generation:
     // here it answers instead of calling again, so the turn ends with real text
-    // (not empty). Still exactly maxToolRounds tools ran.
     func testToolLoopNudgeYieldsAnswerAtCap() async throws {
         let call = "<tool_call><function=calculator></function></tool_call>"
         // A call script per round through the cap (seed + one per rewind),
@@ -576,7 +634,7 @@ final class ChatSessionTests: XCTestCase {
             backend: backend, template: template, system: "You are a bot.",
             vocabSize: 256, runner: runner)
         let answer = await drain(session.reply("loop then answer"))
-        XCTAssertEqual(runner.calls.count, ChatSession.maxToolRounds)
+        XCTAssertEqual(runner.calls, ["calculator"])
         XCTAssertEqual(answer, "Answering from what I have.")
         let outcome = await session.turnOutcome
         XCTAssertEqual(outcome, .answered)
@@ -1151,8 +1209,9 @@ final class ChatSessionTests: XCTestCase {
     // decodes on, once -- the continuation becomes the answer.
     func testEosInsideThinkRescued() async throws {
         let backend = TapeBackend(
-            scripts: [[1001]],
-            vocab: vocab([(1001, "So the summary stands. ")]))
+            scripts: [[1001, -1, 1002]],
+            vocab: vocab([(1001, "Still weighing it. "),
+                          (1002, "So the summary stands. ")]))
         let session = ChatSession(
             backend: backend, template: template, system: "You are a bot.",
             vocabSize: 256, enableThinking: true)
@@ -1161,11 +1220,25 @@ final class ChatSessionTests: XCTestCase {
         let stream = session.reply("summarize",
                                    onReasoning: { r in reasoning.add(r) })
         for await piece in stream { content += piece }
-        XCTAssertTrue(reasoning.text.contains("So the summary stands."),
+        XCTAssertTrue(reasoning.text.contains("Still weighing it."),
             "the pre-rescue tokens are reasoning: \(reasoning.text)")
         XCTAssertEqual(content.trimmingCharacters(in: .whitespaces),
                        "So the summary stands.",
             "the post-rescue decode must become the answer")
+    }
+
+    func testAnswerlessTurnIsNotReportedAsAUserStop() async throws {
+        let backend = TapeBackend(
+            scripts: [[1001]],
+            vocab: vocab([(1001, "Still weighing it. ")]))
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256, enableThinking: true)
+        let answer = await drain(session.reply("summarize"))
+        XCTAssertEqual(answer, "", "the turn produced no answer")
+        let outcome = await session.turnOutcome
+        XCTAssertEqual(outcome, .answerless,
+                       "no answer is not the same as the user pressing Stop")
     }
 
     // A second <tool_call> opener before the first block closes (observed
@@ -1414,11 +1487,12 @@ final class ChatSessionTests: XCTestCase {
             + "</function></tool_call>"
         // Digits are structural bytes, so the digit run must pass the
         // RELAXED threshold (structuralReps) before the breaker sees it.
-        var script: [Int32] = Array(repeating: 1007, count: 40)
+        var script: [Int32] = Array(repeating: 1007, count: 24)
         script.append(1001)
         let backend = TapeBackend(
-            scripts: [script, [1002]],
+            scripts: [script, [1003, -1, 1002]],
             vocab: vocab([(1007, "0"), (1001, call),
+                          (1003, "Working it out. "),
                           (1002, "240000 mice.")]))
         let runner = RecordingRunner(reply: "240000")
         let session = ChatSession(

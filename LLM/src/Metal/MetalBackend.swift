@@ -203,10 +203,25 @@ public struct MetalChat {
         tokenizer = try Tokenizer(gguf: m.gguf)
         chatTemplate = m.gguf.string("tokenizer.chat_template")
             ?? BonsaiChat.fallbackTemplate
-        samplingPresets = BonsaiChat.presets(ggufPath: ggufPath)
-        let mmproj = MetalChat.mmprojBeside(ggufPath)
+        samplingPresets = SamplingPresets.require(gguf: m.gguf,
+                                                  path: ggufPath)
+        let inside = m.gguf.int("clip.vision.block_count") != nil
+        let mmproj = inside ? ggufPath : MetalChat.mmprojBeside(ggufPath)
         mmprojPath = mmproj
-        shape = ModelShape(gguf: m.gguf, sidecars: MetalChat.eye(mmproj))
+        shape = ModelShape(gguf: m.gguf,
+                           sidecars: inside ? MetalChat.eye(m.gguf)
+                                            : MetalChat.eye(mmproj))
+    }
+
+    static func eye(_ gguf: GGUF) -> [ModelShape.Tower] {
+        let bytes = gguf.tensors.values
+            .filter { t in t.name.hasPrefix("v.") || t.name.hasPrefix("mm.") }
+            .reduce(0) { sum, t in sum + t.byteCount }
+        var out: [ModelShape.Tower] = []
+        if bytes > 0 {
+            out.append(ModelShape.Tower(name: "vision", bytes: bytes))
+        }
+        return out
     }
 
     // The vision tower ships as its own file here, and everything in an

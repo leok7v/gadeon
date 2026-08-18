@@ -362,14 +362,8 @@ public struct GemmaChat {
         engine = Gemma4Engine(model)
         tokenizer = try GemmaTokenizer(gguf: model.gguf)
         chatTemplate = model.gguf.string("tokenizer.chat_template") ?? ""
-        // The file's single suggested row fills all four cells; a file that
-        // also carries the per-mode matrix overlays whichever cells it names.
-        let row = SamplerConfig.from(gguf: model.gguf)
-        samplingPresets = SamplingPresets.from(
-            gguf: model.gguf,
-            fallback: SamplingPresets(
-                thinkingText: row, thinkingVision: row,
-                nonThinkingText: row, nonThinkingVision: row))
+        samplingPresets = SamplingPresets.require(gguf: model.gguf,
+                                                  path: ggufPath)
     }
 
     // Tokenizer surface, re-exported so a caller never names the internal

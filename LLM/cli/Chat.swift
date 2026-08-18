@@ -286,6 +286,77 @@ func runLongDoc(_ user: String) async throws {
         err("gdn-dump: layer0 seq=\(seq) nEmbd=\(model.cfg.nEmbd) -> \(dir)\n")
         exit(0)
     }
+    if let hi = rawArgs.firstIndex(of: "--hess") {
+        let dir = rawArgs[hi + 1]
+        let lo = Int(rawArgs[hi + 2])!
+        let up = Int(rawArgs[hi + 3])!
+        let corpus = rawArgs[hi + 4]
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true)
+        let text = (try? String(contentsOfFile: corpus, encoding: .utf8)) ?? ""
+        let chat = try MetalChat(ggufPath: arg1)
+        let ids = chat.tokenizer.encode(text, addSpecial: true)
+        chat.engine.reset()
+        chat.engine.collectHessians(from: lo, upto: up)
+        let t0 = Date()
+        for id in ids {
+            _ = chat.engine.decode(id)
+        }
+        for name in chat.engine.hessianNames() {
+            try chat.engine.hessianBytes(name)
+                .write(to: URL(fileURLWithPath: dir + "/" + name + ".h32"))
+        }
+        err(String(format: "[hess] %d tokens, layers %d..%d, %.0fs -> %@\n",
+                   ids.count, lo, up, Date().timeIntervalSince(t0), dir))
+        exit(0)
+    }
+    if let mi = rawArgs.firstIndex(of: "--imat") {
+        let dir = mi + 1 < rawArgs.count ? rawArgs[mi + 1] : "tmp/imat"
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true)
+        let chat = try MetalChat(ggufPath: arg1)
+        var ids = chat.tokenizer.encode(benchPrompt, addSpecial: true)
+        if let benchCtxVal {
+            var padded = ids
+            while padded.count < benchCtxVal { padded += ids }
+            ids = Array(padded.prefix(benchCtxVal))
+        }
+        chat.engine.reset()
+        chat.engine.collectImatrix()
+        for id in ids {
+            _ = chat.engine.decode(id)
+        }
+        let sums = chat.engine.imatrixSums()
+        for (name, v) in sums {
+            v.withUnsafeBytes { raw in
+                try? Data(raw).write(to: URL(
+                    fileURLWithPath: dir + "/" + name + ".bin"))
+            }
+        }
+        err("[imat] \(ids.count) tokens, \(sums.count) sites -> \(dir)\n")
+        exit(0)
+    }
+    if let ti = rawArgs.firstIndex(of: "--tap") {
+        let dir = ti + 1 < rawArgs.count ? rawArgs[ti + 1] : "tmp/tap"
+        try FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true)
+        let chat = try MetalChat(ggufPath: arg1)
+        let ids = chat.tokenizer.encode(
+            probeWrap(turnArgs.first ?? "What is 2+2?"), addSpecial: true)
+        chat.engine.reset()
+        for id in ids.dropLast() {
+            _ = chat.engine.decode(id)
+        }
+        let layers = chat.engine.tapLayers(token: Int(ids.last!))
+        for (i, v) in layers.enumerated() {
+            v.withUnsafeBytes { raw in
+                try? Data(raw).write(to: URL(
+                    fileURLWithPath: String(format: "%@/l%02d.bin", dir, i)))
+            }
+        }
+        err("[tap] \(layers.count) vectors of \(layers[0].count) -> \(dir)\n")
+        exit(0)
+    }
     // Minimal greedy templated probe (GGUF reference): the same probeWrap +
     // argmax + EOS-stop as the CoreML --probe, over the AgentBackend, so a
     // CoreML-vs-GGUF answer comparison uses the identical prompt and decode rule.
@@ -337,13 +408,15 @@ func runLongDoc(_ user: String) async throws {
         let chat = try MetalChat(ggufPath: arg1)
         backend = chat.backend(); template = chat.chatTemplate
         vocabCount = chat.tokenizer.vocabCount
-        bonsaiPresets = chat.samplingPresets
+        bonsaiPresets = greedyDecode ? SamplingPresets.greedy
+                                     : chat.samplingPresets
         err("ready (Metal/GPU ternary decode; vocab \(vocabCount)).\n")
     } else {
         let chat = try BonsaiChat(ggufPath: arg1)
         backend = chat.backend(); template = chat.chatTemplate
         vocabCount = chat.tokenizer.vocabCount
-        bonsaiPresets = chat.samplingPresets
+        bonsaiPresets = greedyDecode ? SamplingPresets.greedy
+                                     : chat.samplingPresets
         err("ready (SIMD/CPU ternary decode; vocab \(vocabCount)).\n")
     }
     // Same raw pp512/tg128 protocol as the CoreML --bench below, over the shared
@@ -357,7 +430,8 @@ func runLongDoc(_ user: String) async throws {
         backend: backend, template: template,
         system: systemPrompt, systemTail: systemTimeTail,
         vocabSize: vocabCount, presets: bonsaiPresets,
-        enableThinking: enableThinking, maxTokens: maxTokens,
+        enableThinking: enableThinking, reasoningEffort: reasoningEffort,
+        maxTokens: maxTokens,
         maxReasoning: maxReasoning, softReasoningCap: softReasoning,
         overthink: overthink, runner: toolRunner)
     if let pkVal {

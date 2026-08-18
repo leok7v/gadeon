@@ -996,10 +996,10 @@ struct ContentView: View {
                     answerBubble(m, answer)
                 } else if !m.fromUser, isPrefilling(m) {
                     prefillWhimsical
-                } else if isAnswerless(m) {
-                    noAnswerNote
                 } else if m.loopStopped {
                     loopStopNote
+                } else if isAnswerless(m) {
+                    noAnswerNote(m)
                 }
             }
             if !m.fromUser { Spacer(minLength: 40) }
@@ -1096,15 +1096,17 @@ struct ContentView: View {
     }
 
     private func isAnswerless(_ m: ChatModel.Message) -> Bool {
-        !m.fromUser && !m.toolRounds.isEmpty && !isLive(m)
+        !m.fromUser && !isLive(m)
     }
 
     private func isLive(_ m: ChatModel.Message) -> Bool {
         model.busy && m.id == model.messages.last?.id
     }
 
-    private var noAnswerNote: some View {
-        Text("The model made tool calls but gave no final answer.")
+    private func noAnswerNote(_ m: ChatModel.Message) -> some View {
+        Text(m.toolRounds.isEmpty
+             ? "The model did not reach an answer. Try rephrasing."
+             : "The model made tool calls but gave no final answer.")
             .appFont(.caption)
             .italic()
             .foregroundStyle(.secondary)

@@ -488,6 +488,7 @@ struct SettingsView: View {
                 explain("How long the model may think before it is nudged to "
                     + "answer: about \(Int(model.thinkBudget.seconds)) "
                     + "seconds.")
+                if model.modelSupportsReasoningEffort { reasoningEffortRow }
             }
             Toggle("Suggest follow-up questions",
                    isOn: $model.suggestFollowups)
@@ -541,6 +542,26 @@ struct SettingsView: View {
                 explain("Deletes every downloaded model and all settings, then "
                     + "quits. Revealed only while Option is held.")
             }
+        }
+    }
+
+    private var reasoningEffortRow: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Reasoning Effort")
+            Picker("Reasoning effort", selection: Binding(
+                get: { model.reasoningEffort },
+                set: { level in model.setReasoningEffort(level) }
+            )) {
+                ForEach(ChatModel.ReasoningEffort.allCases) { level in
+                    Text(level.rawValue).tag(level)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            explain("How thoroughly \(Models.display(model.modelName)) is "
+                + "asked to reason. Higher spends more of the budget above on "
+                + "thinking and can talk itself in circles; lower answers "
+                + "sooner. Takes effect on the next New Chat.")
         }
     }
 

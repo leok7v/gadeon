@@ -59,6 +59,15 @@ public enum ModelCatalog {
             repo: "leok7v/QwenPaw-Flash-9B-MTP-coreml",
             revision: "84e90005d20dcdf0d5fcbb53564176373651a1b5",
             bytes: 7_854_000_000),
+        "Qwen3.8-27B": Source(
+            repo: "leok7v/Qwen3.8-27B-coreml-q6",
+            revision: "f72acfa1607fe63294534d355ab89c9226c7aa17",
+            bytes: 21_478_000_000),
+        "Qwen3.8-27B-Q2_X": Source(
+            repo: "leok7v/Qwen3.8-27B",
+            revision: "e6e1713b861680d160551352170e7fbea531b98b",
+            bytes: 10_037_000_000,
+            files: ["Qwen3.8-27B-Q2_X.gguf"]),
         // The ternary 27B GGUF served by the unified engine: the Q2_0 weight
         // file, the Q8_0 vision tower (measured transparent vs BF16, cos
         // ~0.99995 -- ViT.swift consumes it), and generation_config.json for
@@ -111,11 +120,29 @@ public enum ModelCatalog {
             files: ["gemma-4-12b-it-qat.gguf"]),
     ]
 
-    public static func source(_ name: String) -> Source? { sources[name] }
+    private static let qwen38 = "Qwen3.8-27B"
+    private static let qwen38WideMinGB = 48
+    private static let qwen38Narrow = Source(
+        repo: "leok7v/Qwen3.8-27B-coreml-q4",
+        revision: "3288aa7c54439b3016ede414eb980371d1266cb2",
+        bytes: 14_632_000_000)
+
+    private static var installedGB: Int {
+        Int((ProcessInfo.processInfo.physicalMemory + (1 << 29)) >> 30)
+    }
+
+    public static func source(_ name: String) -> Source? {
+        var out = sources[name]
+        if name == qwen38, installedGB < qwen38WideMinGB {
+            out = qwen38Narrow
+        }
+        return out
+    }
 
     // The GGUF weight file inside each single-file (unified-engine) model's set
     // dir. A name here is a GGUF model (isGguf); absent is a CoreML/ANE set.
     public static let ggufFiles: [String: String] = [
+        "Qwen3.8-27B-Q2_X": "Qwen3.8-27B-Q2_X.gguf",
         "Ternary-Bonsai-27B": "Ternary-Bonsai-27B-Q2_0.gguf",
         "Ternary-Bonsai-1.7B": "Ternary-Bonsai-1.7B-Q2_0.gguf",
         "gemma-4-E2B": "gemma-4-e2b-it-qat.gguf",
@@ -142,7 +169,7 @@ public enum ModelCatalog {
     // checks completeness with no network round-trip.
     public static func localSet(_ name: String, in dest: URL) -> URL? {
         var result: URL? = nil
-        if let src = sources[name] {
+        if let src = source(name) {
             result = dest.appendingPathComponent(name, isDirectory: true)
                 .appendingPathComponent(src.revision, isDirectory: true)
         }

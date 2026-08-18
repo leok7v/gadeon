@@ -2211,6 +2211,38 @@ public actor Engine {
     // for the batched-head decision.
     private var pDraft = 0.0, pVerify = 0.0, pAccept = 0.0, pRest = 0.0
     private var pCycles = 0
+    private var specCommitted = 0
+    private var specDrafted = 0
+
+    public struct SpecTurn: Sendable {
+        public let cycles: Int
+        public let committed: Int
+        public let drafted: Int
+        public let accepted: Int
+        public var tokensPerCycle: Double {
+            Double(committed) / Double(max(cycles, 1))
+        }
+        public var acceptRate: Double {
+            Double(accepted) / Double(max(drafted, 1))
+        }
+    }
+
+    public func drainSpecTurn() -> SpecTurn? {
+        var out: SpecTurn? = nil
+        if pCycles > 0 {
+            out = SpecTurn(cycles: pCycles, committed: specCommitted,
+                           drafted: specDrafted,
+                           accepted: specCommitted - pCycles)
+        }
+        pCycles = 0
+        specCommitted = 0
+        specDrafted = 0
+        pDraft = 0
+        pVerify = 0
+        pAccept = 0
+        pRest = 0
+        return out
+    }
 
     // Averaged per-cycle ms of each spec phase (draft = MTP + draft heads;
     // verify = the trunk pass;
@@ -2284,22 +2316,17 @@ public actor Engine {
                 // cost the batched read on nothing more than a missing shape.
                 if let head = lmHeadBatched, let wide = Engine.hiddenWidth(head),
                    wide != verifyS {
-                    log.warning("""
-                        batched verify head is \(wide) wide, verify trunk is \
-                        \(self.verifyS); using per-row heads
-                        """)
+                    self.report("[mtp] batched verify head is \(wide) "
+                        + "wide, verify trunk is \(verifyS); using "
+                        + "per-row heads")
                     lmHeadBatched = nil
                 }
-                log.info("""
-                    MTP drafter + verify trunk loaded (\(self.nProg) progs, \
-                    standalone \(standalone), S \(self.verifyS), \
-                    batched-head \(self.lmHeadBatched != nil))
-                    """)
+                self.report("[mtp] ON: \(nProg) programs, standalone "
+                    + "\(standalone), verify S \(verifyS), batched head "
+                    + "\(lmHeadBatched != nil), drafts \(Engine.specDrafts)")
             } catch {
-                log.warning("""
-                    MTP tensors present but failed to load; plain decode: \
-                    \(error.localizedDescription, privacy: .public)
-                    """)
+                self.report("[mtp] OFF: tensors present but failed to "
+                    + "load, plain decode: \(error.localizedDescription)")
             }
         }
     }
@@ -2337,6 +2364,8 @@ public actor Engine {
         specLastHanded = nil
         mtpPool = PagePool(P: pageP, kvHeads: kvHeads, dh: dhAttn)
         pDraft = 0; pVerify = 0; pAccept = 0; pRest = 0; pCycles = 0
+        specCommitted = 0
+        specDrafted = 0
     }
 
     // Drop the spec pipeline across any state jump (reset / restore / prefill
@@ -2807,6 +2836,8 @@ public actor Engine {
         let t4 = DispatchTime.now().uptimeNanoseconds
         pDraft += Double(t1 - t0); pVerify += Double(t2 - t1)
         pAccept += Double(t3 - t2); pRest += Double(t4 - t3); pCycles += 1
+        specCommitted += m
+        specDrafted += n
         var committed = [tok]
         committed.append(contentsOf: drafts.prefix(accepted))
         return committed

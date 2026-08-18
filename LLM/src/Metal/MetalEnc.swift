@@ -75,6 +75,9 @@ struct MetalEnc {
     // Dispatched on the TENSOR's type, not the caller's: a gemma forward mixes
     // Q4_0 attention with Q2_0 wide MLP, so the engine names a tensor and this
     // picks the kernel. Mirrors GQ.matvec.
+    static let q2xVariant =
+        ProcessInfo.processInfo.environment["LLM_Q2X_VAR"] ?? ""
+
     func gemv(_ w: GGUFTensor, x: MTLBuffer, out: MTLBuffer, off: WeightRef,
               xOff: Int = 0, outOff: Int = 0) {
         let k = w.dims[0], m = w.dims[1]
@@ -82,6 +85,9 @@ struct MetalEnc {
         let name: String
         switch w.type {
         case .q2_0: name = "q2_0_gemv"
+        case .q2_x:
+            name = MetalEnc.q2xVariant.isEmpty ? "q2_x_gemv"
+                : "q2_x_gemv_" + MetalEnc.q2xVariant
         case .q4_0: name = "q4_0_gemv"
         case .q8_0: name = "q8_0_gemv"
         case .bf16: name = "bf16_gemv"
@@ -90,7 +96,9 @@ struct MetalEnc {
             fatalError("MetalEnc.gemv: no kernel for \(w.type) (\(w.name))")
         }
         // one simdgroup (32 threads) per 8 output rows (NR0=8 in the kernel).
-        groups(name, (m + 7) / 8, tpg: 32) { e in
+        let rows = name == "q2_x_gemv_r16" ? 16
+            : (name == "q2_x_gemv_un4" ? 4 : 8)
+        groups(name, (m + rows - 1) / rows, tpg: 32) { e in
             e.setBuffer(off.buf, offset: 0, index: 0)
             e.setBuffer(x, offset: xOff, index: 1)
             e.setBuffer(out, offset: outOff, index: 2)
@@ -155,13 +163,30 @@ struct MetalEnc {
         switch w.type {
         case .q2_0:
             name = MetalEnc.f16Tiles ? "q2_0_gemm_mm_h" : "q2_0_gemm_mm"
+        case .q2_x:
+            name = MetalEnc.f16Tiles ? "q2_x_gemm_mm_h" : "q2_x_gemm_mm"
         case .q4_0:
             name = MetalEnc.f16Tiles ? "q4_0_gemm_mm_h" : "q4_0_gemm_mm"
         case .q8_0:
             name = MetalEnc.f16Tiles ? "q8_0_gemm_mm_h" : "q8_0_gemm_mm"
+        case .f32, .bf16:
+            name = ""
         default:
             fatalError("MetalEnc.gemm: no kernel for \(w.type) (\(w.name))")
         }
+        if name.isEmpty {
+            gemmRows(w, X: X, out: out, off: off, N: N)
+        } else {
+            gemmTiled(name, w, X: X, out: out, off: off, N: N, a: &a, nn: &nn,
+                      fullTile: fullTile)
+        }
+    }
+
+    private func gemmTiled(_ name: String, _ w: GGUFTensor, X: MTLBuffer,
+                           out: MTLBuffer, off: WeightRef, N: Int,
+                           a: inout GemvArgs, nn: inout UInt32,
+                           fullTile: Bool) {
+        let m = w.dims[1]
         // Every kernel above is a simdgroup-matrix one, and prewarm skips
         // exactly those on a GPU that cannot build them -- so arriving here
         // without matrix units means a capability gate upstream let an
@@ -197,6 +222,7 @@ struct MetalEnc {
         let name: String
         switch type {
         case .q2_0: name = "q2_0_dequant_row"
+        case .q2_x: name = "q2_x_dequant_row"
         case .q4_0: name = "q4_0_dequant_row"
         case .q8_0: name = "q8_0_dequant_row"
         default:
@@ -587,6 +613,29 @@ struct MetalEnc {
         }
     }
 
+    func accumOuter(h: MTLBuffer, src: MTLBuffer, n: Int) {
+        var nn = UInt32(n)
+        push("accum_outer")
+        let pipe = try! ctx.pipeline("accum_outer")
+        e.setComputePipelineState(pipe)
+        e.setBuffer(h, offset: 0, index: 0)
+        e.setBuffer(src, offset: 0, index: 1)
+        e.setBytes(&nn, length: 4, index: 2)
+        e.dispatchThreads(MTLSize(width: n, height: n, depth: 1),
+                          threadsPerThreadgroup:
+                            MTLSize(width: 32, height: 8, depth: 1))
+        pop()
+    }
+
+    func accumSq(dst: MTLBuffer, src: MTLBuffer, n: Int) {
+        var nn = UInt32(n)
+        grid1D("accum_sq", n) { e in
+            e.setBuffer(dst, offset: 0, index: 0)
+            e.setBuffer(src, offset: 0, index: 1)
+            e.setBytes(&nn, length: 4, index: 2)
+        }
+    }
+
     func add(x: MTLBuffer, y: MTLBuffer, n: Int) {
         var nn = UInt32(n)
         grid1D("add_inplace", n) { e in
@@ -707,9 +756,16 @@ struct MetalEnc {
 
     // ---- batched (prefill) dispatches ------------------------------------
     func embedBatch(ids: MTLBuffer, weightOff: WeightRef, out: MTLBuffer,
-                    nEmbd: Int, N: Int) {
+                    nEmbd: Int, N: Int, type: GGUFType = .q2_0) {
         var a = GemvArgs(woff: weightOff.local, K: UInt32(nEmbd), M: UInt32(N))
-        grid1D("embed_batch", N * nEmbd) { e in
+        let name: String
+        switch type {
+        case .q2_0: name = "embed_batch"
+        case .q2_x: name = "q2_x_embed_batch"
+        default:
+            fatalError("MetalEnc.embedBatch: no kernel for \(type)")
+        }
+        grid1D(name, N * nEmbd) { e in
             e.setBuffer(weightOff.buf, offset: 0, index: 0)
             e.setBuffer(ids, offset: 0, index: 1)
             e.setBuffer(out, offset: 0, index: 2)

@@ -38,6 +38,13 @@ enum Credits {
                source: "https://huggingface.co/Qwen/Qwen3.5-0.8B",
                changed: "Converted to Core ML so it runs on the Neural "
                    + "Engine."),
+        Credit(name: "Qwen3.8",
+               author: "Qwen, Alibaba",
+               terms: "Apache-2.0",
+               source: "https://huggingface.co/Qwen/Qwen3.8-27B",
+               changed: "Converted to Core ML so it runs on the Neural "
+                   + "Engine, with its own multi-token-prediction drafter "
+                   + "folded in."),
         Credit(name: "QwenPaw-Flash",
                author: "AgentScope",
                terms: "Apache-2.0",

@@ -97,34 +97,11 @@ public struct SamplerConfig: Sendable {
 
     public static let `default` = SamplerConfig()
 
-    static func qwenPreset(
-        temperature: Float, topP: Float, topK: Int, minP: Float,
-        presence: Float, repeatPenalty: Float
-    ) -> SamplerConfig {
-        SamplerConfig(
-            temperature: temperature, topP: topP, topK: topK, minP: minP,
-            repeatPenalty: repeatPenalty, presencePenalty: presence,
-            setMask: [.temperature, .topP, .topK, .minP,
-                      .presencePenalty, .repeatPenalty])
-    }
-
-    public static let thinkingGeneral = qwenPreset(
-        temperature: 1.0, topP: 0.95, topK: 20, minP: 0.0,
-        presence: 1.5, repeatPenalty: 1.0)
-    public static let thinkingCoding = qwenPreset(
-        temperature: 0.6, topP: 0.95, topK: 20, minP: 0.0,
-        presence: 0.0, repeatPenalty: 1.0)
-    public static let instructGeneral = qwenPreset(
-        temperature: 0.7, topP: 0.8, topK: 20, minP: 0.0,
-        presence: 1.5, repeatPenalty: 1.0)
-    public static let instructReasoning = qwenPreset(
-        temperature: 1.0, topP: 0.95, topK: 20, minP: 0.0,
-        presence: 1.5, repeatPenalty: 1.0)
-    // Non-thinking answers for TEXT: wider top_p and a stronger presence
-    // penalty than the coding / vision rows, per the model's own README.
-    public static let nonThinkingText = qwenPreset(
-        temperature: 1.0, topP: 1.0, topK: 20, minP: 0.0,
-        presence: 2.0, repeatPenalty: 1.0)
+    public static let greedy = SamplerConfig(
+        temperature: 0.0, topP: 1.0, topK: 0, minP: 0.0,
+        repeatPenalty: 1.0, presencePenalty: 0.0,
+        setMask: [.temperature, .topP, .topK, .minP,
+                  .presencePenalty, .repeatPenalty])
 
     // Overlay a single field from `src`, keeping every other field of self.
     private func overlaying(_ src: SamplerConfig,
@@ -255,14 +232,6 @@ public struct SamplerConfig: Sendable {
     }
 }
 
-// The full sampling matrix a Qwen / QwenPaw model card recommends -- thinking
-// on/off x text/vision -- because the four cells genuinely differ: a reasoning
-// chain wants a different temperature and presence penalty than a terse
-// non-thinking answer, and a VL / precise-coding task different again. A
-// generation_config.json carries it under "_sampling_presets" (the standard
-// top-level fields stay = the thinking/text row for HF tooling); `select` picks
-// the cell per turn. The named statics are the card values, the fallback when a
-// config predates the matrix.
 public struct SamplingPresets: Sendable {
     public let thinkingText: SamplerConfig
     public let thinkingVision: SamplerConfig
@@ -290,71 +259,63 @@ public struct SamplingPresets: Sendable {
         return result
     }
 
-    // Qwen3.5 / QwenPaw-Flash (0.8B / 2B / 4B / 9B) card values. VL / precise
-    // coding share one thinking row; non-thinking splits text (wide top_p, high
-    // presence) from VL. https://huggingface.co/Qwen/Qwen3.5-0.8B ,
-    // https://huggingface.co/agentscope-ai/QwenPaw-Flash-9B
-    public static let qwen35 = SamplingPresets(
-        thinkingText: .thinkingGeneral,
-        thinkingVision: .thinkingCoding,
-        nonThinkingText: .nonThinkingText,
-        nonThinkingVision: .instructGeneral)
+    public static let greedy = SamplingPresets(
+        thinkingText: .greedy, thinkingVision: .greedy,
+        nonThinkingText: .greedy, nonThinkingVision: .greedy)
 
-    // Qwen3.6-27B (the Ternary-Bonsai lineage) card values: a ZERO presence
-    // penalty while thinking, and a single instruct row for non-thinking. It is
-    // text-only, so the VL cells mirror the coding / instruct rows.
-    // https://huggingface.co/Qwen/Qwen3.6-27B
-    public static let bonsai = SamplingPresets(
-        thinkingText: SamplerConfig.qwenPreset(
-            temperature: 1.0, topP: 0.95, topK: 20, minP: 0.0,
-            presence: 0.0, repeatPenalty: 1.0),
-        thinkingVision: .thinkingCoding,
-        nonThinkingText: .instructGeneral,
-        nonThinkingVision: .instructGeneral)
-
-    // The four cells of a "_sampling_presets" object, whichever carrier it
-    // arrived in. Each cell layers onto its own fallback row, so a matrix
-    // that names only one cell keeps the card values for the other three.
-    static func from(presets p: [String: Any],
-                     fallback: SamplingPresets) -> SamplingPresets {
-        SamplingPresets(
-            thinkingText: SamplerConfig.row(
-                p["thinking_text"], base: fallback.thinkingText),
-            thinkingVision: SamplerConfig.row(
-                p["thinking_vision"], base: fallback.thinkingVision),
-            nonThinkingText: SamplerConfig.row(
-                p["nonthinking_text"], base: fallback.nonThinkingText),
-            nonThinkingVision: SamplerConfig.row(
-                p["nonthinking_vision"], base: fallback.nonThinkingVision))
+    static func uniform(_ row: SamplerConfig) -> SamplingPresets {
+        SamplingPresets(thinkingText: row, thinkingVision: row,
+                        nonThinkingText: row, nonThinkingVision: row)
     }
 
-    // Overlay whatever cells "_sampling_presets" carries onto `fallback`, so a
-    // config supplies the matrix and an older one keeps the card defaults.
-    public static func from(generationConfig url: URL,
-                            fallback: SamplingPresets) throws
-        -> SamplingPresets {
+    static func from(presets p: [String: Any],
+                     base: SamplingPresets) -> SamplingPresets {
+        SamplingPresets(
+            thinkingText: SamplerConfig.row(
+                p["thinking_text"], base: base.thinkingText),
+            thinkingVision: SamplerConfig.row(
+                p["thinking_vision"], base: base.thinkingVision),
+            nonThinkingText: SamplerConfig.row(
+                p["nonthinking_text"], base: base.nonThinkingText),
+            nonThinkingVision: SamplerConfig.row(
+                p["nonthinking_vision"], base: base.nonThinkingVision))
+    }
+
+    public static func from(generationConfig url: URL) throws
+        -> SamplingPresets? {
         let data = try Data(contentsOf: url)
         let obj = try JSONSerialization.jsonObject(with: data)
-        var result = fallback
+        let row = SamplerConfig.row(obj, base: .default)
+        var result: SamplingPresets? = row.setMask.isEmpty ? nil : uniform(row)
         if let dict = obj as? [String: Any],
            let p = dict["_sampling_presets"] as? [String: Any] {
-            result = from(presets: p, fallback: fallback)
+            result = from(presets: p, base: uniform(row))
         }
         return result
     }
 
-    // The same matrix out of a single-file model. A GGUF has no sidecar, so
-    // the emitter records the object under one key and it is read through the
-    // SAME cell logic -- flattening it into per-field keys would let the two
-    // carriers drift apart.
-    static func from(gguf g: GGUF,
-                     fallback: SamplingPresets) -> SamplingPresets {
-        var result = fallback
+    static func require(gguf g: GGUF, path: String) -> SamplingPresets {
+        let dir = URL(fileURLWithPath: path).deletingLastPathComponent()
+        var out = try? from(
+            generationConfig: dir.appendingPathComponent(
+                "generation_config.json"))
+        if out == nil { out = from(gguf: g) }
+        if out == nil {
+            fatalError("\(path) suggests no sampling: emit "
+                + "general.sampling.presets_json into it, or ship a "
+                + "generation_config.json beside it")
+        }
+        return out!
+    }
+
+    static func from(gguf g: GGUF) -> SamplingPresets? {
+        let row = SamplerConfig.from(gguf: g)
+        var result: SamplingPresets? = row.setMask.isEmpty ? nil : uniform(row)
         if let text = g.string("general.sampling.presets_json"),
            let data = text.data(using: .utf8),
            let obj = try? JSONSerialization.jsonObject(with: data),
            let p = obj as? [String: Any] {
-            result = from(presets: p, fallback: fallback)
+            result = from(presets: p, base: uniform(row))
         }
         return result
     }

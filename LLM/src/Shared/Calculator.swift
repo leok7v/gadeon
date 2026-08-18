@@ -56,7 +56,11 @@ public actor Calculator {
                     // the RESULT after the expression.
                     result = assign(tail, name)
                 } else {
-                    result = "error: '\(name)' is not a valid variable name"
+                    result = "error: this evaluates expressions, it does not "
+                        + "solve equations. '\(name)' is not a variable name. "
+                        + "Rearrange it yourself and send only the right-hand "
+                        + "side, e.g. '(1.10 - 1) / 2'. Write every "
+                        + "multiplication explicitly: '2 * x', not '2x'."
                 }
             } else {
                 result = evaluated(text)

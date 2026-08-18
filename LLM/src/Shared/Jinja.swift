@@ -1339,6 +1339,17 @@ private final class JinjaEngine {
         return d
     }
 
+    private func tupleLiteral(_ first: JinjaValue) throws -> JinjaValue {
+        var items = [first]
+        while isOp(",") {
+            lex()
+            if !isOp(")") && kind != .end {
+                items.append(try evalExpr())
+            }
+        }
+        return .list(items)
+    }
+
     // A bare reference to a function-style builtin is "defined" even though
     // no variable is stored for it; a sentinel node carries that fact.
 
@@ -1376,6 +1387,7 @@ private final class JinjaEngine {
         } else if isOp("(") {
             lex()
             v = try evalExpr()
+            if isOp(",") { v = try tupleLiteral(v) }
             if isOp(")") { lex() }
         } else if isOp("[") {
             v = try listLiteral()
@@ -2013,7 +2025,7 @@ private final class JinjaEngine {
 // (the llama.cpp/minja surface), not full 3.1.x: cross-template machinery
 // (inheritance, includes, imports) is absent by design.
 //
-// Implemented: literals (str/int/bool/none, list, dict); and/or (value
+// Implemented: literals (str/int/bool/none, list, tuple, dict); and/or (value
 // semantics) / not / comparisons / in / is-tests / ~ concat; arithmetic
 // + - * / // % ** (integer; `/` is integer division); ternary incl.
 // inline-if without else; a.b / a[i] / a['k'] / full a[start:stop:step]

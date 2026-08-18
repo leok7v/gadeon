@@ -298,10 +298,13 @@ public enum Tools {
             + "imaginary unit, e.g. 'exp(i*pi)' -> -1, 'i^i', 'sqrt(-1)' -> i, "
             + "'ln(-1)'; abs = modulus, plus re im conj arg. Has variable "
             + "memory: send 'x = 5' to store x, then reuse it ('x * 3'), or "
-            + "update it ('x = x + 1').",
+            + "update it ('x = x + 1'). Write multiplication explicitly: "
+            + "'2 * x', never '2x'. It EVALUATES, it does not solve: send "
+            + "'(1.10 - 1) / 2', not 'b + (b + 1) = 1.10'.",
         parametersJSON: "{\"type\":\"object\",\"properties\":{"
             + "\"expression\":{\"type\":\"string\",\"description\":\"A math "
-            + "expression or an assignment, e.g. 'x = 5' or 'sqrt(x) * pi'.\"}},"
+            + "expression or an assignment, e.g. 'x = 5' or 'sqrt(x) * pi'. "
+            + "Multiplication must be explicit: '2 * x', not '2x'.\"}},"
             + "\"required\":[\"expression\"]}")
 
     // Names + required params (web_search/query, fetch_url/url, get_news/topic,

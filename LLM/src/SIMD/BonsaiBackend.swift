@@ -94,24 +94,14 @@ public struct BonsaiChat {
         {% endif %}
         """
 
-    // The sampling matrix for a GGUF model: a generation_config.json shipped
-    // beside the weight file overrides the Qwen3.6-27B card defaults, so the
-    // Bonsai/ternary lineage stays configurable without embedding it in the
-    // GGUF metadata (which cannot express the per-mode matrix).
-    static func presets(ggufPath: String) -> SamplingPresets {
-        let dir = URL(fileURLWithPath: ggufPath).deletingLastPathComponent()
-        let url = dir.appendingPathComponent("generation_config.json")
-        return (try? SamplingPresets.from(generationConfig: url,
-                                          fallback: .bonsai)) ?? .bonsai
-    }
-
     public init(ggufPath: String) throws {
         let m = try BonsaiModel(path: ggufPath)
         engine = BonsaiEngine(m)
         tokenizer = try Tokenizer(gguf: m.gguf)
         chatTemplate = m.gguf.string("tokenizer.chat_template")
             ?? BonsaiChat.fallbackTemplate
-        samplingPresets = BonsaiChat.presets(ggufPath: ggufPath)
+        samplingPresets = SamplingPresets.require(gguf: m.gguf,
+                                                  path: ggufPath)
     }
 
     public func backend() -> BonsaiBackend {

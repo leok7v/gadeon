@@ -118,6 +118,219 @@ kernel void q2_0_gemv(
     }
 }
 
+kernel void q2_x_gemv(
+        device const uchar * weights [[buffer(0)]],
+        device const float * x       [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant GemvArgs  & a       [[buffer(3)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint NR0 = 8;
+    const uint row0 = tgpig.x * NR0;
+    const uint nblk = a.K / 128;
+    const ushort TPB = 8, SW = 16, STEP = 32 / TPB;
+    const ulong rowBytes = (ulong) nblk * 34;
+    device const uchar * W = weights + a.woff;
+    const ushort grp = tiisg / TPB;
+    const ushort il  = (tiisg % TPB) * SW;
+    float acc[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    uint ib = grp;
+    for (; ib + STEP < nblk; ib += 2 * STEP) {
+        const uint ib0 = ib, ib1 = ib + STEP;
+        device const float * y0 = x + (ulong) ib0 * 128 + il;
+        device const float * y1 = x + (ulong) ib1 * 128 + il;
+        float yl0[16], yl1[16];
+        float sy0 = 0.0f, sy1 = 0.0f;
+        for (ushort i = 0; i < SW; i++) {
+            yl0[i] = y0[i]; sy0 += y0[i];
+            yl1[i] = y1[i]; sy1 += y1[i];
+        }
+        for (uint r = 0; r < NR0; r++) {
+            const uint row = row0 + r;
+            if (row < a.M) {
+                device const uchar * b0 =
+                    W + row * rowBytes + (ulong) ib0 * 34;
+                device const uchar * b1 =
+                    W + row * rowBytes + (ulong) ib1 * 34;
+                const float d0 = (float) (*(device const half *) b0);
+                const float d1 = (float) (*(device const half *) b1);
+                device const uchar * q0 = b0 + 2 + il / 4;
+                device const uchar * q1 = b1 + 2 + il / 4;
+                float lo0 = 0, hi0 = 0, lo1 = 0, hi1 = 0;
+                for (ushort i = 0; i < SW; i++) {
+                    const uchar c0 = (q0[i >> 2] >> ((i & 3) * 2)) & 3;
+                    const uchar c1 = (q1[i >> 2] >> ((i & 3) * 2)) & 3;
+                    if (c0 & 1) { lo0 += yl0[i]; }
+                    if (c0 & 2) { hi0 += yl0[i]; }
+                    if (c1 & 1) { lo1 += yl1[i]; }
+                    if (c1 & 2) { hi1 += yl1[i]; }
+                }
+                acc[r] += d0 * (2.0f * lo0 + 4.0f * hi0 - 3.0f * sy0)
+                        + d1 * (2.0f * lo1 + 4.0f * hi1 - 3.0f * sy1);
+            }
+        }
+    }
+    for (; ib < nblk; ib += STEP) {
+        device const float * y = x + (ulong) ib * 128 + il;
+        float yl[16];
+        float sy = 0.0f;
+        for (ushort i = 0; i < SW; i++) {
+            yl[i] = y[i];
+            sy += y[i];
+        }
+        for (uint r = 0; r < NR0; r++) {
+            const uint row = row0 + r;
+            if (row < a.M) {
+                device const uchar * bp = W + row * rowBytes + (ulong) ib * 34;
+                const float d = (float) (*(device const half *) bp);
+                device const uchar * qs = bp + 2 + il / 4;
+                float lo = 0.0f, hi = 0.0f;
+                for (ushort i = 0; i < SW; i++) {
+                    const uchar code = (qs[i >> 2] >> ((i & 3) * 2)) & 3;
+                    const float xv = yl[i];
+                    if (code & 1) { lo += xv; }
+                    if (code & 2) { hi += xv; }
+                }
+                acc[r] += d * (2.0f * lo + 4.0f * hi - 3.0f * sy);
+            }
+        }
+    }
+    for (uint r = 0; r < NR0; r++) {
+        const float s = simd_sum(acc[r]);
+        if (tiisg == 0 && row0 + r < a.M) { out[row0 + r] = s; }
+    }
+}
+
+kernel void q2_x_gemv_un4(
+        device const uchar * weights [[buffer(0)]],
+        device const float * x       [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant GemvArgs  & a       [[buffer(3)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint NR0 = 4;
+    const uint row0 = tgpig.x * NR0;
+    const uint nblk = a.K / 128;
+    const ushort TPB = 8, SW = 16, STEP = 32 / TPB;
+    const ulong rowBytes = (ulong) nblk * 34;
+    device const uchar * W = weights + a.woff;
+    const ushort grp = tiisg / TPB;
+    const ushort il  = (tiisg % TPB) * SW;
+    float acc[4] = { 0, 0, 0, 0 };
+    uint ib = grp;
+    for (; ib + 3 * STEP < nblk; ib += 4 * STEP) {
+        float yl0[16], yl1[16], yl2[16], yl3[16];
+        float sy0 = 0, sy1 = 0, sy2 = 0, sy3 = 0;
+        device const float * y0 = x + (ulong) ib * 128 + il;
+        device const float * y1 = y0 + (ulong) STEP * 128;
+        device const float * y2 = y1 + (ulong) STEP * 128;
+        device const float * y3 = y2 + (ulong) STEP * 128;
+        for (ushort i = 0; i < SW; i++) {
+            yl0[i] = y0[i]; sy0 += y0[i];
+            yl1[i] = y1[i]; sy1 += y1[i];
+            yl2[i] = y2[i]; sy2 += y2[i];
+            yl3[i] = y3[i]; sy3 += y3[i];
+        }
+        for (uint r = 0; r < NR0; r++) {
+            const uint row = row0 + r;
+            if (row < a.M) {
+                device const uchar * rp = W + row * rowBytes;
+                float sum = 0.0f;
+                for (ushort u = 0; u < 4; u++) {
+                    device const uchar * bp = rp + (ulong) (ib + u * STEP) * 34;
+                    const float d = (float) (*(device const half *) bp);
+                    device const uchar * qs = bp + 2 + il / 4;
+                    thread float * yl = u == 0 ? yl0 : (u == 1 ? yl1
+                                      : (u == 2 ? yl2 : yl3));
+                    const float sy = u == 0 ? sy0 : (u == 1 ? sy1
+                                   : (u == 2 ? sy2 : sy3));
+                    float lo = 0.0f, hi = 0.0f;
+                    for (ushort i = 0; i < SW; i++) {
+                        const uchar c = (qs[i >> 2] >> ((i & 3) * 2)) & 3;
+                        if (c & 1) { lo += yl[i]; }
+                        if (c & 2) { hi += yl[i]; }
+                    }
+                    sum += d * (2.0f * lo + 4.0f * hi - 3.0f * sy);
+                }
+                acc[r] += sum;
+            }
+        }
+    }
+    for (; ib < nblk; ib += STEP) {
+        device const float * y = x + (ulong) ib * 128 + il;
+        float yl[16];
+        float sy = 0.0f;
+        for (ushort i = 0; i < SW; i++) { yl[i] = y[i]; sy += y[i]; }
+        for (uint r = 0; r < NR0; r++) {
+            const uint row = row0 + r;
+            if (row < a.M) {
+                device const uchar * bp = W + row * rowBytes + (ulong) ib * 34;
+                const float d = (float) (*(device const half *) bp);
+                device const uchar * qs = bp + 2 + il / 4;
+                float lo = 0.0f, hi = 0.0f;
+                for (ushort i = 0; i < SW; i++) {
+                    const uchar c = (qs[i >> 2] >> ((i & 3) * 2)) & 3;
+                    if (c & 1) { lo += yl[i]; }
+                    if (c & 2) { hi += yl[i]; }
+                }
+                acc[r] += d * (2.0f * lo + 4.0f * hi - 3.0f * sy);
+            }
+        }
+    }
+    for (uint r = 0; r < NR0; r++) {
+        const float s = simd_sum(acc[r]);
+        if (tiisg == 0 && row0 + r < a.M) { out[row0 + r] = s; }
+    }
+}
+
+kernel void q2_x_gemv_r16(
+        device const uchar * weights [[buffer(0)]],
+        device const float * x       [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant GemvArgs  & a       [[buffer(3)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint NR0 = 16;
+    const uint row0 = tgpig.x * NR0;
+    const uint nblk = a.K / 128;
+    const ushort TPB = 8, SW = 16, STEP = 32 / TPB;
+    const ulong rowBytes = (ulong) nblk * 34;
+    device const uchar * W = weights + a.woff;
+    const ushort grp = tiisg / TPB;
+    const ushort il  = (tiisg % TPB) * SW;
+    float acc[16];
+    for (ushort r = 0; r < NR0; r++) { acc[r] = 0.0f; }
+    for (uint ib = grp; ib < nblk; ib += STEP) {
+        device const float * y = x + (ulong) ib * 128 + il;
+        float yl[16];
+        float sy = 0.0f;
+        for (ushort i = 0; i < SW; i++) {
+            yl[i] = y[i];
+            sy += y[i];
+        }
+        for (uint r = 0; r < NR0; r++) {
+            const uint row = row0 + r;
+            if (row < a.M) {
+                device const uchar * bp = W + row * rowBytes + (ulong) ib * 34;
+                const float d = (float) (*(device const half *) bp);
+                device const uchar * qs = bp + 2 + il / 4;
+                float lo = 0.0f, hi = 0.0f;
+                for (ushort i = 0; i < SW; i++) {
+                    const uchar code = (qs[i >> 2] >> ((i & 3) * 2)) & 3;
+                    const float xv = yl[i];
+                    if (code & 1) { lo += xv; }
+                    if (code & 2) { hi += xv; }
+                }
+                acc[r] += d * (2.0f * lo + 4.0f * hi - 3.0f * sy);
+            }
+        }
+    }
+    for (uint r = 0; r < NR0; r++) {
+        const float s = simd_sum(acc[r]);
+        if (tiisg == 0 && row0 + r < a.M) { out[row0 + r] = s; }
+    }
+}
+
 // Q2_0 batched mat-mat (prefill): out[N,M] = X[N,K] @ W[K,M]
 // Token-major: X[col*K + k], out[col*M + m]. Each threadgroup owns one weight
 // row m and a tile of TN=8 token-columns, so the weight row is STREAMED
@@ -239,6 +452,34 @@ static inline void dq_q2_0_h(device const block_q2_0 * xb, short il,
         reg[i][1] = ((half) ((b >> 2) & 3) - 1.0h) * d;
         reg[i][2] = ((half) ((b >> 4) & 3) - 1.0h) * d;
         reg[i][3] = ((half) ((b >> 6) & 3) - 1.0h) * d;
+    }
+}
+
+static inline void dq_q2_x(device const block_q2_0 * xb, short il,
+                           thread float4x4 & reg) {
+    device const uchar * qs = xb->qs;
+    const float d = (float) xb->d;
+    const int bo = il * 4;
+    for (int i = 0; i < 4; i++) {
+        const uchar b = qs[bo + i];
+        reg[i][0] = ((float) (2 * ((b >> 0) & 3)) - 3.0f) * d;
+        reg[i][1] = ((float) (2 * ((b >> 2) & 3)) - 3.0f) * d;
+        reg[i][2] = ((float) (2 * ((b >> 4) & 3)) - 3.0f) * d;
+        reg[i][3] = ((float) (2 * ((b >> 6) & 3)) - 3.0f) * d;
+    }
+}
+
+static inline void dq_q2_x_h(device const block_q2_0 * xb, short il,
+                             thread half4x4 & reg) {
+    device const uchar * qs = xb->qs;
+    const half d = xb->d;
+    const int bo = il * 4;
+    for (int i = 0; i < 4; i++) {
+        const uchar b = qs[bo + i];
+        reg[i][0] = ((half) (2 * ((b >> 0) & 3)) - 3.0h) * d;
+        reg[i][1] = ((half) (2 * ((b >> 2) & 3)) - 3.0h) * d;
+        reg[i][2] = ((half) (2 * ((b >> 4) & 3)) - 3.0h) * d;
+        reg[i][3] = ((half) (2 * ((b >> 6) & 3)) - 3.0h) * d;
     }
 }
 
@@ -460,6 +701,8 @@ kernel void NAME(                                                           \
 
 GEMM_MM_KERNEL(q2_0_gemm_mm,   block_q2_0, float, 8, 128, dq_q2_0)
 GEMM_MM_KERNEL(q2_0_gemm_mm_h, block_q2_0, half,  8, 128, dq_q2_0_h)
+GEMM_MM_KERNEL(q2_x_gemm_mm,   block_q2_0, float, 8, 128, dq_q2_x)
+GEMM_MM_KERNEL(q2_x_gemm_mm_h, block_q2_0, half,  8, 128, dq_q2_x_h)
 GEMM_MM_KERNEL(q4_0_gemm_mm,   block_q4_0, float, 2,  32, dq_q4_0)
 GEMM_MM_KERNEL(q4_0_gemm_mm_h, block_q4_0, half,  2,  32, dq_q4_0_h)
 GEMM_MM_KERNEL(q8_0_gemm_mm,   block_q8_0, float, 2,  32, dq_q8_0)
@@ -481,6 +724,21 @@ kernel void q2_0_dequant_row(
         const float d = (float) (*(device const half *) bp);
         const uchar code = (bp[2 + (j >> 2)] >> ((j & 3) * 2)) & 3;
         out[gid] = (float) ((int) code - 1) * d;
+    }
+}
+
+kernel void q2_x_dequant_row(
+        device const uchar * weights [[buffer(0)]],
+        device       float * out     [[buffer(1)]],
+        constant GemvArgs  & a       [[buffer(2)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.K) {
+        const uint ib = gid / 128;
+        const uint j  = gid % 128;
+        device const uchar * bp = weights + a.woff + (ulong) ib * 34;
+        const float d = (float) (*(device const half *) bp);
+        const uchar code = (bp[2 + (j >> 2)] >> ((j & 3) * 2)) & 3;
+        out[gid] = (float) (2 * (int) code - 3) * d;
     }
 }
 
@@ -1130,6 +1388,22 @@ kernel void mul_silu(device float * a [[buffer(0)]],
     if (gid < n) { a[gid] = a[gid] * siluf(b[gid]); }
 }
 
+kernel void accum_outer(device float * h [[buffer(0)]],
+                        device const float * x [[buffer(1)]],
+                        constant uint & n [[buffer(2)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x < n && gid.y < n) {
+        h[(ulong) gid.y * n + gid.x] += x[gid.y] * x[gid.x];
+    }
+}
+
+kernel void accum_sq(device float * dst [[buffer(0)]],
+                     device const float * src [[buffer(1)]],
+                     constant uint & n [[buffer(2)]],
+                     uint gid [[thread_position_in_grid]]) {
+    if (gid < n) { dst[gid] += src[gid] * src[gid]; }
+}
+
 // x[i] += y[i]   (residual add)
 kernel void add_inplace(device float * x [[buffer(0)]],
                         device const float * y [[buffer(1)]],
@@ -1481,6 +1755,25 @@ kernel void embed_batch(
         const uint j = k % 128;
         const uchar code = (bp[2 + j / 4] >> ((j & 3) * 2)) & 3;
         out[gid] = (float) ((int) code - 1) * d;
+    }
+}
+
+kernel void q2_x_embed_batch(
+        device const uchar * weights [[buffer(0)]],
+        device const int   * ids     [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant GemvArgs  & a       [[buffer(3)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.M * a.K) {
+        const uint n = gid / a.K;
+        const uint k = gid % a.K;
+        const uint rowBytes = a.K / 128 * 34;
+        device const uchar * bp = weights + a.woff
+            + (ulong) ids[n] * rowBytes + (ulong) (k / 128) * 34;
+        const float d = (float) (*(device const half *) bp);
+        const uint j = k % 128;
+        const uchar code = (bp[2 + j / 4] >> ((j & 3) * 2)) & 3;
+        out[gid] = (float) (2 * (int) code - 3) * d;
     }
 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import LLM
 import Metal
 
 let apple7orBetter: Bool = {
@@ -58,6 +59,8 @@ enum Models {
             if offersSmall(gb) { list.append("Qwen3.5-0.8B") }
             list += ["QwenPaw-Flash-2B", "QwenPaw-Flash-4B"]
             if gb >= 16 { list.append("QwenPaw-Flash-9B") }
+            if gb >= 16 { list.append("Qwen3.8-27B") }
+            if gb >= 24 { list.append("Qwen3.8-27B-Q2_X") }
             if gb >= 16 { list.append("Ternary-Bonsai-27B") }
             list.append("Ternary-Bonsai-1.7B")
             list.append("gemma-4-E2B")
@@ -86,19 +89,27 @@ enum Models {
     private static let e2b = "gemma-4-E2B"
     private static let e4b = "gemma-4-E4B"
 
+    static func runsOnANE(_ name: String) -> Bool {
+        ModelCatalog.source(name) != nil && !ModelCatalog.isGguf(name)
+    }
+
     static func display(_ name: String) -> String {
+        var out = name
         switch name {
-            case "Qwen3.5-0.8B": return "Qwen3.5 0.8B"
-            case "QwenPaw-Flash-2B": return "QwenPaw 2B"
-            case "QwenPaw-Flash-4B": return "QwenPaw 4B"
-            case "QwenPaw-Flash-9B": return "QwenPaw 9B"
-            case "Ternary-Bonsai-27B": return "Bonsai 27B"
-            case "Ternary-Bonsai-1.7B": return "Bonsai 1.7B"
-            case "gemma-4-E2B": return "Gemma E2B"
-            case "gemma-4-E4B": return "Gemma E4B"
-            case "gemma-4-12B": return "Gemma 12B"
-            default: return name
+            case "Qwen3.5-0.8B": out = "Qwen3.5 0.8B"
+            case "QwenPaw-Flash-2B": out = "QwenPaw 2B"
+            case "QwenPaw-Flash-4B": out = "QwenPaw 4B"
+            case "QwenPaw-Flash-9B": out = "QwenPaw 9B"
+            case "Qwen3.8-27B": out = "Qwen3.8 27B"
+            case "Qwen3.8-27B-Q2_X": out = "Qwen3.8 27B"
+            case "Ternary-Bonsai-27B": out = "Bonsai 27B"
+            case "Ternary-Bonsai-1.7B": out = "Bonsai 1.7B"
+            case "gemma-4-E2B": out = "Gemma E2B"
+            case "gemma-4-E4B": out = "Gemma E4B"
+            case "gemma-4-12B": out = "Gemma 12B"
+            default: out = name
         }
+        return Models.runsOnANE(name) ? out + " 🌀" : out
     }
 
 }
