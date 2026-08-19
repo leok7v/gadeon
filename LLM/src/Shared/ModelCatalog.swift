@@ -68,6 +68,12 @@ public enum ModelCatalog {
             revision: "e6e1713b861680d160551352170e7fbea531b98b",
             bytes: 10_037_000_000,
             files: ["Qwen3.8-27B-Q2_X.gguf"]),
+        "Qwen3.5-4B": Source(
+            repo: "leok7v/Qwen3.5-4B",
+            revision: "51cac7fa0f308a44090e3e5c87e9fe69235b8111",
+            bytes: 1_579_171_840,
+            files: ["Qwen3.5-4B-Q2_E8.gguf",
+                    "generation_config.json"]),
         // The ternary 27B GGUF served by the unified engine: the Q2_0 weight
         // file, the Q8_0 vision tower (measured transparent vs BF16, cos
         // ~0.99995 -- ViT.swift consumes it), and generation_config.json for
@@ -143,6 +149,7 @@ public enum ModelCatalog {
     // dir. A name here is a GGUF model (isGguf); absent is a CoreML/ANE set.
     public static let ggufFiles: [String: String] = [
         "Qwen3.8-27B-Q2_X": "Qwen3.8-27B-Q2_X.gguf",
+        "Qwen3.5-4B": "Qwen3.5-4B-Q2_E8.gguf",
         "Ternary-Bonsai-27B": "Ternary-Bonsai-27B-Q2_0.gguf",
         "Ternary-Bonsai-1.7B": "Ternary-Bonsai-1.7B-Q2_0.gguf",
         "gemma-4-E2B": "gemma-4-e2b-it-qat.gguf",
