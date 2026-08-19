@@ -12,6 +12,7 @@ enum GGUFType: Int32 {
     case q1_0 = 41         // PrismML 1-bit, 128/block, 18 bytes
     case q2_0 = 42         // PrismML ternary, 128/block, 34 bytes {f16 d; u8 qs[32]}
     case q2_x = 43         // mid-riser 2-bit, Q2_0 block layout, w = (2*code-3)*d
+    case q2_e8 = 120        // Q2_X codebook, per-row [scales][codes] SoA layout
 }
 
 // A single metadata value. Scalars are kept; arrays keep only their element count
@@ -150,7 +151,7 @@ final class GGUF {
         switch ty {
         case .f32:  return n * 4
         case .f16, .bf16: return n * 2
-        case .q2_0, .q2_x: return n / 128 * 34
+        case .q2_0, .q2_x, .q2_e8: return n / 128 * 34
         case .q1_0: return n / 128 * 18
         case .q4_0: return n / 32 * 18   // MiniLM (Slugs) weights
         case .q8_0: return n / 32 * 34

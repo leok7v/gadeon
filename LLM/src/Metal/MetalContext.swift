@@ -320,6 +320,19 @@ public final class MetalContext {
     // sized up front because the batch width is the engine's to choose.
     private var blank: MTLBuffer?
 
+    private var book: MTLBuffer?
+
+    func e8pTable() -> MTLBuffer {
+        if book == nil {
+            let t = E8P.packedTable()
+            book = t.withUnsafeBytes { src in
+                device.makeBuffer(bytes: src.baseAddress!, length: src.count,
+                                  options: .storageModeShared)!
+            }
+        }
+        return book!
+    }
+
     func noBlocks(_ rows: Int) -> MTLBuffer {
         let need = rows * 2 * MemoryLayout<UInt32>.stride
         if blank == nil || blank!.length < need { blank = makeU32(rows * 2) }

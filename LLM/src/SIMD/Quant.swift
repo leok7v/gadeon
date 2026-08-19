@@ -138,19 +138,82 @@ enum Q2X {
     }
 }
 
+enum Q2E8Row {
+    static let qk = 128
+    static let blockBytes = 34
+    static let perCode = E8P.dim
+
+    static func dequant(_ base: UnsafeRawPointer, count n: Int,
+                        into out: UnsafeMutablePointer<Float>) {
+        let nb = n / qk
+        let codes = base + nb * 2
+        for ib in 0..<nb {
+            let d = Float((base + ib * 2).loadUnaligned(as: Float16.self))
+            for u in 0..<(qk / perCode) {
+                let c = (codes + ib * (qk / perCode) * 2 + u * 2)
+                    .loadUnaligned(as: UInt16.self)
+                let v = E8P.unpack(c)
+                for i in 0..<perCode {
+                    out[ib * qk + u * perCode + i] = d * v[i]
+                }
+            }
+        }
+    }
+
+    static func matvec(_ w: GGUFTensor, x: [Float], out: inout [Float]) {
+        let K = w.dims[0]
+        let M = w.dims[1]
+        precondition(K % qk == 0)
+        let nblk = K / qk
+        let rowBytes = nblk * blockBytes
+        let lanes = qk / perCode
+        x.withUnsafeBufferPointer { xb in
+            out.withUnsafeMutableBufferPointer { ob in
+                nonisolated(unsafe) let base = w.base
+                nonisolated(unsafe) let xp = xb.baseAddress!
+                nonisolated(unsafe) let op = ob.baseAddress!
+                DispatchQueue.concurrentPerform(iterations: M) { m in
+                    let rp = base + m * rowBytes
+                    let codes = rp + nblk * 2
+                    var acc: Float = 0
+                    for ib in 0..<nblk {
+                        let d = Float((rp + ib * 2)
+                            .loadUnaligned(as: Float16.self))
+                        var dot: Float = 0
+                        for u in 0..<lanes {
+                            let c = (codes + ib * lanes * 2 + u * 2)
+                                .loadUnaligned(as: UInt16.self)
+                            let v = E8P.unpack(c)
+                            let at = ib * qk + u * perCode
+                            for i in 0..<perCode { dot += v[i] * xp[at + i] }
+                        }
+                        acc += d * dot
+                    }
+                    op[m] = acc
+                }
+            }
+        }
+    }
+}
+
 enum QB {
     static func matvec(_ w: GGUFTensor, x: [Float], out: inout [Float]) {
         switch w.type {
         case .q2_x: Q2X.matvec(w, x: x, out: &out)
-        default: Q2_0.matvec(w, x: x, out: &out)
+        case .q2_e8: Q2E8Row.matvec(w, x: x, out: &out)
+        default: GQ.matvec(w, x: x, out: &out)
         }
     }
 
-    static func dequant(_ w: GGUFTensor, at offset: Int, count n: Int,
+    static func dequant(_ w: GGUFTensor, row: Int, count n: Int,
                         into out: UnsafeMutablePointer<Float>) {
         switch w.type {
-        case .q2_x: Q2X.dequant(w.base + offset, count: n, into: out)
-        default: Q2_0.dequant(w.base + offset, count: n, into: out)
+        case .q2_x:
+            Q2X.dequant(w.base + row * GQ.rowBytes(w), count: n, into: out)
+        case .q2_e8:
+            Q2E8Row.dequant(w.base + row * GQ.rowBytes(w), count: n, into: out)
+        default:
+            GQ.gather(w, row: row, from: 0, count: n, into: out)
         }
     }
 }

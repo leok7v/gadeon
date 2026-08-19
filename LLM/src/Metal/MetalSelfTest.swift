@@ -501,8 +501,10 @@ public enum MetalSelfTest {
 
         let gpu = try gemv(ctx, weight: w, mapBase: model.gguf.map, x: x)
         let d = maxAbsDiff(ref, gpu)
-        let tag = d < 1e-3 ? "PASS" : "FAIL"
-        return "gemv ffn_gate[\(k),\(m)]  maxAbsDiff=\(d)  \(tag)"
+        let mag = ref.reduce(Float(0)) { peak, v in max(peak, abs(v)) }
+        let rel = mag > 0 ? d / mag : d
+        let tag = rel < 1e-4 ? "PASS" : "FAIL"
+        return "gemv ffn_gate[\(k),\(m)]  maxAbsDiff=\(d)  rel=\(rel)  \(tag)"
     }
 
     // Q2_0 row dequant vs Q2_0.dequant on the token-embedding row for id 100.
@@ -511,47 +513,41 @@ public enum MetalSelfTest {
         let t = model.tokEmbd
         let k = t.dims[0]
         let id = 100
-        let rowBytes = k / 128 * 34
+        let rowBytes = GGUF.rowByteCount(t.type, k)
         let row = ctx.window(
             UInt64((t.base - model.gguf.map) + id * rowBytes))
 
         var ref = [Float](repeating: 0, count: k)
         ref.withUnsafeMutableBufferPointer { rb in
-            QB.dequant(t, at: id * rowBytes, count: k, into: rb.baseAddress!)
+            QB.dequant(t, row: id, count: k, into: rb.baseAddress!)
         }
 
         let out = ctx.makeF32(k)
-        let dq = t.type == .q2_x ? "q2_x_dequant_row" : "q2_0_dequant_row"
-        let enc = try dispatch(ctx, dq, threads: k) { e in
-            e.setBuffer(row.buf, offset: 0, index: 0)
-            e.setBuffer(out, offset: 0, index: 1)
-            var a = GemvArgs(woff: row.local, K: UInt32(k), M: UInt32(k))
-            e.setBytes(&a, length: MemoryLayout<GemvArgs>.stride, index: 2)
-        }
-        enc.waitUntilCompleted()
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        MetalEnc(ctx: ctx, e: e).dequantRow(weightOff: row, out: out, n: k,
+                                            type: t.type)
+        e.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
         let gpu = Array(out.f32(k))
         let d = maxAbsDiff(ref, gpu)
         let tag = d < 1e-4 ? "PASS" : "FAIL"
         return "dequant tok_embd row[\(k)]  maxAbsDiff=\(d)  \(tag)"
     }
 
-    // One GEMV dispatch (one simdgroup per output row), returning the result.
     static func gemv(_ ctx: MetalContext, weight w: GGUFTensor,
                      mapBase: UnsafeRawPointer, x: [Float]) throws -> [Float] {
-        let k = w.dims[0]
         let m = w.dims[1]
-        let ref = ctx.window(UInt64(w.base - mapBase))
         let xb = ctx.makeF32(x)
         let out = ctx.makeF32(m)
-        let kernel = w.type == .q2_x ? "q2_x_gemv" : "q2_0_gemv"
-        let cb = try dispatch(ctx, kernel, groups: m, threadsPerGroup: 32) {
-            e in
-            e.setBuffer(ref.buf, offset: 0, index: 0)
-            e.setBuffer(xb, offset: 0, index: 1)
-            e.setBuffer(out, offset: 0, index: 2)
-            var a = GemvArgs(woff: ref.local, K: UInt32(k), M: UInt32(m))
-            e.setBytes(&a, length: MemoryLayout<GemvArgs>.stride, index: 3)
-        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        MetalEnc(ctx: ctx, e: e).gemv(
+            w, x: xb, out: out,
+            off: ctx.window(UInt64(w.base - mapBase)))
+        e.endEncoding()
+        cb.commit()
         cb.waitUntilCompleted()
         return Array(out.f32(m))
     }

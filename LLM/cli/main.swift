@@ -152,6 +152,12 @@ if rawArgs.contains("--count") { try probeCount() }
 if rawArgs.contains("--place") { try await placeProbe() }
 await probeNet()
 
+if rawArgs.contains("--q2e8-gate") { runQ2E8Gate(rawArgs) }
+if rawArgs.contains("--gptq-gate") { runGPTQGate(rawArgs) }
+if rawArgs.contains("--spectrum") { runSpectrum(rawArgs) }
+if rawArgs.contains("--codebook") { runCodebook(rawArgs) }
+if rawArgs.contains("--e8p-gate") { runE8PGate(rawArgs) }
+if rawArgs.contains("--q2e8-convert") { runQ2E8Convert(rawArgs) }
 if arg1.hasSuffix(".gguf") { try await runGgufMain() }
 
 let store = URL(fileURLWithPath: "models")

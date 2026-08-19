@@ -88,9 +88,11 @@ struct MetalEnc {
         case .q2_x:
             name = MetalEnc.q2xVariant.isEmpty ? "q2_x_gemv"
                 : "q2_x_gemv_" + MetalEnc.q2xVariant
+        case .q2_e8: name = "q2_e8_gemv"
         case .q4_0: name = "q4_0_gemv"
         case .q8_0: name = "q8_0_gemv"
         case .bf16: name = "bf16_gemv"
+        case .f16: name = "f16_gemv"
         case .f32: name = "f32_gemv"
         default:
             fatalError("MetalEnc.gemv: no kernel for \(w.type) (\(w.name))")
@@ -103,6 +105,9 @@ struct MetalEnc {
             e.setBuffer(x, offset: xOff, index: 1)
             e.setBuffer(out, offset: outOff, index: 2)
             e.setBytes(&a, length: MemoryLayout<GemvArgs>.stride, index: 3)
+            if w.type == .q2_e8 {
+                e.setBuffer(ctx.e8pTable(), offset: 0, index: 4)
+            }
         }
     }
 
@@ -169,7 +174,7 @@ struct MetalEnc {
             name = MetalEnc.f16Tiles ? "q4_0_gemm_mm_h" : "q4_0_gemm_mm"
         case .q8_0:
             name = MetalEnc.f16Tiles ? "q8_0_gemm_mm_h" : "q8_0_gemm_mm"
-        case .f32, .bf16:
+        case .q2_e8, .f32, .f16, .bf16:
             name = ""
         default:
             fatalError("MetalEnc.gemm: no kernel for \(w.type) (\(w.name))")
@@ -225,6 +230,9 @@ struct MetalEnc {
         case .q2_x: name = "q2_x_dequant_row"
         case .q4_0: name = "q4_0_dequant_row"
         case .q8_0: name = "q8_0_dequant_row"
+        case .bf16: name = "bf16_dequant_row"
+        case .f16: name = "f16_dequant_row"
+        case .f32: name = "f32_dequant_row"
         default:
             fatalError("MetalEnc.dequantRow: no kernel for \(type)")
         }
@@ -757,11 +765,18 @@ struct MetalEnc {
     // ---- batched (prefill) dispatches ------------------------------------
     func embedBatch(ids: MTLBuffer, weightOff: WeightRef, out: MTLBuffer,
                     nEmbd: Int, N: Int, type: GGUFType = .q2_0) {
-        var a = GemvArgs(woff: weightOff.local, K: UInt32(nEmbd), M: UInt32(N))
+        var a = EmbedArgs(woff: weightOff.local, K: UInt32(nEmbd),
+                          M: UInt32(N),
+                          rowBytes: UInt32(GGUF.rowByteCount(type, nEmbd)))
         let name: String
         switch type {
         case .q2_0: name = "embed_batch"
         case .q2_x: name = "q2_x_embed_batch"
+        case .q4_0: name = "q4_0_embed_batch"
+        case .q8_0: name = "q8_0_embed_batch"
+        case .bf16: name = "bf16_embed_batch"
+        case .f16: name = "f16_embed_batch"
+        case .f32: name = "f32_embed_batch"
         default:
             fatalError("MetalEnc.embedBatch: no kernel for \(type)")
         }
@@ -769,7 +784,7 @@ struct MetalEnc {
             e.setBuffer(weightOff.buf, offset: 0, index: 0)
             e.setBuffer(ids, offset: 0, index: 1)
             e.setBuffer(out, offset: 0, index: 2)
-            e.setBytes(&a, length: MemoryLayout<GemvArgs>.stride, index: 3)
+            e.setBytes(&a, length: MemoryLayout<EmbedArgs>.stride, index: 3)
         }
     }
 
@@ -1159,6 +1174,9 @@ struct AttnBatchArgs {
     var hd: UInt32; var nH: UInt32; var nKV: UInt32; var kvDim: UInt32
     var P: UInt32; var scale: Float; var basePos: UInt32; var N: UInt32
     var gated: UInt32; var window: UInt32
+}
+struct EmbedArgs {
+    var woff: UInt64; var K: UInt32; var M: UInt32; var rowBytes: UInt32
 }
 struct F16WArgs { var K: UInt32; var M: UInt32 }
 struct LNArgs { var n: UInt32; var eps: Float }

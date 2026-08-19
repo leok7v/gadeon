@@ -201,6 +201,77 @@ kernel void q2_x_gemv(
     }
 }
 
+// Q2_E8: QuIP#'s padded-E8 codebook. SoA within a row -- nblk fp16 scales,
+// then nblk groups of 16 uint16 codes -- 34 bytes per 128 weights, byte for
+// byte the Q2_X block.
+//
+// One code covers 8 weights: 8 bits of table entry, 7 sign bits, 1 bit for a
+// +-1/4 offset. Coordinate 7's sign is NOT stored -- it is forced so the total
+// flip count matches the entry's parity, which is what makes 7 bits cover 8
+// signs. The parity itself needs no second table: every entry is eight
+// half-integers with numerator 2b+1, so sum(numerators)/2 = sum(b) + 4 and the
+// entry wants an even flip count exactly when popcount(t & 0x5555) is even.
+//
+// The offset folds into the activation sum the same way Q2_X's -3*sy does:
+//   dot = sum_i (+-s_i * x_i) + shift * sum_i x_i
+kernel void q2_e8_gemv(
+        device const uchar  * weights [[buffer(0)]],
+        device const float  * x       [[buffer(1)]],
+        device       float  * out     [[buffer(2)]],
+        constant GemvArgs   & a       [[buffer(3)]],
+        device const ushort * tab     [[buffer(4)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint NR0 = 8;
+    const uint row0 = tgpig.x * NR0;
+    const uint nblk = a.K / 128;
+    const ushort TPB = 8, SW = 16, STEP = 32 / TPB;
+    const ulong rowBytes = (ulong) nblk * 34;
+    device const uchar * W = weights + a.woff;
+    const ushort grp = tiisg / TPB;
+    const ushort il  = (tiisg % TPB) * SW;
+    const ushort v0  = il / 8;
+    float acc[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (uint ib = grp; ib < nblk; ib += STEP) {
+        device const float * y = x + (ulong) ib * 128 + il;
+        float yl[16];
+        float sy0 = 0.0f, sy1 = 0.0f;
+        for (ushort i = 0; i < 8; i++)  { yl[i] = y[i]; sy0 += y[i]; }
+        for (ushort i = 8; i < 16; i++) { yl[i] = y[i]; sy1 += y[i]; }
+        for (uint r = 0; r < NR0; r++) {
+            const uint row = row0 + r;
+            if (row < a.M) {
+                device const uchar * rp = W + row * rowBytes;
+                const float d =
+                    (float) (*(device const half *) (rp + (ulong) ib * 2));
+                device const ushort * cs = (device const ushort *)
+                    (rp + (ulong) nblk * 2 + (ulong) ib * 32);
+                float dot = 0.0f;
+                for (ushort u = 0; u < 2; u++) {
+                    const ushort code = cs[v0 + u];
+                    const ushort t   = tab[code & 0xFF];
+                    const ushort sgn = (code >> 8) & 0x7F;
+                    const float  sh  = (code & 0x8000) ? -0.25f : 0.25f;
+                    const ushort pe  = popcount((ushort) (t & 0x5555)) & 1;
+                    const bool   f7  = ((popcount(sgn) & 1) != pe);
+                    float sub = 0.0f;
+                    for (ushort i = 0; i < 8; i++) {
+                        const float sv = (float) ((t >> (2 * i)) & 3) + 0.5f;
+                        const bool neg = (i < 7) ? (((sgn >> i) & 1) != 0) : f7;
+                        sub += (neg ? -sv : sv) * yl[u * 8 + i];
+                    }
+                    dot += sub + sh * (u == 0 ? sy0 : sy1);
+                }
+                acc[r] += d * dot;
+            }
+        }
+    }
+    for (uint r = 0; r < NR0; r++) {
+        const float s = simd_sum(acc[r]);
+        if (tiisg == 0 && row0 + r < a.M) { out[row0 + r] = s; }
+    }
+}
+
 kernel void q2_x_gemv_un4(
         device const uchar * weights [[buffer(0)]],
         device const float * x       [[buffer(1)]],
@@ -274,6 +345,74 @@ kernel void q2_x_gemv_un4(
                     if (c & 2) { hi += yl[i]; }
                 }
                 acc[r] += d * (2.0f * lo + 4.0f * hi - 3.0f * sy);
+            }
+        }
+    }
+    for (uint r = 0; r < NR0; r++) {
+        const float s = simd_sum(acc[r]);
+        if (tiisg == 0 && row0 + r < a.M) { out[row0 + r] = s; }
+    }
+}
+
+kernel void q2_x_gemv_alu0(
+        device const uchar * weights [[buffer(0)]],
+        device const float * x       [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant GemvArgs  & a       [[buffer(3)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint NR0 = 8;
+    const uint row0 = tgpig.x * NR0;
+    const uint nblk = a.K / 128;
+    const ushort TPB = 8, SW = 16, STEP = 32 / TPB;
+    const ulong rowBytes = (ulong) nblk * 34;
+    device const uchar * W = weights + a.woff;
+    const ushort grp = tiisg / TPB;
+    const ushort il  = (tiisg % TPB) * SW;
+    float acc[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    uint ib = grp;
+    for (; ib + STEP < nblk; ib += 2 * STEP) {
+        const uint ib0 = ib, ib1 = ib + STEP;
+        device const float * y0 = x + (ulong) ib0 * 128 + il;
+        device const float * y1 = x + (ulong) ib1 * 128 + il;
+        float sy0 = 0.0f, sy1 = 0.0f;
+        for (ushort i = 0; i < SW; i++) {
+            sy0 += y0[i];
+            sy1 += y1[i];
+        }
+        for (uint r = 0; r < NR0; r++) {
+            const uint row = row0 + r;
+            if (row < a.M) {
+                device const uchar * b0 =
+                    W + row * rowBytes + (ulong) ib0 * 34;
+                device const uchar * b1 =
+                    W + row * rowBytes + (ulong) ib1 * 34;
+                const float d0 = (float) (*(device const half *) b0);
+                const float d1 = (float) (*(device const half *) b1);
+                device const uchar * q0 = b0 + 2 + il / 4;
+                device const uchar * q1 = b1 + 2 + il / 4;
+                float s0 = 0.0f, s1 = 0.0f;
+                for (ushort i = 0; i < SW / 4; i++) {
+                    s0 += (float) q0[i];
+                    s1 += (float) q1[i];
+                }
+                acc[r] += d0 * (s0 + sy0) + d1 * (s1 + sy1);
+            }
+        }
+    }
+    for (; ib < nblk; ib += STEP) {
+        device const float * y = x + (ulong) ib * 128 + il;
+        float sy = 0.0f;
+        for (ushort i = 0; i < SW; i++) { sy += y[i]; }
+        for (uint r = 0; r < NR0; r++) {
+            const uint row = row0 + r;
+            if (row < a.M) {
+                device const uchar * bp = W + row * rowBytes + (ulong) ib * 34;
+                const float d = (float) (*(device const half *) bp);
+                device const uchar * qs = bp + 2 + il / 4;
+                float s = 0.0f;
+                for (ushort i = 0; i < SW / 4; i++) { s += (float) qs[i]; }
+                acc[r] += d * (s + sy);
             }
         }
     }
@@ -875,6 +1014,36 @@ kernel void q8_0_dequant_row(
     }
 }
 
+kernel void bf16_dequant_row(
+        device const uchar * weights [[buffer(0)]],
+        device       float * out     [[buffer(1)]],
+        constant GemvArgs  & a       [[buffer(2)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.K) {
+        out[gid] = bf16_at(weights + a.woff, gid);
+    }
+}
+
+kernel void f16_dequant_row(
+        device const uchar * weights [[buffer(0)]],
+        device       float * out     [[buffer(1)]],
+        constant GemvArgs  & a       [[buffer(2)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.K) {
+        out[gid] = (float) ((device const half *) (weights + a.woff))[gid];
+    }
+}
+
+kernel void f32_dequant_row(
+        device const uchar * weights [[buffer(0)]],
+        device       float * out     [[buffer(1)]],
+        constant GemvArgs  & a       [[buffer(2)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.K) {
+        out[gid] = ((device const float *) (weights + a.woff))[gid];
+    }
+}
+
 // dense mat-vec for the weights the QAT left unquantized
 // modules_to_not_convert keeps a handful of matrices at full width, and the
 // per-layer model projection is the big one (13.7 M weights). One simdgroup
@@ -899,6 +1068,34 @@ kernel void bf16_gemv(
             float s = 0.0f;
             for (uint k = tiisg; k < a.K; k += 32) {
                 s += bf16_at(rp, k) * x[k];
+            }
+            acc[r] = s;
+        }
+    }
+    for (uint r = 0; r < NR0; r++) {
+        const float s = simd_sum(acc[r]);
+        if (tiisg == 0 && row0 + r < a.M) { out[row0 + r] = s; }
+    }
+}
+
+kernel void f16_gemv(
+        device const uchar * weights [[buffer(0)]],
+        device const float * x       [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant GemvArgs  & a       [[buffer(3)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint NR0 = 8;
+    const uint row0 = tgpig.x * NR0;
+    device const half * W = (device const half *) (weights + a.woff);
+    float acc[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (uint r = 0; r < NR0; r++) {
+        const uint row = row0 + r;
+        if (row < a.M) {
+            device const half * rp = W + (ulong) row * a.K;
+            float s = 0.0f;
+            for (uint k = tiisg; k < a.K; k += 32) {
+                s += (float) rp[k] * x[k];
             }
             acc[r] = s;
         }
@@ -1738,19 +1935,20 @@ kernel void kv_append(
 // scan) and gridding N for the parallel ones.
 
 // embed_batch: dequant N token-embedding rows. woff = token_embd base, K =
-// nEmbd, M = N. grid = N*nEmbd.
+// nEmbd, M = N, rowBytes = this tensor type's row stride. [embed-stride]
+struct EmbedArgs { ulong woff; uint K; uint M; uint rowBytes; };
+
 kernel void embed_batch(
         device const uchar * weights [[buffer(0)]],
         device const int   * ids     [[buffer(1)]],
         device       float * out     [[buffer(2)]],
-        constant GemvArgs  & a       [[buffer(3)]],
+        constant EmbedArgs & a       [[buffer(3)]],
         uint gid [[thread_position_in_grid]]) {
     if (gid < a.M * a.K) {
         const uint n = gid / a.K;
         const uint k = gid % a.K;
-        const uint rowBytes = a.K / 128 * 34;
         device const uchar * bp = weights + a.woff
-            + (ulong) ids[n] * rowBytes + (ulong) (k / 128) * 34;
+            + (ulong) ids[n] * a.rowBytes + (ulong) (k / 128) * 34;
         const float d = (float) (*(device const half *) bp);
         const uint j = k % 128;
         const uchar code = (bp[2 + j / 4] >> ((j & 3) * 2)) & 3;
@@ -1762,18 +1960,98 @@ kernel void q2_x_embed_batch(
         device const uchar * weights [[buffer(0)]],
         device const int   * ids     [[buffer(1)]],
         device       float * out     [[buffer(2)]],
-        constant GemvArgs  & a       [[buffer(3)]],
+        constant EmbedArgs & a       [[buffer(3)]],
         uint gid [[thread_position_in_grid]]) {
     if (gid < a.M * a.K) {
         const uint n = gid / a.K;
         const uint k = gid % a.K;
-        const uint rowBytes = a.K / 128 * 34;
         device const uchar * bp = weights + a.woff
-            + (ulong) ids[n] * rowBytes + (ulong) (k / 128) * 34;
+            + (ulong) ids[n] * a.rowBytes + (ulong) (k / 128) * 34;
         const float d = (float) (*(device const half *) bp);
         const uint j = k % 128;
         const uchar code = (bp[2 + j / 4] >> ((j & 3) * 2)) & 3;
         out[gid] = (float) (2 * (int) code - 3) * d;
+    }
+}
+
+kernel void q4_0_embed_batch(
+        device const uchar * weights [[buffer(0)]],
+        device const int   * ids     [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant EmbedArgs & a       [[buffer(3)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.M * a.K) {
+        const uint n = gid / a.K;
+        const uint k = gid % a.K;
+        device const uchar * bp = weights + a.woff
+            + (ulong) ids[n] * a.rowBytes + (ulong) (k / 32) * 18;
+        const float d = (float) (*(device const half *) bp);
+        const uint j = k % 32;
+        const uchar b = bp[2 + (j % 16)];
+        const uchar code = (j < 16) ? (b & 0x0F) : (b >> 4);
+        out[gid] = ((float) code - 8.0f) * d;
+    }
+}
+
+kernel void q8_0_embed_batch(
+        device const uchar * weights [[buffer(0)]],
+        device const int   * ids     [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant EmbedArgs & a       [[buffer(3)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.M * a.K) {
+        const uint n = gid / a.K;
+        const uint k = gid % a.K;
+        device const uchar * bp = weights + a.woff
+            + (ulong) ids[n] * a.rowBytes + (ulong) (k / 32) * 34;
+        const float d = (float) (*(device const half *) bp);
+        const char q = ((device const char *) (bp + 2))[k % 32];
+        out[gid] = (float) q * d;
+    }
+}
+
+kernel void bf16_embed_batch(
+        device const uchar * weights [[buffer(0)]],
+        device const int   * ids     [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant EmbedArgs & a       [[buffer(3)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.M * a.K) {
+        const uint n = gid / a.K;
+        const uint k = gid % a.K;
+        device const uchar * rp = weights + a.woff
+            + (ulong) ids[n] * a.rowBytes;
+        out[gid] = bf16_at(rp, k);
+    }
+}
+
+kernel void f16_embed_batch(
+        device const uchar * weights [[buffer(0)]],
+        device const int   * ids     [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant EmbedArgs & a       [[buffer(3)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.M * a.K) {
+        const uint n = gid / a.K;
+        const uint k = gid % a.K;
+        device const uchar * rp = weights + a.woff
+            + (ulong) ids[n] * a.rowBytes;
+        out[gid] = (float) ((device const half *) rp)[k];
+    }
+}
+
+kernel void f32_embed_batch(
+        device const uchar * weights [[buffer(0)]],
+        device const int   * ids     [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant EmbedArgs & a       [[buffer(3)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.M * a.K) {
+        const uint n = gid / a.K;
+        const uint k = gid % a.K;
+        device const uchar * rp = weights + a.woff
+            + (ulong) ids[n] * a.rowBytes;
+        out[gid] = ((device const float *) rp)[k];
     }
 }
 
@@ -2794,6 +3072,19 @@ Activation and state buffers are shared-storage f32 (unified memory), and all
 dispatches for one token ride ONE command encoder -- so Metal's hazard
 tracking serializes the dependent steps and scratch is safely reused across
 layers.
+
+### [embed-stride]  why the embedding kernels are handed their row stride
+
+Every other kernel is given a byte offset that already points at the row it
+must read, so it never needs to know how wide a row is. The embedding gathers
+are the exception: they index by token id, so the stride is theirs to apply.
+
+It used to be the literal `a.K / 128 * 34`, which is right for exactly the two
+2-bit types and silently wrong for every other. A token_embd of any other type
+then read from the wrong offset and returned a plausible-looking garbage row.
+So the stride now arrives in EmbedArgs from GGUF.rowByteCount, the same
+function the reader sizes tensors with, and adding a type is a switch arm
+rather than a constant to notice.
 
 ### [gemv-unroll]  why `q2_0_gemv` looks hand-rolled
 

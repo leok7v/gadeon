@@ -202,6 +202,7 @@ func runLongDoc(_ user: String) async throws {
     }
     // Metal backend bring-up: diff each GPU kernel against the SIMD reference
     // on the loaded model, then exit. No chat -- correctness only.
+    if rawArgs.contains("--ppl") { try runPerplexity(arg1, rawArgs) }
     if rawArgs.contains("--metal-selftest") {
         err("Metal self-test on \(arg1)...\n")
         print(try MetalSelfTest.run(ggufPath: arg1))
@@ -298,6 +299,7 @@ func runLongDoc(_ user: String) async throws {
         let ids = chat.tokenizer.encode(text, addSpecial: true)
         chat.engine.reset()
         chat.engine.collectHessians(from: lo, upto: up)
+        chat.engine.collectImatrix()
         let t0 = Date()
         for id in ids {
             _ = chat.engine.decode(id)
@@ -305,6 +307,12 @@ func runLongDoc(_ user: String) async throws {
         for name in chat.engine.hessianNames() {
             try chat.engine.hessianBytes(name)
                 .write(to: URL(fileURLWithPath: dir + "/" + name + ".h32"))
+        }
+        for (name, v) in chat.engine.imatrixSums() {
+            v.withUnsafeBytes { raw in
+                try? Data(raw).write(to: URL(
+                    fileURLWithPath: dir + "/" + name + ".bin"))
+            }
         }
         err(String(format: "[hess] %d tokens, layers %d..%d, %.0fs -> %@\n",
                    ids.count, lo, up, Date().timeIntervalSince(t0), dir))
@@ -341,8 +349,18 @@ func runLongDoc(_ user: String) async throws {
         try FileManager.default.createDirectory(
             atPath: dir, withIntermediateDirectories: true)
         let chat = try MetalChat(ggufPath: arg1)
-        let ids = chat.tokenizer.encode(
-            probeWrap(turnArgs.first ?? "What is 2+2?"), addSpecial: true)
+        let text = ti + 2 < rawArgs.count ? rawArgs[ti + 2]
+            : (turnArgs.first ?? "What is 2+2?")
+        var ids: [Int32] = []
+        if text.hasPrefix("@") {
+            let raw = (try? String(contentsOfFile: String(text.dropFirst()),
+                                   encoding: .utf8)) ?? ""
+            ids = raw.split(whereSeparator: { c in c == "," || c.isWhitespace })
+                .compactMap { s in Int32(s) }
+        } else {
+            ids = chat.tokenizer.encode(probeWrap(text), addSpecial: true)
+        }
+        err("[tap] \(ids.count) ids, first \(ids.prefix(8))\n")
         chat.engine.reset()
         for id in ids.dropLast() {
             _ = chat.engine.decode(id)

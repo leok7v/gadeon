@@ -208,6 +208,57 @@ public final class MetalEngine {
         return out
     }
 
+    public func chunkCost(_ ids: [Int32], from first: Int,
+                          want: (Int, Int32, UnsafePointer<Float>) -> Void) {
+        let c = cfg
+        let n = ids.count
+        reset()
+        let b = BatchScratch(ctx: ctx, cfg: c, N: n)
+        let idsBuf = ctx.device.makeBuffer(length: n * 4,
+                                           options: .storageModeShared)!
+        idsBuf.contents().withMemoryRebound(to: Int32.self, capacity: n) { p in
+            for k in 0..<n { p[k] = ids[k] }
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        let f = MetalEnc(ctx: ctx, e: e)
+        f.embedBatch(ids: idsBuf, weightOff: off(model.tokEmbd), out: b.x,
+                     nEmbd: c.nEmbd, N: n, type: model.tokEmbd.type)
+        encodeChunk(f, b, N: n, basePos: 0, pos3: nil, head: false)
+        e.endEncoding()
+        commitTimed(cb, "ppl.trunk")
+        let sub = 64
+        let hidden = ctx.makeF32(sub * c.nEmbd)
+        let logits = ctx.makeF32(sub * c.nVocab)
+        var at = max(first - 1, 0)
+        while at < n - 1 {
+            let span = min(sub, n - 1 - at)
+            let src = b.normed.contents()
+                .advanced(by: at * c.nEmbd * MemoryLayout<Float>.stride)
+            memcpy(hidden.contents(), src,
+                   span * c.nEmbd * MemoryLayout<Float>.stride)
+            let hb = ctx.queue.makeCommandBuffer()!
+            let he = hb.makeComputeCommandEncoder()!
+            MetalEnc(ctx: ctx, e: he).gemm(model.output, X: hidden,
+                                           out: logits,
+                                           off: off(model.output), N: span)
+            he.endEncoding()
+            commitTimed(hb, "ppl.head")
+            let lp = logits.contents().assumingMemoryBound(to: Float.self)
+            for j in 0..<span {
+                want(at + j, ids[at + j + 1], lp + j * c.nVocab)
+            }
+            at += span
+        }
+        pos += n
+    }
+
+    public func step(_ token: Int32) -> [Float] {
+        let out = forwardLogits(token: Int(token), pos: pos)
+        pos += 1
+        return out
+    }
+
     public func decode(_ token: Int32) -> Int32 {
         let out = pick(forwardLogits(token: Int(token), pos: pos))
         pos += 1
@@ -262,7 +313,8 @@ public final class MetalEngine {
     // (sequential 1D rope at basePos + ropeShift); non-nil = per-token 3D
     // M-RoPE positions (an image span in the chunk).
     private func encodeChunk(_ f: MetalEnc, _ b: BatchScratch, N: Int,
-                             basePos: Int, pos3: MTLBuffer?) {
+                             basePos: Int, pos3: MTLBuffer?,
+                             head: Bool = true) {
         let c = cfg
         for il in 0..<c.nLayer {
             let L = model.layers[il]
@@ -290,10 +342,11 @@ public final class MetalEngine {
         }
         f.rmsnormBatch(x: b.x, weightOff: off(model.outputNorm),
                        y: b.normed, n: c.nEmbd, rows: N, eps: c.eps)
-        // last token's logits only (bind its hidden slice)
-        f.gemv(model.output, x: b.normed, out: bLogits,
-               off: off(model.output),
-               xOff: (N - 1) * c.nEmbd * MemoryLayout<Float>.stride)
+        if head {
+            f.gemv(model.output, x: b.normed, out: bLogits,
+                   off: off(model.output),
+                   xOff: (N - 1) * c.nEmbd * MemoryLayout<Float>.stride)
+        }
     }
 
     // Vision prefill onto the CURRENT state: `feats` are the tower's merged
@@ -319,7 +372,6 @@ public final class MetalEngine {
         let b = BatchScratch(ctx: ctx, cfg: c, N: capN)
         let pos3Buf = ctx.device.makeBuffer(length: capN * 3 * 4,
                                             options: .storageModeShared)!
-        let rowBytes = c.nEmbd / 128 * 34
         var out: Int32 = 0
         var i = 0
         while i < ids.count && !stopSignal.raisedNow {
@@ -340,9 +392,8 @@ public final class MetalEngine {
                                    c.nEmbd * 4)
                     }
                 } else {
-                    Q2_0.dequant(
-                        model.tokEmbd.base + Int(ids[g]) * rowBytes,
-                        count: c.nEmbd, into: xp + k * c.nEmbd)
+                    QB.dequant(model.tokEmbd, row: Int(ids[g]),
+                               count: c.nEmbd, into: xp + k * c.nEmbd)
                 }
             }
             let pp = pos3Buf.contents().assumingMemoryBound(to: Int32.self)
@@ -657,7 +708,7 @@ public final class MetalEngine {
     // decoded token costs ONE dispatch stream + ONE GPU sync, not two.
     private func encodeForward(_ f: MetalEnc, token: Int, pos: Int) {
         let c = cfg
-        let rowBytes = c.nEmbd / 128 * 34
+        let rowBytes = GGUF.rowByteCount(model.tokEmbd.type, c.nEmbd)
         f.dequantRow(weightOff: off(model.tokEmbd) + UInt64(token * rowBytes),
                      out: bx, n: c.nEmbd, type: model.tokEmbd.type)
         for il in 0..<min(c.nLayer, maxLayers) {
@@ -703,11 +754,22 @@ public final class MetalEngine {
 
     private var hessian: [String: MTLBuffer] = [:]
 
+    static let wideHessian =
+        ProcessInfo.processInfo.environment["LLM_HESS_WIDE"] == "1"
+
     public func collectHessians(from lo: Int, upto hi: Int) {
-        for il in lo..<min(hi, cfg.nLayer) {
-            for site in ["in", "post"] {
+        let c = cfg
+        for il in lo..<min(hi, c.nLayer) {
+            var sites = ["in": c.nEmbd, "post": c.nEmbd]
+            if MetalEngine.wideHessian { sites["ffn_down"] = c.nFF }
+            if c.isRecurrent(il) {
+                sites["ssm_out"] = c.valueDim
+            } else {
+                sites["attn_out"] = c.headDim * c.nHead
+            }
+            for (site, n) in sites {
                 let b = ctx.device.makeBuffer(
-                    length: cfg.nEmbd * cfg.nEmbd * MemoryLayout<Float>.stride,
+                    length: n * n * MemoryLayout<Float>.stride,
                     options: .storageModeShared)!
                 memset(b.contents(), 0, b.length)
                 hessian["l\(il).\(site)"] = b
@@ -749,7 +811,7 @@ public final class MetalEngine {
 
     public func tapLayers(token: Int) -> [[Float]] {
         let c = cfg
-        let rowBytes = c.nEmbd / 128 * 34
+        let rowBytes = GGUF.rowByteCount(model.tokEmbd.type, c.nEmbd)
         var out: [[Float]] = []
         let cb0 = ctx.queue.makeCommandBuffer()!
         let e0 = cb0.makeComputeCommandEncoder()!

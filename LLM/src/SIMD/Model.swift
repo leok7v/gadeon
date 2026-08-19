@@ -42,7 +42,12 @@ public struct BonsaiConfig {
         func i(_ k: String) -> Int { g.int("\(arch)." + k)! }
         nEmbd = i("embedding_length")
         nFF = i("feed_forward_length")
-        nLayer = i("block_count")
+        let declared = i("block_count")
+        let nextn = g.int("\(arch).nextn_predict_layers") ?? 0
+        let last = declared - nextn
+        nLayer = nextn > 0
+            && g.maybe("blk.\(last).nextn.eh_proj.weight") != nil
+            ? last : declared
         nHead = i("attention.head_count")
         nHeadKV = i("attention.head_count_kv")
         headDim = i("attention.key_length")

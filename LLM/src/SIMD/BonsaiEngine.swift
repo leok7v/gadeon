@@ -133,12 +133,10 @@ public final class BonsaiEngine {
         for (il, s) in b.kv { kvc[il]!.restore(s) }
     }
 
-    // embedding row for a token id (tok_embd is Q2_0, ne0 = nEmbd)
     func embed(_ token: Int) -> [Float] {
         var out = [Float](repeating: 0, count: cfg.nEmbd)
-        let rowBytes = cfg.nEmbd / Q2_0.qk * Q2_0.blockBytes
         out.withUnsafeMutableBufferPointer { ob in
-            QB.dequant(model.tokEmbd, at: token * rowBytes, count: cfg.nEmbd,
+            QB.dequant(model.tokEmbd, row: token, count: cfg.nEmbd,
                        into: ob.baseAddress!)
         }
         return out
