@@ -416,8 +416,7 @@ import UniformTypeIdentifiers
     }
 
     private static func visionMode(for name: String) -> VisionMode {
-        let def: VisionMode = ["QwenPaw-Flash-9B", "Ternary-Bonsai-27B",
-                               "Qwen3.8-27B-Q2_X"]
+        let def: VisionMode = ["QwenPaw-Flash-9B", "Ternary-Bonsai-27B"]
             .contains(name) ? .fit : .tile
         let raw = UserDefaults.standard.string(forKey: visionKey(name)) ?? ""
         return VisionMode(rawValue: raw) ?? def

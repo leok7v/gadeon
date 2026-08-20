@@ -254,7 +254,7 @@ public final class MetalContext {
     static let matrixKernels: Set<String> = [
         "q2_0_gemm", "q2_0_gemm_mm", "q2_0_gemm_mm_h", "q8_0_gemm_mm_h",
         "q4_0_gemm_mm_h", "q8_0_gemm_mm", "q4_0_gemm_mm",
-        "q2_x_gemm_mm", "q2_x_gemm_mm_h",
+        "q2_e8_gemm_mm", "q2_e8_gemm_mm_h",
         "f16w_gemm_mm", "attn_batch_mm",
     ]
 

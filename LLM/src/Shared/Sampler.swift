@@ -283,22 +283,34 @@ public struct SamplingPresets: Sendable {
 
     public static func from(generationConfig url: URL) throws
         -> SamplingPresets? {
-        let data = try Data(contentsOf: url)
-        let obj = try JSONSerialization.jsonObject(with: data)
-        let row = SamplerConfig.row(obj, base: .default)
-        var result: SamplingPresets? = row.setMask.isEmpty ? nil : uniform(row)
-        if let dict = obj as? [String: Any],
-           let p = dict["_sampling_presets"] as? [String: Any] {
-            result = from(presets: p, base: uniform(row))
+        from(generationConfigText: String(
+            data: try Data(contentsOf: url), encoding: .utf8))
+    }
+
+    // The same parse whether the JSON arrived as a file beside the weights or
+    // as text inside them, so `_sampling_presets` nesting is handled once.
+    static func from(generationConfigText text: String?) -> SamplingPresets? {
+        var result: SamplingPresets? = nil
+        if let text, let data = text.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) {
+            let row = SamplerConfig.row(obj, base: .default)
+            result = row.setMask.isEmpty ? nil : uniform(row)
+            if let dict = obj as? [String: Any],
+               let p = dict["_sampling_presets"] as? [String: Any] {
+                result = from(presets: p, base: uniform(row))
+            }
         }
         return result
     }
 
     static func require(gguf g: GGUF, path: String) -> SamplingPresets {
         let dir = URL(fileURLWithPath: path).deletingLastPathComponent()
-        var out = try? from(
-            generationConfig: dir.appendingPathComponent(
+        var out = from(generationConfigText:
+            g.string(Tokenizer.generationConfigKey))
+        if out == nil {
+            out = try? from(generationConfig: dir.appendingPathComponent(
                 "generation_config.json"))
+        }
         if out == nil { out = from(gguf: g) }
         if out == nil {
             fatalError("\(path) suggests no sampling: emit "

@@ -85,6 +85,20 @@ public final class MetalEngine {
     private var gdnRec: [Int: MTLBuffer] = [:]    // [nV*dS*dS]
     private var kvPool: [Int: MetalKVPool] = [:]  // lazy paged KV per attn layer
 
+    private var mtp: MetalMTP?
+    private var specN = 2
+    private var bSpecPrev: MTLBuffer?
+    private var specBatch: BatchScratch?
+    private var specLogits: MTLBuffer?
+    private var specIds: MTLBuffer?
+    private var specPick: MTLBuffer?
+    // The GDN rollback ring: `recSlots` copies of every recurrent layer's
+    // state, `recSlot` naming the live one. A verify pass writes the state
+    // after each token into the next slots, so accepting m is `recSlot += m`
+    // and rejecting costs nothing at all. [gdn-ring]
+    private var recSlots = 1
+    private var recSlot = 0
+
     // Reusable activation scratch (sized to the largest layer need).
     private let bx, bNormed, bContrib: MTLBuffer
     private let bQkv, bConvOut, bZ, bO: MTLBuffer
@@ -140,6 +154,8 @@ public final class MetalEngine {
         for (_, b) in gdnConv { memset(b.contents(), 0, b.length) }
         for (_, b) in gdnRec { memset(b.contents(), 0, b.length) }
         for (_, p) in kvPool { p.truncate(to: 0) }
+        recSlot = 0
+        mtp?.reset()
     }
 
     private func off(_ t: GGUFTensor) -> WeightRef {
@@ -314,14 +330,15 @@ public final class MetalEngine {
     // M-RoPE positions (an image span in the chunk).
     private func encodeChunk(_ f: MetalEnc, _ b: BatchScratch, N: Int,
                              basePos: Int, pos3: MTLBuffer?,
-                             head: Bool = true) {
+                             head: Bool = true,
+                             ring: StateRing = .inPlace) {
         let c = cfg
         for il in 0..<c.nLayer {
             let L = model.layers[il]
             f.rmsnormBatch(x: b.x, weightOff: off(L.attnNorm), y: b.normed,
                            n: c.nEmbd, rows: N, eps: c.eps)
             if L.recurrent {
-                gdnBatch(f, L, il, b, N: N)
+                gdnBatch(f, L, il, b, N: N, ring: ring)
             } else {
                 attnBatchLayer(f, L, il, b, N: N, basePos: basePos,
                                pos3: pos3)
@@ -417,10 +434,15 @@ public final class MetalEngine {
     }
 
     private func gdnBatch(_ f: MetalEnc, _ L: BonsaiLayer, _ il: Int,
-                          _ b: BatchScratch, N: Int) {
+                          _ b: BatchScratch, N: Int,
+                          ring: StateRing = .inPlace) {
         let c = cfg
+        let qkv = b.qkv
+        let convOut = b.convOut
+        let gate = b.g
+        let beta = b.beta
         if !MetalEngine.skip.contains("proj") {
-            f.gemm(L.wqkv!, X: b.normed, out: b.qkv, off: off(L.wqkv!), N: N)
+            f.gemm(L.wqkv!, X: b.normed, out: qkv, off: off(L.wqkv!), N: N)
             f.gemm(L.wqkvGate!, X: b.normed, out: b.z, off: off(L.wqkvGate!),
                    N: N)
             f.gemm(L.ssmBeta!, X: b.normed, out: b.betaPre, off: off(L.ssmBeta!),
@@ -429,24 +451,25 @@ public final class MetalEngine {
                    off: off(L.ssmAlpha!), N: N)
         }
         f.gdnGate(bPre: b.betaPre, aPre: b.alphaPre, dtOff: off(L.ssmDt!),
-                  aOff: off(L.ssmA!), beta: b.beta, g: b.g, nV: c.nVHead,
+                  aOff: off(L.ssmA!), beta: beta, g: gate, nV: c.nVHead,
                   count: N * c.nVHead)
-        f.gdnConvBatch(qkvMixN: b.qkv, convState: gdnConv[il]!,
-                       cwOff: off(L.ssmConv1d!), outN: b.convOut,
-                       convDim: c.convDim, dConv: c.dConv, N: N)
+        f.gdnConvBatch(qkvMixN: qkv, convState: gdnConv[il]!,
+                       cwOff: off(L.ssmConv1d!), outN: convOut,
+                       convDim: c.convDim, dConv: c.dConv, N: N, ring: ring)
         // L2-norm q and k per head for all N tokens in ONE dispatch: within a
         // token, q|k are the contiguous first 2*keyDim of convOut (= 2*nKHead
         // rows of dState based at n*convDim; v follows, untouched). Batching
         // replaces the 2*N tiny per-token dispatches that made prefill
         // CPU-bound.
-        f.l2normRowsBatch(x: b.convOut, d: c.dState, rowsPerTok: 2 * c.nKHead,
+        f.l2normRowsBatch(x: convOut, d: c.dState, rowsPerTok: 2 * c.nKHead,
                           tokStride: c.convDim, tokens: N, eps: c.eps)
         let qScale = 1 / Float(c.dState).squareRoot()
         if !MetalEngine.skip.contains("scan") {
-            f.gdnScanBatch(convOutN: b.convOut, keyDim: c.keyDim,
-                           valueDim: c.valueDim, convDim: c.convDim, gN: b.g,
-                           betaN: b.beta, S: gdnRec[il]!, oN: b.o, nV: c.nVHead,
-                           nK: c.nKHead, dS: c.dState, qScale: qScale, N: N)
+            f.gdnScanBatch(convOutN: convOut, keyDim: c.keyDim,
+                           valueDim: c.valueDim, convDim: c.convDim, gN: gate,
+                           betaN: beta, S: gdnRec[il]!, oN: b.o, nV: c.nVHead,
+                           nK: c.nKHead, dS: c.dState, qScale: qScale, N: N,
+                           ring: ring)
         }
         f.rmsnormRows(x: b.o, xoff: 0, d: c.dState, rows: N * c.nVHead,
                       weightOff: off(L.ssmNorm!), eps: c.eps)
@@ -511,6 +534,7 @@ public final class MetalEngine {
     public struct Bookmark: @unchecked Sendable {
         let pos: Int
         let ropeShift: Int
+        let recSlot: Int
         let conv: [Int: [Float]]
         let rec: [Int: [Float]]
         let kv: [Int: MetalKVPool.Snapshot]
@@ -522,13 +546,14 @@ public final class MetalEngine {
         for (il, b) in gdnConv { conv[il] = Array(b.f32(b.length / 4)) }
         for (il, b) in gdnRec { rec[il] = Array(b.f32(b.length / 4)) }
         for (il, p) in kvPool { kv[il] = p.snapshot() }
-        return Bookmark(pos: pos, ropeShift: ropeShift, conv: conv, rec: rec,
-                        kv: kv)
+        return Bookmark(pos: pos, ropeShift: ropeShift, recSlot: recSlot,
+                        conv: conv, rec: rec, kv: kv)
     }
 
     public func restore(_ b: Bookmark) {
         pos = b.pos
         ropeShift = b.ropeShift
+        recSlot = b.recSlot
         for (il, a) in b.conv { copyIn(a, gdnConv[il]!) }
         for (il, a) in b.rec { copyIn(a, gdnRec[il]!) }
         for (il, s) in b.kv { kvPool[il]!.restore(s) }
@@ -588,8 +613,8 @@ public final class MetalEngine {
                                           vPages: pages(from: v, len: len),
                                           len: len)
         }
-        return Bookmark(pos: pos, ropeShift: ropeShift, conv: conv, rec: rec,
-                        kv: kv)
+        return Bookmark(pos: pos, ropeShift: ropeShift, recSlot: recSlot,
+                        conv: conv, rec: rec, kv: kv)
     }
 
     // The used span of a page list as one contiguous [len * kvDim] array. The
@@ -671,6 +696,17 @@ public final class MetalEngine {
         a.withUnsafeBytes { raw in
             _ = memcpy(b.contents(), raw.baseAddress!, raw.count)
         }
+    }
+
+    // A greedy turn already has its answer from argmax_rows, so the row never
+    // crosses to the host; a sampled one needs the whole distribution.
+    private func pickRow(_ row: UnsafePointer<Float>, gpu: Int32) -> Int32 {
+        var out = gpu
+        if sampler != nil {
+            out = pick(Array(UnsafeBufferPointer(start: row,
+                                                 count: cfg.nVocab)))
+        }
+        return out
     }
 
     func pick(_ logits: [Float]) -> Int32 {
@@ -945,6 +981,163 @@ public final class MetalEngine {
         f.gemv(L.wo!, x: bAttnOut, out: bContrib, off: off(L.wo!))
     }
 
+    public private(set) var specCycles = 0
+    public private(set) var specCommitted = 0
+    public private(set) var specDrafted = 0
+    public private(set) var specAccepted = 0
+
+    public var mtpReady: Bool { mtp != nil }
+
+    public func loadMTP(drafts: Int = 2) {
+        if let w = model.mtp, mtp == nil, drafts > 0 {
+            let c = cfg
+            let width = drafts + 1
+            specN = drafts
+            mtp = MetalMTP(model, w, ctx: ctx, pageP: pageP)
+            bSpecPrev = ctx.makeF32(c.nEmbd)
+            specBatch = BatchScratch(ctx: ctx, cfg: c, N: width)
+            specLogits = ctx.makeF32(width * c.nVocab)
+            specIds = ctx.device.makeBuffer(
+                length: width * 4, options: .storageModeShared)
+            specPick = ctx.makeU32(width)
+            recSlots = width + 1
+            recSlot = 0
+            for il in 0..<c.nLayer where c.isRecurrent(il) {
+                gdnConv[il] = ctx.makeF32(
+                    recSlots * c.convDim * (c.dConv - 1))
+                gdnRec[il] = ctx.makeF32(
+                    recSlots * c.nVHead * c.dState * c.dState)
+            }
+            Diag.shared.report("[mtp] ON: metal drafter, n=\(drafts), "
+                + "\(recSlots) state slots")
+        }
+    }
+
+    // Feeds `token` plainly and keeps the hidden it produced, which is the
+    // seed the first draft of the next cycle folds its token onto.
+    public func specPrime(_ token: Int32) -> Int32 {
+        let out = pick(forwardLogits(token: Int(token), pos: pos))
+        if let prev = bSpecPrev {
+            memcpy(prev.contents(), bNormed.contents(),
+                   cfg.nEmbd * MemoryLayout<Float>.stride)
+        }
+        pos += 1
+        return out
+    }
+
+    // One draft/verify/accept cycle: returns every token it committed, the
+    // last of which is the bonus that seeds the next cycle.
+    public func specDecode(_ token: Int32) -> [Int32] {
+        var out: [Int32] = []
+        if let d = mtp, let prev = bSpecPrev,
+           let b = specBatch, let lg = specLogits, let idsBuf = specIds {
+            out = specCycle(d, prev, b, lg, idsBuf, token)
+        } else {
+            out = [specPrime(token)]
+        }
+        return out
+    }
+
+    private func specCycle(_ d: MetalMTP,
+                           _ prev: MTLBuffer, _ b: BatchScratch,
+                           _ lg: MTLBuffer, _ idsBuf: MTLBuffer,
+                           _ token: Int32) -> [Int32] {
+        let c = cfg
+        let p0 = pos
+        let mtpBase = d.cached
+        var fed: [Int32] = [token]
+        var drafts: [Int32] = []
+        var i = 0
+        while i < specN {
+            let cb = ctx.queue.makeCommandBuffer()!
+            let e = cb.makeComputeCommandEncoder()!
+            let f = MetalEnc(ctx: ctx, e: e)
+            d.encodeStep(f, token: Int(fed[i]),
+                         hidden: i == 0 ? prev : d.bHidden, hiddenOff: 0,
+                         ropePos: p0 + i, head: true)
+            f.argmaxRows(x: d.bLogits, out: specPick!, n: c.nVocab, rows: 1)
+            e.endEncoding()
+            commitTimed(cb, "spec.draft")
+            let dt = specPick!.contents()
+                .assumingMemoryBound(to: Int32.self)[0]
+            drafts.append(dt)
+            fed.append(dt)
+            i += 1
+        }
+        let width = fed.count
+        idsBuf.contents().withMemoryRebound(to: Int32.self, capacity: width) {
+            p in
+            for k in 0..<width { p[k] = fed[k] }
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        let f = MetalEnc(ctx: ctx, e: e)
+        f.embedBatch(ids: idsBuf, weightOff: off(model.tokEmbd), out: b.x,
+                     nEmbd: c.nEmbd, N: width, type: model.tokEmbd.type)
+        encodeChunk(f, b, N: width, basePos: p0, pos3: nil, head: false,
+                    ring: StateRing(slot0: recSlot, slots: recSlots))
+        f.gemm(model.output, X: b.normed, out: lg, off: off(model.output),
+               N: width)
+        f.argmaxRows(x: lg, out: specPick!, n: c.nVocab, rows: width)
+        e.endEncoding()
+        commitTimed(cb, "spec.verify")
+        let lp = lg.contents().assumingMemoryBound(to: Float.self)
+        let gp = specPick!.contents().assumingMemoryBound(to: Int32.self)
+        var accepted = 0
+        var bonus: Int32 = 0
+        var scanning = true
+        while scanning {
+            let r = pickRow(lp + accepted * c.nVocab, gpu: gp[accepted])
+            if accepted < drafts.count && r == drafts[accepted] {
+                accepted += 1
+            } else {
+                bonus = r
+                scanning = false
+            }
+        }
+        let m = accepted + 1
+        recSlot = (recSlot + m) % recSlots
+        if m < width {
+            for (_, p) in kvPool { p.truncate(to: p0 + m) }
+        }
+        pos = p0 + m
+        maintainMTP(d, prev, b, fed, from: mtpBase, at: p0, count: m)
+        memcpy(prev.contents(),
+               b.normed.contents().advanced(
+                   by: (m - 1) * c.nEmbd * MemoryLayout<Float>.stride),
+               c.nEmbd * MemoryLayout<Float>.stride)
+        specCycles += 1
+        specCommitted += m
+        specDrafted += drafts.count
+        specAccepted += accepted
+        var out = Array(drafts.prefix(accepted))
+        out.append(bonus)
+        return out
+    }
+
+    // Rebuilds the drafter's KV over the committed tokens from the BASE
+    // hiddens, replacing what drafting wrote from the drafter's own.
+    private func maintainMTP(_ d: MetalMTP, _ prev: MTLBuffer,
+                             _ b: BatchScratch, _ fed: [Int32], from base: Int,
+                             at p0: Int, count m: Int) {
+        let c = cfg
+        d.truncate(to: base)
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        let f = MetalEnc(ctx: ctx, e: e)
+        var j = 0
+        while j < m {
+            let stride = MemoryLayout<Float>.stride
+            d.encodeStep(f, token: Int(fed[j]),
+                         hidden: j == 0 ? prev : b.normed,
+                         hiddenOff: j == 0 ? 0 : (j - 1) * c.nEmbd * stride,
+                         ropePos: p0 + j, head: false)
+            j += 1
+        }
+        e.endEncoding()
+        commitTimed(cb, "spec.maintain")
+    }
+
     // logits = output @ hidden  (tied Q2_0 lm_head), returned to the CPU sampler.
     public func logits(_ hidden: MTLBuffer) -> [Float] {
         let cb = ctx.queue.makeCommandBuffer()!
@@ -964,6 +1157,7 @@ public final class MetalEngine {
         return Array(bLogits.f32(cfg.nVocab))
     }
 }
+
 
 // Per-chunk batched activation buffers for prefillBatch (token-major [N, dim]).
 private struct BatchScratch {

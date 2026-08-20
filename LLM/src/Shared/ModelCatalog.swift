@@ -63,17 +63,23 @@ public enum ModelCatalog {
             repo: "leok7v/Qwen3.8-27B-coreml-q6",
             revision: "f72acfa1607fe63294534d355ab89c9226c7aa17",
             bytes: 21_478_000_000),
-        "Qwen3.8-27B-Q2_X": Source(
-            repo: "leok7v/Qwen3.8-27B",
-            revision: "e6e1713b861680d160551352170e7fbea531b98b",
-            bytes: 10_037_000_000,
-            files: ["Qwen3.8-27B-Q2_X.gguf"]),
+        // The Q2_E8 sets are ONE file each: the sampling card rides inside the
+        // gguf as general.generation_config_json, so no sibling to lose.
         "Qwen3.5-4B": Source(
             repo: "leok7v/Qwen3.5-4B",
-            revision: "51cac7fa0f308a44090e3e5c87e9fe69235b8111",
-            bytes: 1_579_171_840,
-            files: ["Qwen3.5-4B-Q2_E8.gguf",
-                    "generation_config.json"]),
+            revision: "5a4b0bc1fd25d6819dba6312bb2198e25b8fbcec",
+            bytes: 2_253_504_512,
+            files: ["Qwen3.5-4B-Q2_E8.gguf"]),
+        "Qwen3.5-9B": Source(
+            repo: "leok7v/Qwen3.5-9B",
+            revision: "f81e5e43efc184ac22fd1bb2e5fbbd74548492e4",
+            bytes: 4_430_069_760,
+            files: ["Qwen3.5-9B-Q2_E8.gguf"]),
+        "Qwen3.8-27B-E8": Source(
+            repo: "leok7v/Qwen3.8-27B",
+            revision: "58c70758d32231b2a1747e0f7a743db673a17f3c",
+            bytes: 8_862_138_368,
+            files: ["Qwen3.8-27B-Q2_E8.gguf"]),
         // The ternary 27B GGUF served by the unified engine: the Q2_0 weight
         // file, the Q8_0 vision tower (measured transparent vs BF16, cos
         // ~0.99995 -- ViT.swift consumes it), and generation_config.json for
@@ -148,8 +154,9 @@ public enum ModelCatalog {
     // The GGUF weight file inside each single-file (unified-engine) model's set
     // dir. A name here is a GGUF model (isGguf); absent is a CoreML/ANE set.
     public static let ggufFiles: [String: String] = [
-        "Qwen3.8-27B-Q2_X": "Qwen3.8-27B-Q2_X.gguf",
         "Qwen3.5-4B": "Qwen3.5-4B-Q2_E8.gguf",
+        "Qwen3.5-9B": "Qwen3.5-9B-Q2_E8.gguf",
+        "Qwen3.8-27B-E8": "Qwen3.8-27B-Q2_E8.gguf",
         "Ternary-Bonsai-27B": "Ternary-Bonsai-27B-Q2_0.gguf",
         "Ternary-Bonsai-1.7B": "Ternary-Bonsai-1.7B-Q2_0.gguf",
         "gemma-4-E2B": "gemma-4-e2b-it-qat.gguf",

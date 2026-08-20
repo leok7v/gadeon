@@ -134,6 +134,43 @@ struct BonsaiLayer {
     }
 }
 
+struct BonsaiMTP {
+    let ehProj: GGUFTensor
+    let enorm: GGUFTensor
+    let hnorm: GGUFTensor
+    let headNorm: GGUFTensor
+    let attnNorm: GGUFTensor
+    let attnPostNorm: GGUFTensor
+    let wq: GGUFTensor
+    let wk: GGUFTensor
+    let wv: GGUFTensor
+    let wo: GGUFTensor
+    let qNorm: GGUFTensor
+    let kNorm: GGUFTensor
+    let ffnGate: GGUFTensor
+    let ffnUp: GGUFTensor
+    let ffnDown: GGUFTensor
+
+    init(_ g: GGUF, _ il: Int) {
+        func t(_ s: String) -> GGUFTensor { g.tensor("blk.\(il).\(s)") }
+        ehProj = t("nextn.eh_proj.weight")
+        enorm = t("nextn.enorm.weight")
+        hnorm = t("nextn.hnorm.weight")
+        headNorm = t("nextn.shared_head_norm.weight")
+        attnNorm = t("attn_norm.weight")
+        attnPostNorm = t("post_attention_norm.weight")
+        wq = t("attn_q.weight")
+        wk = t("attn_k.weight")
+        wv = t("attn_v.weight")
+        wo = t("attn_output.weight")
+        qNorm = t("attn_q_norm.weight")
+        kNorm = t("attn_k_norm.weight")
+        ffnGate = t("ffn_gate.weight")
+        ffnUp = t("ffn_up.weight")
+        ffnDown = t("ffn_down.weight")
+    }
+}
+
 public final class BonsaiModel {
     let gguf: GGUF
     public let cfg: BonsaiConfig
@@ -141,6 +178,7 @@ public final class BonsaiModel {
     let tokEmbd: GGUFTensor
     let outputNorm: GGUFTensor
     let output: GGUFTensor        // lm_head (tied == tokEmbd)
+    let mtp: BonsaiMTP?
 
     public init(path: String) throws {
         gguf = try GGUF(path: path)
@@ -150,5 +188,7 @@ public final class BonsaiModel {
         output = gguf.maybe("output.weight") ?? tokEmbd
         let g = gguf, c = cfg
         layers = (0..<c.nLayer).map { BonsaiLayer(g, $0, c) }
+        mtp = g.maybe("blk.\(c.nLayer).nextn.eh_proj.weight") != nil
+            ? BonsaiMTP(g, c.nLayer) : nil
     }
 }

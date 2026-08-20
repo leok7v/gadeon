@@ -3,13 +3,13 @@ import Testing
 @testable import LLM
 
 // The intuitive answer is 10 cents and the right one is 5. Gated on a real
-// GGUF of the MetalChat lineage (ternary Bonsai, Q2_X), because a mock
+// GGUF of the MetalChat lineage (ternary Bonsai, Q2_E8), because a mock
 // cannot fail this the way a model does. Skipped, not passed, without one.
 let chatGgufPath = ProcessInfo.processInfo.environment["GADEON_CHAT_GGUF"]
 
 let needsChatWeights = ConditionTrait.enabled(
     if: chatGgufPath != nil,
-    "set GADEON_CHAT_GGUF to a ternary / Q2_X GGUF")
+    "set GADEON_CHAT_GGUF to a ternary / Q2_E8 GGUF")
 
 struct BatAndBallTests {
 

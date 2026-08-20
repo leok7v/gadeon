@@ -77,67 +77,6 @@ enum Q2_0 {
     }
 }
 
-enum Q2X {
-    static let qk = 128
-    static let blockBytes = 34
-
-    static func dequant(_ base: UnsafeRawPointer, count n: Int,
-                        into out: UnsafeMutablePointer<Float>) {
-        let nb = n / qk
-        var p = base
-        var o = 0
-        for _ in 0..<nb {
-            let d = Float(p.loadUnaligned(as: Float16.self))
-            let qs = p + 2
-            for j in 0..<qk {
-                let byte = qs.load(fromByteOffset: j >> 2, as: UInt8.self)
-                let code = Int((byte >> UInt8((j & 3) << 1)) & 0x03)
-                out[o + j] = Float(2 * code - 3) * d
-            }
-            p += blockBytes
-            o += qk
-        }
-    }
-
-    static func matvec(_ w: GGUFTensor, x: [Float], out: inout [Float]) {
-        let K = w.dims[0]
-        let M = w.dims[1]
-        precondition(K % qk == 0)
-        let nblk = K / qk
-        let rowBytes = nblk * blockBytes
-        x.withUnsafeBufferPointer { xb in
-            out.withUnsafeMutableBufferPointer { ob in
-                nonisolated(unsafe) let base = w.base
-                nonisolated(unsafe) let xp = xb.baseAddress!
-                nonisolated(unsafe) let op = ob.baseAddress!
-                DispatchQueue.concurrentPerform(iterations: M) { m in
-                    var acc: Float = 0
-                    var p = base + m * rowBytes
-                    var k = 0
-                    for _ in 0..<nblk {
-                        let d = Float(p.loadUnaligned(as: Float16.self))
-                        let qs = p + 2
-                        var lo: Float = 0, hi: Float = 0, sy: Float = 0
-                        for j in 0..<qk {
-                            let byte = qs.load(fromByteOffset: j >> 2,
-                                               as: UInt8.self)
-                            let code = (byte >> UInt8((j & 3) << 1)) & 0x03
-                            let xv = xp[k + j]
-                            sy += xv
-                            if code & 1 != 0 { lo += xv }
-                            if code & 2 != 0 { hi += xv }
-                        }
-                        acc += d * (2 * lo + 4 * hi - 3 * sy)
-                        p += blockBytes
-                        k += qk
-                    }
-                    op[m] = acc
-                }
-            }
-        }
-    }
-}
-
 enum Q2E8Row {
     static let qk = 128
     static let blockBytes = 34
@@ -199,7 +138,6 @@ enum Q2E8Row {
 enum QB {
     static func matvec(_ w: GGUFTensor, x: [Float], out: inout [Float]) {
         switch w.type {
-        case .q2_x: Q2X.matvec(w, x: x, out: &out)
         case .q2_e8: Q2E8Row.matvec(w, x: x, out: &out)
         default: GQ.matvec(w, x: x, out: &out)
         }
@@ -208,8 +146,6 @@ enum QB {
     static func dequant(_ w: GGUFTensor, row: Int, count n: Int,
                         into out: UnsafeMutablePointer<Float>) {
         switch w.type {
-        case .q2_x:
-            Q2X.dequant(w.base + row * GQ.rowBytes(w), count: n, into: out)
         case .q2_e8:
             Q2E8Row.dequant(w.base + row * GQ.rowBytes(w), count: n, into: out)
         default:

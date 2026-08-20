@@ -451,7 +451,7 @@ public struct Q2E8Convert {
     }
 
     static let types: [String: GGUFType] = [
-        "q2_x": .q2_x, "q2_e8": .q2_e8, "q4_0": .q4_0, "q8_0": .q8_0, "ternary": .q2_0,
+        "q2_e8": .q2_e8, "q4_0": .q4_0, "q8_0": .q8_0, "ternary": .q2_0,
         "bf16": .bf16, "f16": .f16, "f32": .f32,
     ]
 
@@ -715,7 +715,6 @@ public struct Q2E8Convert {
         case .q4_0: out = "Q4_0"
         case .q8_0: out = "Q8_0"
         case .q2_0: out = "TQ"
-        case .q2_x: out = "Q2_X"
         case .q2_e8: out = "Q2_E8"
         default: out = "?"
         }
@@ -1036,7 +1035,7 @@ public struct Q2E8Convert {
     }
 
     static func quantized(_ type: GGUFType) -> Bool {
-        type == .q2_x || type == .q2_e8 || type == .q2_0
+        type == .q2_e8 || type == .q2_0
     }
 
     // --reconstruct keeps the quantizer and swaps only the CONTAINER, so a

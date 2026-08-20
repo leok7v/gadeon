@@ -28,6 +28,7 @@ public final class MetalBackend: AgentBackend, @unchecked Sendable {
     }
 
     public var eos: Int32 { tokenizer.eosId }
+    public var eosIds: Set<Int32> { tokenizer.eosIds }
     public var position: Int { get async { engine.pos } }
 
     public func encode(_ text: String) -> [Int32] {
@@ -200,7 +201,10 @@ public struct MetalChat {
     public init(ggufPath: String, pageP: Int = 512) throws {
         let m = try BonsaiModel(path: ggufPath)
         engine = try MetalEngine(m, pageP: pageP)
-        tokenizer = try Tokenizer(gguf: m.gguf)
+        var tok = try Tokenizer(gguf: m.gguf)
+        tok.addStops(Tokenizer.stopIds(besideSet: URL(
+            fileURLWithPath: ggufPath).deletingLastPathComponent()))
+        tokenizer = tok
         chatTemplate = m.gguf.string("tokenizer.chat_template")
             ?? BonsaiChat.fallbackTemplate
         samplingPresets = SamplingPresets.require(gguf: m.gguf,

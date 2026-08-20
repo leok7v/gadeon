@@ -60,8 +60,9 @@ enum Models {
             list += ["QwenPaw-Flash-2B", "QwenPaw-Flash-4B"]
             if gb >= 16 { list.append("QwenPaw-Flash-9B") }
             if gb >= 16 { list.append("Qwen3.8-27B") }
-            if gb >= 24 { list.append("Qwen3.8-27B-Q2_X") }
             if gb >= 8 { list.append("Qwen3.5-4B") }
+            if gb >= 16 { list.append("Qwen3.5-9B") }
+            if gb >= 16 { list.append("Qwen3.8-27B-E8") }
             if gb >= 16 { list.append("Ternary-Bonsai-27B") }
             list.append("Ternary-Bonsai-1.7B")
             list.append("gemma-4-E2B")
@@ -99,11 +100,12 @@ enum Models {
         switch name {
             case "Qwen3.5-0.8B": out = "Qwen3.5 0.8B"
             case "Qwen3.5-4B": out = "Qwen3.5 4B"
+            case "Qwen3.5-9B": out = "Qwen3.5 9B"
+            case "Qwen3.8-27B-E8": out = "Qwen3.8 27B"
             case "QwenPaw-Flash-2B": out = "QwenPaw 2B"
             case "QwenPaw-Flash-4B": out = "QwenPaw 4B"
             case "QwenPaw-Flash-9B": out = "QwenPaw 9B"
             case "Qwen3.8-27B": out = "Qwen3.8 27B"
-            case "Qwen3.8-27B-Q2_X": out = "Qwen3.8 27B"
             case "Ternary-Bonsai-27B": out = "Bonsai 27B"
             case "Ternary-Bonsai-1.7B": out = "Bonsai 1.7B"
             case "gemma-4-E2B": out = "Gemma E2B"

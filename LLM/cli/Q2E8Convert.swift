@@ -5,7 +5,7 @@ func runQ2E8Convert(_ args: [String]) {
     let at = args.firstIndex(of: "--q2e8-convert")!
     let dir = at + 1 < args.count ? args[at + 1] : ""
     let out = at + 2 < args.count ? args[at + 2] : ""
-    var trunk = "q2_x"
+    var trunk = "q2_e8"
     if let i = args.firstIndex(of: "--trunk"), i + 1 < args.count {
         trunk = args[i + 1]
     }
@@ -63,7 +63,7 @@ func runQ2E8Convert(_ args: [String]) {
     var status: Int32 = 0
     if dir.isEmpty || out.isEmpty {
         err("usage: gadeon-cli x --q2e8-convert <hf-dir> <out.gguf> "
-            + "[--trunk q2_x|q2_e8|q4_0|ternary|bf16] [--embd type] [--wide a,b] "
+            + "[--trunk q2_e8|q4_0|ternary|bf16] [--embd type] [--wide a,b] "
             + "[--no-renorm] [--imat dir] [--hess dir] [--no-gptq] [--gate ref]\n")
         status = 2
     } else {

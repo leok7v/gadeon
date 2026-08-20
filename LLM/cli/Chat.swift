@@ -203,6 +203,10 @@ func runLongDoc(_ user: String) async throws {
     // Metal backend bring-up: diff each GPU kernel against the SIMD reference
     // on the loaded model, then exit. No chat -- correctness only.
     if rawArgs.contains("--ppl") { try runPerplexity(arg1, rawArgs) }
+    if rawArgs.contains("--kernel-bench") {
+        print(try MetalKernelBench.run(ggufPath: arg1))
+        exit(0)
+    }
     if rawArgs.contains("--metal-selftest") {
         err("Metal self-test on \(arg1)...\n")
         print(try MetalSelfTest.run(ggufPath: arg1))
@@ -344,6 +348,9 @@ func runLongDoc(_ user: String) async throws {
         err("[imat] \(ids.count) tokens, \(sums.count) sites -> \(dir)\n")
         exit(0)
     }
+    if rawArgs.contains("--mtp-verify") || rawArgs.contains("--mtp-bench") {
+        try runMetalMTP(arg1, verify: rawArgs.contains("--mtp-verify"))
+    }
     if let ti = rawArgs.firstIndex(of: "--tap") {
         let dir = ti + 1 < rawArgs.count ? rawArgs[ti + 1] : "tmp/tap"
         try FileManager.default.createDirectory(
@@ -417,7 +424,7 @@ func runLongDoc(_ user: String) async throws {
     // is the pure-Swift SIMD/CPU engine. Both load everything from the one GGUF
     // and expose the identical AgentBackend seam.
     let useMetal = rawArgs.contains("--metal")
-    err("loading Bonsai GGUF \(arg1)...\n")
+    err("loading GGUF \(arg1)...\n")
     let backend: any AgentBackend
     let template: String
     let vocabCount: Int
@@ -572,5 +579,73 @@ func runLongDoc(_ user: String) async throws {
     print(String(format: "%@  pp%d %.1f t/s  |  tg%d %.1f t/s", label,
                  ids.count, Double(ids.count) / ppSec, gen,
                  Double(gen) / tgSec))
+    exit(0)
+}
+
+// Metal MTP self-speculative decode. The drafter is blk.<nLayer> of the SAME
+// GGUF, so there is no second file to deploy: --mtp-verify proves the spec
+// stream is token-identical to plain greedy, --mtp-bench times it against it.
+@MainActor func runMetalMTP(_ path: String, verify: Bool) throws {
+    let chat = try MetalChat(ggufPath: path)
+    let eng = chat.engine
+    let n = specNVal ?? 2
+    eng.loadMTP(drafts: n)
+    if !eng.mtpReady {
+        err("\(path) carries no nextn drafter\n")
+        exit(1)
+    }
+    var ids = chat.tokenizer.encode(benchPrompt, addSpecial: true)
+    if let benchCtxVal {
+        var padded = ids
+        while padded.count < benchCtxVal { padded += ids }
+        ids = Array(padded.prefix(benchCtxVal))
+    }
+    let gen = capVal ?? (verify ? 64 : 128)
+    eng.reset()
+    var plain: [Int32] = []
+    var next = eng.extend(ids)
+    let g0 = Date()
+    var k = 0
+    while k < gen {
+        plain.append(next)
+        next = eng.decode(next)
+        k += 1
+    }
+    let plainSec = Date().timeIntervalSince(g0)
+    eng.reset()
+    var spec: [Int32] = []
+    var cur = eng.extend(ids)
+    let s0 = Date()
+    spec.append(cur)
+    cur = eng.specPrime(cur)
+    while spec.count < gen {
+        spec.append(cur)
+        let toks = eng.specDecode(cur)
+        spec += toks.dropLast()
+        cur = toks[toks.count - 1]
+    }
+    let specSec = Date().timeIntervalSince(s0)
+    spec = Array(spec.prefix(gen))
+    let cycles = max(eng.specCycles, 1)
+    let tpc = Double(eng.specCommitted) / Double(cycles)
+    let acc = Double(eng.specAccepted) / Double(max(eng.specDrafted, 1))
+    if verify {
+        var diff = -1
+        var i = 0
+        while i < gen && diff < 0 {
+            if plain[i] != spec[i] { diff = i }
+            i += 1
+        }
+        print("VERIFY-MTP (metal, n=\(n), gen=\(gen)): "
+              + (diff < 0 ? "\(gen)/\(gen) EXACT"
+                          : "DIVERGES at \(diff) "
+                            + "(plain \(plain[diff]) spec \(spec[diff]))"))
+    } else {
+        print(String(format: "Metal/GPU  tg%d %.1f t/s  |  MTP n=%d %.1f t/s",
+                     gen, Double(gen) / plainSec, n,
+                     Double(gen) / specSec))
+    }
+    print(String(format: "  %.2f tok/cycle over %d cycles, accept %.0f%%",
+                 tpc, cycles, acc * 100))
     exit(0)
 }

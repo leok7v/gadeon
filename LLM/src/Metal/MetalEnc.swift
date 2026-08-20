@@ -14,6 +14,14 @@
 import Foundation
 import Metal
 
+// Which slot of a GDN state ring a batched kernel reads, and how many slots
+// it may write forward into. `inPlace` is one slot, i.e. the plain path.
+struct StateRing {
+    let slot0: Int
+    let slots: Int
+    static let inPlace = StateRing(slot0: 0, slots: 1)
+}
+
 struct MetalEnc {
     let ctx: MetalContext
     let e: MTLComputeCommandEncoder
@@ -75,9 +83,6 @@ struct MetalEnc {
     // Dispatched on the TENSOR's type, not the caller's: a gemma forward mixes
     // Q4_0 attention with Q2_0 wide MLP, so the engine names a tensor and this
     // picks the kernel. Mirrors GQ.matvec.
-    static let q2xVariant =
-        ProcessInfo.processInfo.environment["LLM_Q2X_VAR"] ?? ""
-
     func gemv(_ w: GGUFTensor, x: MTLBuffer, out: MTLBuffer, off: WeightRef,
               xOff: Int = 0, outOff: Int = 0) {
         let k = w.dims[0], m = w.dims[1]
@@ -85,9 +90,6 @@ struct MetalEnc {
         let name: String
         switch w.type {
         case .q2_0: name = "q2_0_gemv"
-        case .q2_x:
-            name = MetalEnc.q2xVariant.isEmpty ? "q2_x_gemv"
-                : "q2_x_gemv_" + MetalEnc.q2xVariant
         case .q2_e8: name = "q2_e8_gemv"
         case .q4_0: name = "q4_0_gemv"
         case .q8_0: name = "q8_0_gemv"
@@ -98,8 +100,7 @@ struct MetalEnc {
             fatalError("MetalEnc.gemv: no kernel for \(w.type) (\(w.name))")
         }
         // one simdgroup (32 threads) per 8 output rows (NR0=8 in the kernel).
-        let rows = name == "q2_x_gemv_r16" ? 16
-            : (name == "q2_x_gemv_un4" ? 4 : 8)
+        let rows = 8
         groups(name, (m + rows - 1) / rows, tpg: 32) { e in
             e.setBuffer(off.buf, offset: 0, index: 0)
             e.setBuffer(x, offset: xOff, index: 1)
@@ -155,11 +156,36 @@ struct MetalEnc {
     static let attnMatrix =
         ProcessInfo.processInfo.environment["LLM_ATTN_MM"] != "0"
 
+    // Per TYPE because the two disagree; --kernel-bench has the numbers.
+    // LLM_NARROW_MAX=0 restores the tile everywhere.
+    static let narrowMax = min(4,
+        Int(ProcessInfo.processInfo.environment["LLM_NARROW_MAX"] ?? "") ?? 4)
+    static let narrowMaxQ4 = min(narrowMax, 2)
+
+    func gemmNarrow(_ w: GGUFTensor, X: MTLBuffer, out: MTLBuffer,
+                    off: WeightRef, N: Int) {
+        let k = w.dims[0], m = w.dims[1]
+        var a = GemvArgs(woff: off.local, K: UInt32(k), M: UInt32(m))
+        let rows = 4
+        let e8 = w.type == .q2_e8
+        let name = (e8 ? "q2_e8_gemm_nb_r" : "q4_0_gemm_nb_r") + "\(N)"
+        groups(name, (m + rows - 1) / rows, tpg: 32) { e in
+            e.setBuffer(off.buf, offset: 0, index: 0)
+            e.setBuffer(X, offset: 0, index: 1)
+            e.setBuffer(out, offset: 0, index: 2)
+            e.setBytes(&a, length: MemoryLayout<GemvArgs>.stride, index: 3)
+            if e8 { e.setBuffer(ctx.e8pTable(), offset: 0, index: 4) }
+        }
+    }
+
     func gemm(_ w: GGUFTensor, X: MTLBuffer, out: MTLBuffer, off: WeightRef,
               N: Int) {
         let k = w.dims[0], m = w.dims[1]
         var a = GemvArgs(woff: off.local, K: UInt32(k), M: UInt32(m))
         var nn = UInt32(N)
+        let cap = w.type == .q4_0 ? MetalEnc.narrowMaxQ4 : MetalEnc.narrowMax
+        let narrow = (w.type == .q2_e8 || w.type == .q4_0)
+            && N > 1 && N <= cap
         // The half-tile spill path needs 8192B f32 temp; a fully in-bounds
         // tile
         // (M multiple of 64, N of 32) never spills, so 6144 suffices.
@@ -168,20 +194,45 @@ struct MetalEnc {
         switch w.type {
         case .q2_0:
             name = MetalEnc.f16Tiles ? "q2_0_gemm_mm_h" : "q2_0_gemm_mm"
-        case .q2_x:
-            name = MetalEnc.f16Tiles ? "q2_x_gemm_mm_h" : "q2_x_gemm_mm"
         case .q4_0:
             name = MetalEnc.f16Tiles ? "q4_0_gemm_mm_h" : "q4_0_gemm_mm"
         case .q8_0:
             name = MetalEnc.f16Tiles ? "q8_0_gemm_mm_h" : "q8_0_gemm_mm"
-        case .q2_e8, .f32, .f16, .bf16:
+        case .q2_e8:
+            name = MetalEnc.f16Tiles ? "q2_e8_gemm_mm_h" : "q2_e8_gemm_mm"
+        case .f32, .f16, .bf16:
             name = ""
         default:
             fatalError("MetalEnc.gemm: no kernel for \(w.type) (\(w.name))")
         }
-        if name.isEmpty {
+        if narrow {
+            gemmNarrow(w, X: X, out: out, off: off, N: N)
+        } else if name.isEmpty {
             gemmRows(w, X: X, out: out, off: off, N: N)
         } else {
+            gemmTiled(name, w, X: X, out: out, off: off, N: N, a: &a, nn: &nn,
+                      fullTile: fullTile)
+        }
+    }
+
+    // Force the prefill tile regardless of width, for the A/B in
+    // MetalKernelBench.
+    func gemmTile(_ w: GGUFTensor, X: MTLBuffer, out: MTLBuffer,
+                  off: WeightRef, N: Int) {
+        let k = w.dims[0], m = w.dims[1]
+        var a = GemvArgs(woff: off.local, K: UInt32(k), M: UInt32(m))
+        var nn = UInt32(N)
+        let fullTile = m % 64 == 0 && N % 32 == 0
+        let name: String
+        switch w.type {
+        case .q2_0: name = MetalEnc.f16Tiles ? "q2_0_gemm_mm_h" : "q2_0_gemm_mm"
+        case .q4_0: name = MetalEnc.f16Tiles ? "q4_0_gemm_mm_h" : "q4_0_gemm_mm"
+        case .q8_0: name = MetalEnc.f16Tiles ? "q8_0_gemm_mm_h" : "q8_0_gemm_mm"
+        case .q2_e8:
+            name = MetalEnc.f16Tiles ? "q2_e8_gemm_mm_h" : "q2_e8_gemm_mm"
+        default: name = ""
+        }
+        if !name.isEmpty {
             gemmTiled(name, w, X: X, out: out, off: off, N: N, a: &a, nn: &nn,
                       fullTile: fullTile)
         }
@@ -211,6 +262,9 @@ struct MetalEnc {
         e.setBuffer(out, offset: 0, index: 2)
         e.setBytes(&a, length: MemoryLayout<GemvArgs>.stride, index: 3)
         e.setBytes(&nn, length: 4, index: 4)
+        if w.type == .q2_e8 {
+            e.setBuffer(ctx.e8pTable(), offset: 0, index: 5)
+        }
         e.setThreadgroupMemoryLength(tgmem, index: 0)
         e.dispatchThreadgroups(
             MTLSize(width: (N + 31) / 32, height: (m + 63) / 64, depth: 1),
@@ -227,7 +281,6 @@ struct MetalEnc {
         let name: String
         switch type {
         case .q2_0: name = "q2_0_dequant_row"
-        case .q2_x: name = "q2_x_dequant_row"
         case .q4_0: name = "q4_0_dequant_row"
         case .q8_0: name = "q8_0_dequant_row"
         case .bf16: name = "bf16_dequant_row"
@@ -243,14 +296,23 @@ struct MetalEnc {
         }
     }
 
+    func argmaxRows(x: MTLBuffer, out: MTLBuffer, n: Int, rows: Int) {
+        var nn = UInt32(n)
+        groups("argmax_rows", rows, tpg: 256, tgmem: 0) { e in
+            e.setBuffer(x, offset: 0, index: 0)
+            e.setBuffer(out, offset: 0, index: 1)
+            e.setBytes(&nn, length: 4, index: 2)
+        }
+    }
+
     // ---- norms -----------------------------------------------------------
     func rmsnorm(x: MTLBuffer, weightOff: WeightRef, out: MTLBuffer, n: Int,
-                 eps: Float) {
+                 eps: Float, xOff: Int = 0, outOff: Int = 0) {
         var a = NormArgs(woff: weightOff.local, n: UInt32(n), eps: eps)
         groups("rmsnorm", 1, tpg: 256, tgmem: 128) { e in
-            e.setBuffer(x, offset: 0, index: 0)
+            e.setBuffer(x, offset: xOff, index: 0)
             e.setBuffer(weightOff.buf, offset: 0, index: 1)
-            e.setBuffer(out, offset: 0, index: 2)
+            e.setBuffer(out, offset: outOff, index: 2)
             e.setBytes(&a, length: MemoryLayout<NormArgs>.stride, index: 3)
         }
     }
@@ -771,7 +833,6 @@ struct MetalEnc {
         let name: String
         switch type {
         case .q2_0: name = "embed_batch"
-        case .q2_x: name = "q2_x_embed_batch"
         case .q4_0: name = "q4_0_embed_batch"
         case .q8_0: name = "q8_0_embed_batch"
         case .bf16: name = "bf16_embed_batch"
@@ -790,9 +851,12 @@ struct MetalEnc {
 
     func gdnConvBatch(qkvMixN: MTLBuffer, convState: MTLBuffer,
                       cwOff: WeightRef, outN: MTLBuffer, convDim: Int,
-                      dConv: Int, N: Int) {
+                      dConv: Int, N: Int, ring: StateRing = .inPlace) {
         var a = ConvBatchArgs(cwOff: cwOff.local, convDim: UInt32(convDim),
-                              dConv: UInt32(dConv), N: UInt32(N))
+                              dConv: UInt32(dConv), N: UInt32(N),
+                              slot0: UInt32(ring.slot0),
+                              slots: UInt32(ring.slots),
+                              stateElems: UInt32(convDim * (dConv - 1)))
         grid1D("gdn_conv_batch", convDim) { e in
             e.setBuffer(qkvMixN, offset: 0, index: 0)
             e.setBuffer(convState, offset: 0, index: 1)
@@ -812,11 +876,14 @@ struct MetalEnc {
     func gdnScanBatch(convOutN: MTLBuffer, keyDim: Int, valueDim: Int,
                       convDim: Int, gN: MTLBuffer, betaN: MTLBuffer,
                       S: MTLBuffer, oN: MTLBuffer, nV: Int, nK: Int, dS: Int,
-                      qScale: Float, N: Int) {
+                      qScale: Float, N: Int, ring: StateRing = .inPlace) {
         var a = ScanBatchArgs(nV: UInt32(nV), nK: UInt32(nK), dS: UInt32(dS),
                               qScale: qScale, N: UInt32(N),
                               convDim: UInt32(convDim), keyDim: UInt32(keyDim),
-                              valueDim: UInt32(valueDim))
+                              valueDim: UInt32(valueDim),
+                              slot0: UInt32(ring.slot0),
+                              slots: UInt32(ring.slots),
+                              stateElems: UInt32(nV * dS * dS))
         let bind = { (e: MTLComputeCommandEncoder) in
             e.setBuffer(convOutN, offset: 0, index: 0)
             e.setBuffer(gN, offset: 0, index: 1)
@@ -1153,11 +1220,13 @@ struct AttnArgs {
 struct KVArgs { var kvDim: UInt32; var pos: UInt32 }
 struct ConvBatchArgs {
     var cwOff: UInt64; var convDim: UInt32; var dConv: UInt32; var N: UInt32
+    var slot0: UInt32; var slots: UInt32; var stateElems: UInt32
 }
 struct ScanBatchArgs {
     var nV: UInt32; var nK: UInt32; var dS: UInt32; var qScale: Float
     var N: UInt32; var convDim: UInt32; var keyDim: UInt32
     var valueDim: UInt32
+    var slot0: UInt32; var slots: UInt32; var stateElems: UInt32
 }
 struct RopeBatchArgs {
     var headDim: UInt32; var nHead: UInt32; var nRot: UInt32

@@ -240,7 +240,7 @@ public enum MetalGolden {
         // The GEMM runs at N=8 and N=33: 33 spills past the 32-column tile, so
         // the bounds-checked threadgroup path runs too. That path is written
         // once per kernel today and is exactly what a template must preserve.
-        for ty in [GGUFType.q2_0, .q2_x, .q4_0, .q8_0, .bf16, .f32] {
+        for ty in [GGUFType.q2_0, .q2_e8, .q4_0, .q8_0, .bf16, .f32] {
             if let w = matrix(ty) {
                 let K = w.dims[0], M = w.dims[1]
                 let tag = "\(ty)"
@@ -253,7 +253,8 @@ public enum MetalGolden {
                 // Only the quantized types have a batched kernel; bf16 and f32
                 // go through gemmRows, which is a gemv loop and would only
                 // re-measure the case above.
-                if ty == .q2_0 || ty == .q2_x || ty == .q4_0 || ty == .q8_0 {
+                if ty == .q2_0 || ty == .q2_e8
+                    || ty == .q4_0 || ty == .q8_0 {
                     for n in [8, 33] {
                         let xm = ctx.makeF32(fill(n * K, seed: 31))
                         let om = ctx.makeF32(n * M)

@@ -15,6 +15,7 @@ public struct Tokenizer: Sendable {
     private let specials: [(text: String, id: Int32)]
     private let splitRegex: RegexBox
     public let eosId: Int32
+    public private(set) var eosIds: Set<Int32>
 
     public init(modelsDir: URL) throws {
         let url = modelsDir.appendingPathComponent("tokenizer.json")
@@ -84,6 +85,36 @@ public struct Tokenizer: Sendable {
         // byte-level engine rather than bending Regex to match.
         self.splitRegex = RegexBox(regex: try Regex(patt))
         self.eosId = v["<|im_end|>"] ?? 0
+        self.eosIds = [self.eosId]
+        addStops(Tokenizer.stopIds(besideSet: modelsDir))
+    }
+
+    public mutating func addStops(_ ids: [Int32]) {
+        for id in ids where id >= 0 { eosIds.insert(id) }
+    }
+
+    public static func stopIds(besideSet dir: URL) -> [Int32] {
+        stopIds(generationConfig:
+            dir.appendingPathComponent("generation_config.json"))
+    }
+
+    public static func stopIds(generationConfig url: URL) -> [Int32] {
+        stopIds(generationConfigText: (try? Data(contentsOf: url))
+            .flatMap { d in String(data: d, encoding: .utf8) })
+    }
+
+    public static func stopIds(generationConfigText text: String?) -> [Int32] {
+        var out: [Int32] = []
+        if let text, let data = text.data(using: .utf8),
+           let root = (try? JSONSerialization.jsonObject(with: data))
+               as? [String: Any] {
+            if let one = root["eos_token_id"] as? Int {
+                out = [Int32(one)]
+            } else if let many = root["eos_token_id"] as? [Int] {
+                out = many.map(Int32.init)
+            }
+        }
+        return out
     }
 
     // The Qwen (gpt2 byte-level) pretokenizer split pattern. The GGUF stores only
@@ -144,8 +175,18 @@ public struct Tokenizer: Sendable {
         self.byteToUni = b2u
         self.specials = special
         self.splitRegex = RegexBox(regex: try Regex(Tokenizer.qwenPretokenizer))
-        self.eosId = Int32(g.int("tokenizer.ggml.eos_token_id") ?? 0)
+        let stops = g.ints("tokenizer.ggml.eos_token_id")
+        self.eosId = Int32(stops?.first
+            ?? (g.int("tokenizer.ggml.eos_token_id") ?? 0))
+        self.eosIds = Set((stops ?? [Int(self.eosId)]).map(Int32.init))
+        addStops(Tokenizer.stopIds(
+            generationConfigText: g.string(Tokenizer.generationConfigKey)))
     }
+
+    // The whole generation_config.json, verbatim, so the one file the sampler
+    // and the stop set both read travels INSIDE the weight file rather than
+    // beside it. Arch-neutral: both readers are arch-agnostic.
+    public static let generationConfigKey = "general.generation_config_json"
 
     static func bytesToUnicode() -> [UInt8: Character] {
         var bs = Array(33...126) + Array(161...172) + Array(174...255)

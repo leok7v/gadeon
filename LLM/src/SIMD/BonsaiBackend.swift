@@ -15,6 +15,7 @@ public final class BonsaiBackend: AgentBackend, @unchecked Sendable {
     }
 
     public var eos: Int32 { tokenizer.eosId }
+    public var eosIds: Set<Int32> { tokenizer.eosIds }
     public var position: Int { get async { engine.pos } }
 
     public func encode(_ text: String) -> [Int32] {
@@ -97,7 +98,10 @@ public struct BonsaiChat {
     public init(ggufPath: String) throws {
         let m = try BonsaiModel(path: ggufPath)
         engine = BonsaiEngine(m)
-        tokenizer = try Tokenizer(gguf: m.gguf)
+        var tok = try Tokenizer(gguf: m.gguf)
+        tok.addStops(Tokenizer.stopIds(besideSet: URL(
+            fileURLWithPath: ggufPath).deletingLastPathComponent()))
+        tokenizer = tok
         chatTemplate = m.gguf.string("tokenizer.chat_template")
             ?? BonsaiChat.fallbackTemplate
         samplingPresets = SamplingPresets.require(gguf: m.gguf,

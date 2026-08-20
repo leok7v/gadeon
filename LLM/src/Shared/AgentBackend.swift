@@ -251,6 +251,7 @@ public final class EngineBackend: AgentBackend, @unchecked Sendable {
     }
 
     public var eos: Int32 { chat.tokenizer.eosId }
+    public var eosIds: Set<Int32> { chat.tokenizer.eosIds }
 
     public var position: Int {
         get async { await chat.engine.position() }

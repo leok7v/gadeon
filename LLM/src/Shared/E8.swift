@@ -288,21 +288,28 @@ public enum E8 {
     public static func quantize(_ values: [Float], rows: Int, k: Int,
                                 opts: Q2Fit, padded: Bool,
                                 mu: Float) -> ([Float], E8Stats) {
+        let per = k / dim
         let qk = Q2E8.qk
         let nblk = k / qk
         var back = [Float](repeating: 0, count: rows * k)
         var hits = [Int](repeating: 0, count: rows)
         var peaks = [Float](repeating: 0, count: rows)
+        var codes = [UInt16](repeating: 0, count: rows * per)
+        var scale16 = [Float](repeating: 0, count: rows * nblk)
         let weights = opts.importance ?? []
         values.withUnsafeBufferPointer { vb in
         back.withUnsafeMutableBufferPointer { bb in
         hits.withUnsafeMutableBufferPointer { hb in
         peaks.withUnsafeMutableBufferPointer { kb in
+        codes.withUnsafeMutableBufferPointer { qb in
+        scale16.withUnsafeMutableBufferPointer { sb in
         weights.withUnsafeBufferPointer { wb in
                     nonisolated(unsafe) let src = vb.baseAddress!
                     nonisolated(unsafe) let ref = bb.baseAddress!
                     nonisolated(unsafe) let hip = hb.baseAddress!
                     nonisolated(unsafe) let pkp = kb.baseAddress!
+                    nonisolated(unsafe) let qp = qb.baseAddress!
+                    nonisolated(unsafe) let s16 = sb.baseAddress!
                     nonisolated(unsafe) let imp =
                         weights.count == k ? wb.baseAddress : nil
                     DispatchQueue.concurrentPerform(iterations: rows) { r in
@@ -317,8 +324,9 @@ public enum E8 {
                                 let w = imp.map { p in p + b * qk }
                                 let d = fit(block, qk, opts, w,
                                             padded, mu)
-                                assign(block, qk, d, c, &hit, padded,
-                                       mu, nil)
+                                assign(block, qk, d, c, &hit, padded, mu,
+                                       qp + r * per + b * (qk / dim))
+                                s16[r * nblk + b] = d
                                 for v in 0..<(qk / dim) {
                                     peak = max(peak, norm2(load(c + v * dim)))
                                 }
@@ -328,18 +336,20 @@ public enum E8 {
                         hip[r] = hit
                         pkp[r] = peak
                     }
-        }}}}}
+        }}}}}}}
         var stats = E8Stats()
         stats.vectors = rows * k / dim
         stats.clamped = hits.reduce(0, +)
         stats.peak = peaks.max() ?? 0
+        stats.codes = codes
+        stats.scales = scale16
         return (back, stats)
     }
 }
 
 // Q2_E8 on disk: SoA within a row, matching the layout Q2E8.quantize already
 // uses for its soa arm -- nblk fp16 scales, then nblk groups of 16 uint16
-// codes. 2*nblk + 32*nblk = 34*nblk bytes, byte for byte the Q2_X block, so
+// codes. 2*nblk + 32*nblk = 34*nblk bytes, byte for byte the Q2_0 block, so
 // every size calculation and the 16 KB tensor alignment carry over.
 
 public enum Q2E8Pack {

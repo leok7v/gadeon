@@ -14,11 +14,11 @@ public enum Q2Book {
         let eye = VisionShape(root, pre)
         let store = try Safetensors(dir: dir)
         let policy = Q2E8Policy(
-            trunk: .q2_x, embd: .q2_x, wide: [],
+            trunk: .q2_e8, embd: .q2_e8, wide: [],
             fit: Q2Fit(iterations: 8, renorm: false), imat: imat,
             hess: hess, gptq: true, ternary: false, lowRank: false,
             rotate: false, vision: false, raise: [:], spin: false,
-            untie: false, head: .q2_x, reconstruct: false, e8: false,
+            untie: false, head: .q2_e8, reconstruct: false, e8: false,
             e8p: false, rank: 0, mu: 0,
             damp: Q2GPTQ.damp)
         let plan = try Q2E8Convert.plans(store, text, eye, policy)
