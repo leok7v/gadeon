@@ -156,18 +156,22 @@ struct MetalEnc {
     static let attnMatrix =
         ProcessInfo.processInfo.environment["LLM_ATTN_MM"] != "0"
 
-    // Per TYPE because the two disagree; --kernel-bench has the numbers.
+    // The widest batch the narrow kernels are compiled for.
     // LLM_NARROW_MAX=0 restores the tile everywhere.
-    static let narrowMax = min(4,
-        Int(ProcessInfo.processInfo.environment["LLM_NARROW_MAX"] ?? "") ?? 4)
-    static let narrowMaxQ4 = min(narrowMax, 2)
+    static let narrowMax = min(5,
+        Int(ProcessInfo.processInfo.environment["LLM_NARROW_MAX"] ?? "") ?? 5)
+
+    static func narrowRows(_ e8: Bool, _ n: Int) -> Int {
+        let nr0 = e8 && n > 4 ? 4 : (e8 ? 8 : 4)
+        return (e8 ? 2 : 4) * nr0
+    }
 
     func gemmNarrow(_ w: GGUFTensor, X: MTLBuffer, out: MTLBuffer,
                     off: WeightRef, N: Int) {
         let k = w.dims[0], m = w.dims[1]
         var a = GemvArgs(woff: off.local, K: UInt32(k), M: UInt32(m))
-        let rows = 4
         let e8 = w.type == .q2_e8
+        let rows = MetalEnc.narrowRows(e8, N)
         let name = (e8 ? "q2_e8_gemm_nb_r" : "q4_0_gemm_nb_r") + "\(N)"
         groups(name, (m + rows - 1) / rows, tpg: 32) { e in
             e.setBuffer(off.buf, offset: 0, index: 0)
@@ -183,9 +187,8 @@ struct MetalEnc {
         let k = w.dims[0], m = w.dims[1]
         var a = GemvArgs(woff: off.local, K: UInt32(k), M: UInt32(m))
         var nn = UInt32(N)
-        let cap = w.type == .q4_0 ? MetalEnc.narrowMaxQ4 : MetalEnc.narrowMax
         let narrow = (w.type == .q2_e8 || w.type == .q4_0)
-            && N > 1 && N <= cap
+            && N > 1 && N <= MetalEnc.narrowMax
         // The half-tile spill path needs 8192B f32 temp; a fully in-bounds
         // tile
         // (M multiple of 64, N of 32) never spills, so 6144 suffices.

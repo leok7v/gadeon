@@ -1117,20 +1117,21 @@ public final class MetalEngine {
 
     // Rebuilds the drafter's KV over the committed tokens from the BASE
     // hiddens, replacing what drafting wrote from the drafter's own.
+    // Draft 0 already wrote row `base` from this same `prev`, so the rebuild
+    // starts past it.
     private func maintainMTP(_ d: MetalMTP, _ prev: MTLBuffer,
                              _ b: BatchScratch, _ fed: [Int32], from base: Int,
                              at p0: Int, count m: Int) {
         let c = cfg
-        d.truncate(to: base)
+        d.truncate(to: base + 1)
         let cb = ctx.queue.makeCommandBuffer()!
         let e = cb.makeComputeCommandEncoder()!
         let f = MetalEnc(ctx: ctx, e: e)
-        var j = 0
+        var j = 1
         while j < m {
             let stride = MemoryLayout<Float>.stride
-            d.encodeStep(f, token: Int(fed[j]),
-                         hidden: j == 0 ? prev : b.normed,
-                         hiddenOff: j == 0 ? 0 : (j - 1) * c.nEmbd * stride,
+            d.encodeStep(f, token: Int(fed[j]), hidden: b.normed,
+                         hiddenOff: (j - 1) * c.nEmbd * stride,
                          ropePos: p0 + j, head: false)
             j += 1
         }

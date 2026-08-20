@@ -18,9 +18,6 @@ public enum MetalKernelBench {
             if let t = model.gguf.maybe(name) { picks.append((name, t)) }
         }
         picks.append(("lm_head", model.output))
-        func pad(_ s: String, _ n: Int) -> String {
-            s.count >= n ? s : s + String(repeating: " ", count: n - s.count)
-        }
         var out = "kernel bench: "
             + URL(fileURLWithPath: ggufPath).lastPathComponent + "\n"
         out += pad("tensor", 24) + pad("kernel", 10) + pad("N", 4)
@@ -31,7 +28,9 @@ public enum MetalKernelBench {
             let x = ctx.makeF32(8 * k)
             let y = ctx.makeF32(8 * m)
             seed(x, 8 * k)
-            for n in [1, 2, 3, 4] {
+            // The first timed dispatch of a tensor pays its page-in.
+            _ = time(ctx, t, x, y, n: 1, tile: false, model: model)
+            for n in [1, 2, 3, 4, 5] {
                 for kind in ["auto", "tile"] {
                     let ms = time(ctx, t, x, y, n: n, tile: kind == "tile",
                                   model: model)
@@ -45,7 +44,29 @@ public enum MetalKernelBench {
             }
         }
         _ = c
+        out += occupancy(ctx)
         return out
+    }
+
+    // maxTotalThreadsPerThreadgroup falls as register use rises.
+    private static func occupancy(_ ctx: MetalContext) -> String {
+        var out = "\nregister pressure (maxThreads/threadgroup, "
+            + "1024 = uncontended)\n"
+        var names = ["q2_e8_gemv", "q4_0_gemv"]
+        for r in 2...5 {
+            names.append("q2_e8_gemm_nb_r\(r)")
+            names.append("q4_0_gemm_nb_r\(r)")
+        }
+        for n in names {
+            if let p = try? ctx.pipeline(n) {
+                out += pad(n, 24) + "\(p.maxTotalThreadsPerThreadgroup)\n"
+            }
+        }
+        return out
+    }
+
+    private static func pad(_ s: String, _ n: Int) -> String {
+        s.count >= n ? s : s + String(repeating: " ", count: n - s.count)
     }
 
     private static func seed(_ b: MTLBuffer, _ n: Int) {
@@ -65,7 +86,8 @@ public enum MetalKernelBench {
         let reps = 20
         let off = ctx.window(UInt64(t.base - model.gguf.map))
         var result = -1.0
-        let narrowOK = (t.type == .q2_e8 || t.type == .q4_0) && n > 1 && n <= 4
+        let narrowOK = (t.type == .q2_e8 || t.type == .q4_0)
+            && n > 1 && n <= MetalEnc.narrowMax
         if tile || narrowOK || n == 1 {
             let cb = ctx.queue.makeCommandBuffer()!
             let e = cb.makeComputeCommandEncoder()!

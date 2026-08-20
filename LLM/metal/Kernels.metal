@@ -191,10 +191,10 @@ kernel void q2_e8_gemv(
 }
 
 
-// q2_e8_gemm_nb: out[N,M] = X[N,K] @ W for a NARROW batch. One row per
-// thread, R1 columns held in registers, and the reduction spans only the
-// NX threads that share a row. [q2e8-narrow]
-template<ushort R1>
+// q2_e8_gemm_nb: out[N,M] = X[N,K] @ W for a NARROW batch. A thread owns NR0
+// rows and R1 columns; the activation slices are staged ONCE per block and
+// reused across every row. [q2e8-narrow]
+template<ushort R1, ushort NR0>
 void q2_e8_gemm_nb_impl(
         device const uchar  * weights,
         device const float  * X,
@@ -203,67 +203,83 @@ void q2_e8_gemm_nb_impl(
         device const ushort * tab,
         uint3  tgpig,
         ushort tiisg) {
-    const ushort NX = 8;
+    const ushort NX = 16;                 // lanes cooperating on one row
     const ushort NY = 32 / NX;
     const ushort tx = tiisg % NX;
     const ushort ty = tiisg / NX;
-    const uint row = tgpig.x * NY + ty;
+    const uint row0 = (tgpig.x * NY + ty) * NR0;
     const uint nblk = a.K / 128;
     const ulong rowBytes = (ulong) nblk * 34;
-    const ushort il = tx * 16;
-    const ushort v0 = il / 8;
-    float sumf[R1];
-    for (ushort c = 0; c < R1; c++) { sumf[c] = 0.0f; }
-    if (row < a.M) {
-        device const uchar * rp = weights + a.woff + row * rowBytes;
-        device const ushort * cs0 = (device const ushort *)
-            (rp + (ulong) nblk * 2);
-        for (uint ib = 0; ib < nblk; ib++) {
-            const float d = (float) (*(device const half *) (rp + ib * 2));
-            device const ushort * cs = cs0 + (ulong) ib * 16;
-            float4 sv[4];
-            float sh[2];
-            for (ushort u = 0; u < 2; u++) {
-                const ushort code = cs[v0 + u];
-                const ushort t   = tab[code & 0xFF];
-                const ushort sgn = (code >> 8) & 0x7F;
-                sh[u] = (code & 0x8000) ? -0.25f : 0.25f;
-                const ushort pe  = popcount((ushort) (t & 0x5555)) & 1;
-                const bool   f7  = ((popcount(sgn) & 1) != pe);
-                for (ushort i = 0; i < 8; i++) {
-                    const float v = (float) ((t >> (2 * i)) & 3) + 0.5f;
-                    const bool neg = (i < 7) ? (((sgn >> i) & 1) != 0) : f7;
-                    sv[(u * 8 + i) / 4][(u * 8 + i) % 4] = neg ? -v : v;
-                }
+    const ushort il = tx * 8;             // this lane's 8 weights of a block
+    device const uchar * W = weights + a.woff;
+    float acc[NR0 * R1];
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < NR0 * R1; i++) { acc[i] = 0.0f; }
+    for (uint ib = 0; ib < nblk; ib++) {
+        float  dd[NR0];
+        ushort cd[NR0];
+        // A row past M reads row M-1 with a zero scale, never out of bounds.
+        #pragma clang loop unroll(full)
+        for (ushort r = 0; r < NR0; r++) {
+            device const uchar * rp = W + min(row0 + r, a.M - 1) * rowBytes;
+            dd[r] = (row0 + r < a.M)
+                ? (float) (*(device const half *) (rp + (ulong) ib * 2))
+                : 0.0f;
+            cd[r] = ((device const ushort *) (rp + (ulong) nblk * 2))
+                [(ulong) ib * 16 + tx];
+        }
+        float4 y0[R1], y1[R1];
+        float  sy[R1];
+        #pragma clang loop unroll(full)
+        for (ushort c = 0; c < R1; c++) {
+            device const float4 * y = (device const float4 *)
+                (X + (ulong) c * a.K + (ulong) ib * 128 + il);
+            y0[c] = y[0];
+            y1[c] = y[1];
+            sy[c] = y0[c].x + y0[c].y + y0[c].z + y0[c].w
+                  + y1[c].x + y1[c].y + y1[c].z + y1[c].w;
+        }
+        #pragma clang loop unroll(full)
+        for (ushort r = 0; r < NR0; r++) {
+            const ushort t   = tab[cd[r] & 0xFF];
+            const ushort sgn = (cd[r] >> 8) & 0x7F;
+            const float  sh  = (cd[r] & 0x8000) ? -0.25f : 0.25f;
+            const ushort pe  = popcount((ushort) (t & 0x5555)) & 1;
+            const bool   f7  = ((popcount(sgn) & 1) != pe);
+            float4 s0, s1;
+            #pragma clang loop unroll(full)
+            for (ushort i = 0; i < 8; i++) {
+                const float v = (float) ((t >> (2 * i)) & 3) + 0.5f;
+                const bool neg = (i < 7) ? (((sgn >> i) & 1) != 0) : f7;
+                if (i < 4) { s0[i] = neg ? -v : v; }
+                else { s1[i - 4] = neg ? -v : v; }
             }
+            #pragma clang loop unroll(full)
             for (ushort c = 0; c < R1; c++) {
-                device const float4 * y = (device const float4 *)
-                    (X + (ulong) c * a.K + (ulong) ib * 128 + il);
-                float dot4 = 0.0f;
-                float s0 = 0.0f, s1 = 0.0f;
-                for (ushort q = 0; q < 4; q++) {
-                    const float4 yy = y[q];
-                    dot4 += dot(sv[q], yy);
-                    const float ss = yy.x + yy.y + yy.z + yy.w;
-                    if (q < 2) { s0 += ss; } else { s1 += ss; }
-                }
-                sumf[c] += d * (dot4 + sh[0] * s0 + sh[1] * s1);
+                acc[r * R1 + c] += dd[r]
+                    * (dot(s0, y0[c]) + dot(s1, y1[c]) + sh * sy[c]);
             }
         }
     }
-    for (ushort c = 0; c < R1; c++) {
-        sumf[c] += simd_shuffle_down(sumf[c], 4);
-        sumf[c] += simd_shuffle_down(sumf[c], 2);
-        sumf[c] += simd_shuffle_down(sumf[c], 1);
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < NR0 * R1; i++) {
+        acc[i] += simd_shuffle_down(acc[i], 8);
+        acc[i] += simd_shuffle_down(acc[i], 4);
+        acc[i] += simd_shuffle_down(acc[i], 2);
+        acc[i] += simd_shuffle_down(acc[i], 1);
     }
-    if (tx == 0 && row < a.M) {
-        for (ushort c = 0; c < R1; c++) {
-            out[(ulong) c * a.M + row] = sumf[c];
+    if (tx == 0) {
+        for (ushort r = 0; r < NR0; r++) {
+            if (row0 + r < a.M) {
+                for (ushort c = 0; c < R1; c++) {
+                    out[(ulong) c * a.M + row0 + r] = acc[r * R1 + c];
+                }
+            }
         }
     }
 }
 
-#define Q2E8_NB_KERNEL(NAME, R1)                                       \
+#define Q2E8_NB_KERNEL(NAME, R1, NR0)                                  \
 kernel void NAME(                                                      \
         device const uchar  * weights [[buffer(0)]],                   \
         device const float  * X       [[buffer(1)]],                   \
@@ -272,12 +288,14 @@ kernel void NAME(                                                      \
         device const ushort * tab     [[buffer(4)]],                   \
         uint3  tgpig [[threadgroup_position_in_grid]],                 \
         ushort tiisg [[thread_index_in_simdgroup]]) {                  \
-    q2_e8_gemm_nb_impl<R1>(weights, X, out, a, tab, tgpig, tiisg);     \
+    q2_e8_gemm_nb_impl<R1, NR0>(weights, X, out, a, tab,               \
+                                tgpig, tiisg);                         \
 }
 
-Q2E8_NB_KERNEL(q2_e8_gemm_nb_r2, 2)
-Q2E8_NB_KERNEL(q2_e8_gemm_nb_r3, 3)
-Q2E8_NB_KERNEL(q2_e8_gemm_nb_r4, 4)
+Q2E8_NB_KERNEL(q2_e8_gemm_nb_r2, 2, 8)
+Q2E8_NB_KERNEL(q2_e8_gemm_nb_r3, 3, 8)
+Q2E8_NB_KERNEL(q2_e8_gemm_nb_r4, 4, 8)
+Q2E8_NB_KERNEL(q2_e8_gemm_nb_r5, 5, 4)
 
 
 // Q2_0 batched mat-mat (prefill): out[N,M] = X[N,K] @ W[K,M]
@@ -821,10 +839,10 @@ kernel void q4_0_gemv(
 // per-layer table one 256-wide slice of its 8960-wide row. Both land on block
 // boundaries, so the span always starts at a block.
 // q4_0_gemm_nb: the narrow-batch twin of q4_0_gemv, for the TIED lm_head a
-// verify pass sweeps. The head is the widest tensor in the file, so paying a
-// 32-column tile for 3 columns costs more here than anywhere else.
-// [q2e8-narrow]
-template<ushort R1>
+// verify pass sweeps. Same NR0-rows-per-thread shape as its Q2_E8 twin; a
+// block is walked in four 4-byte groups so the staged activations stay in
+// registers. [q2e8-narrow]
+template<ushort R1, ushort NR0>
 void q4_0_gemm_nb_impl(
         device const uchar * weights,
         device const float * X,
@@ -836,47 +854,70 @@ void q4_0_gemm_nb_impl(
     const ushort NY = 32 / NX;
     const ushort tx = tiisg % NX;
     const ushort ty = tiisg / NX;
-    const uint row = tgpig.x * NY + ty;
+    const uint row0 = (tgpig.x * NY + ty) * NR0;
     const uint nblk = a.K / 32;
     const ulong rowBytes = (ulong) nblk * 18;
-    float sumf[R1];
-    for (ushort c = 0; c < R1; c++) { sumf[c] = 0.0f; }
-    if (row < a.M) {
-        device const uchar * W = weights + a.woff + row * rowBytes;
-        for (uint ib = tx; ib < nblk; ib += NX) {
-            device const uchar * bp = W + (ulong) ib * 18;
-            const float d = (float) (*(device const half *) bp);
-            device const uchar * qs = bp + 2;
-            float lo[16], hi[16];
-            for (ushort i = 0; i < 16; i++) {
-                const uchar b = qs[i];
-                lo[i] = (float) (b & 0x0F) - 8.0f;
-                hi[i] = (float) (b >> 4) - 8.0f;
-            }
+    device const uchar * W = weights + a.woff;
+    float acc[NR0 * R1];
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < NR0 * R1; i++) { acc[i] = 0.0f; }
+    for (uint ib = tx; ib < nblk; ib += NX) {
+        float dd[NR0];
+        device const uchar * qs[NR0];
+        // A row past M reads row M-1 with a zero scale, never out of bounds.
+        #pragma clang loop unroll(full)
+        for (ushort r = 0; r < NR0; r++) {
+            device const uchar * bp = W
+                + min(row0 + r, a.M - 1) * rowBytes + (ulong) ib * 18;
+            dd[r] = (row0 + r < a.M)
+                ? (float) (*(device const half *) bp) : 0.0f;
+            qs[r] = bp + 2;
+        }
+        #pragma clang loop unroll(full)
+        for (ushort g = 0; g < 4; g++) {
+            float4 ylo[R1], yhi[R1];
+            #pragma clang loop unroll(full)
             for (ushort c = 0; c < R1; c++) {
-                device const float * y = X + (ulong) c * a.K
-                    + (ulong) ib * 32;
-                float sacc = 0.0f;
-                for (ushort i = 0; i < 16; i++) {
-                    sacc += lo[i] * y[i] + hi[i] * y[i + 16];
+                device const float4 * y = (device const float4 *)
+                    (X + (ulong) c * a.K + (ulong) ib * 32);
+                ylo[c] = y[g];
+                yhi[c] = y[4 + g];
+            }
+            #pragma clang loop unroll(full)
+            for (ushort r = 0; r < NR0; r++) {
+                float4 lo, hi;
+                #pragma clang loop unroll(full)
+                for (ushort i = 0; i < 4; i++) {
+                    const uchar b = qs[r][g * 4 + i];
+                    lo[i] = (float) (b & 0x0F) - 8.0f;
+                    hi[i] = (float) (b >> 4) - 8.0f;
                 }
-                sumf[c] += sacc * d;
+                #pragma clang loop unroll(full)
+                for (ushort c = 0; c < R1; c++) {
+                    acc[r * R1 + c] += dd[r]
+                        * (dot(lo, ylo[c]) + dot(hi, yhi[c]));
+                }
             }
         }
     }
-    for (ushort c = 0; c < R1; c++) {
-        sumf[c] += simd_shuffle_down(sumf[c], 4);
-        sumf[c] += simd_shuffle_down(sumf[c], 2);
-        sumf[c] += simd_shuffle_down(sumf[c], 1);
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < NR0 * R1; i++) {
+        acc[i] += simd_shuffle_down(acc[i], 4);
+        acc[i] += simd_shuffle_down(acc[i], 2);
+        acc[i] += simd_shuffle_down(acc[i], 1);
     }
-    if (tx == 0 && row < a.M) {
-        for (ushort c = 0; c < R1; c++) {
-            out[(ulong) c * a.M + row] = sumf[c];
+    if (tx == 0) {
+        for (ushort r = 0; r < NR0; r++) {
+            if (row0 + r < a.M) {
+                for (ushort c = 0; c < R1; c++) {
+                    out[(ulong) c * a.M + row0 + r] = acc[r * R1 + c];
+                }
+            }
         }
     }
 }
 
-#define Q40_NB_KERNEL(NAME, R1)                                        \
+#define Q40_NB_KERNEL(NAME, R1, NR0)                                   \
 kernel void NAME(                                                      \
         device const uchar * weights [[buffer(0)]],                    \
         device const float * X       [[buffer(1)]],                    \
@@ -884,12 +925,13 @@ kernel void NAME(                                                      \
         constant GemvArgs  & a       [[buffer(3)]],                    \
         uint3  tgpig [[threadgroup_position_in_grid]],                 \
         ushort tiisg [[thread_index_in_simdgroup]]) {                  \
-    q4_0_gemm_nb_impl<R1>(weights, X, out, a, tgpig, tiisg);           \
+    q4_0_gemm_nb_impl<R1, NR0>(weights, X, out, a, tgpig, tiisg);      \
 }
 
-Q40_NB_KERNEL(q4_0_gemm_nb_r2, 2)
-Q40_NB_KERNEL(q4_0_gemm_nb_r3, 3)
-Q40_NB_KERNEL(q4_0_gemm_nb_r4, 4)
+Q40_NB_KERNEL(q4_0_gemm_nb_r2, 2, 4)
+Q40_NB_KERNEL(q4_0_gemm_nb_r3, 3, 4)
+Q40_NB_KERNEL(q4_0_gemm_nb_r4, 4, 4)
+Q40_NB_KERNEL(q4_0_gemm_nb_r5, 5, 4)
 
 
 kernel void q4_0_dequant_row(
@@ -3352,10 +3394,21 @@ is 2 to 8 columns wide, so it pays the same tile to use a tenth of it, and
 its cost is FLAT in N -- measured 130.4 ms at width 2, 139.8 at 4, 158.3 at 8
 on the 4B, against 39.4 ms for a plain seq=1 decode of the same weights.
 
-`gemm_nb` is the gemv walk with an inner column loop: one weight stream and
-one codebook unpack per (row, block), N times the MACs. `gemmRows` is the
-other option and is worse from width 3 up, because N gemv calls are N weight
-streams.
+THE SHAPE, and both halves are load-bearing. A thread owns NR0 rows and R1
+columns. Its R1 activation slices are read into registers ONCE per block and
+reused across every row, so the activation traffic the grid issues is
+M*K*R1/NR0 rather than M*K*R1 -- against a weight stream of 0.27 bytes per
+element, that ratio IS the kernel's cost. `gemmRows` is the other option and
+loses from width 3 up, because N gemv calls are N weight streams.
+
+NR0 is a TEMPLATE argument, because `acc[NR0 * R1]` is an array bound -- a
+Metal function constant resolves after template instantiation and cannot
+carry it, which is why llama.cpp templates r1ptg and reserves its function
+constants for nsg / nxpsg. So the host's rows-per-threadgroup is a second
+copy of the same number, and what keeps the two honest is
+`MetalSelfTest.checkNarrow` rather than a note in either file: mutating the
+Swift constant to 32 takes the Q2_E8 rows to rel 8.6e-01 and leaves q4_0
+clean, which is the localization a real mismatch would show.
 
 ### [q2e8-gemm]  why Q2_E8 has its own GEMM rather than an instantiation
 

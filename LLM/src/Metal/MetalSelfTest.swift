@@ -44,6 +44,7 @@ public enum MetalSelfTest {
             + "\(ctx.device.maxBufferLength / 1_048_576) MB")
         step(try checkGemv(model, ctx))
         step(try checkGemm(model, ctx))
+        step(try checkNarrow(model, ctx))
         step(try checkVisionBlocks(ctx))
         step(try checkDequant(model, ctx))
         step(try checkForward(model))
@@ -485,6 +486,72 @@ public enum MetalSelfTest {
         let rel = mag > 0 ? d / mag : d
         return "gemm [\(n),\(k)]@[\(k),\(m)]  maxAbsDiff=\(d)  rel=\(rel)  "
             + (rel < 2e-3 ? "PASS" : "FAIL")
+    }
+
+    // The narrow GEMMs against N gemv calls of the same weight. The two
+    // differ only in the ORDER of one reduction, so anything past fp32
+    // rounding is a layout bug rather than a tolerance to widen.
+
+    private static func checkNarrow(_ model: BonsaiModel,
+                                    _ ctx: MetalContext) throws -> String {
+        var lines: [String] = []
+        var failed = 0
+        var ran = 0
+        for ty in [GGUFType.q2_e8, .q4_0] {
+            if let w = widest(model, ty) {
+                let k = w.dims[0], m = w.dims[1]
+                let off = ctx.window(UInt64(w.base - model.gguf.map))
+                for n in 2...MetalEnc.narrowMax {
+                    var xflat: [Float] = []
+                    for c in 0..<n { xflat += fill(k, seed: UInt64(c + 70)) }
+                    let xb = ctx.makeF32(xflat)
+                    let narrow = ctx.makeF32(2 * n * m)
+                    let cb = ctx.queue.makeCommandBuffer()!
+                    let e = cb.makeComputeCommandEncoder()!
+                    let f = MetalEnc(ctx: ctx, e: e)
+                    f.gemmNarrow(w, X: xb, out: narrow, off: off, N: n)
+                    for c in 0..<n {
+                        f.gemv(w, x: xb, out: narrow, off: off,
+                               xOff: c * k * 4,
+                               outOff: (n + c) * m * 4)
+                    }
+                    e.endEncoding()
+                    cb.commit()
+                    cb.waitUntilCompleted()
+                    precondition(cb.error == nil, "narrow: \(cb.error!)")
+                    let got = Array(narrow.f32(2 * n * m))
+                    var d: Float = 0
+                    var mag: Float = 0
+                    for i in 0..<(n * m) {
+                        d = max(d, abs(got[i] - got[n * m + i]))
+                        mag = max(mag, abs(got[n * m + i]))
+                    }
+                    let rel = mag > 0 ? d / mag : d
+                    let ok = rel < 1e-5
+                    if !ok { failed += 1 }
+                    ran += 1
+                    lines.append(String(format:
+                        "  %@ N=%d [%d,%d]  rel %.2e  %@", "\(ty)", n, k, m,
+                        rel, ok ? "PASS" : "FAIL"))
+                }
+            }
+        }
+        return "narrow gemm vs gemv \(ran - failed)/\(ran)  "
+            + (failed == 0 ? "PASS" : "FAIL") + "\n"
+            + lines.joined(separator: "\n")
+    }
+
+    private static func widest(_ model: BonsaiModel,
+                               _ ty: GGUFType) -> GGUFTensor? {
+        var out: GGUFTensor? = nil
+        for name in model.gguf.tensors.keys.sorted() {
+            let t = model.gguf.tensors[name]!
+            if t.type == ty && t.dims.count == 2 && t.dims[0] % 128 == 0
+                && (out == nil || t.dims[1] > out!.dims[1]) {
+                out = t
+            }
+        }
+        return out
     }
 
     // Q2_0 GEMV vs Q2_0.matvec on the layer-0 ffn_gate (present in both
