@@ -82,16 +82,34 @@ enum TeX {
         if let nx = s.index(i, offsetBy: 1, limitedBy: s.endIndex) {
             isDisplay = nx < s.endIndex && s[nx] == "$"
         }
-        let endMarker = isDisplay ? "$$" : "$"
         let off = isDisplay ? 2 : 1
         let searchStart = s.index(i, offsetBy: off)
-        if searchStart <= s.endIndex,
-           let endRange = s.range(of: endMarker,
+        if isDisplay, searchStart <= s.endIndex,
+           let endRange = s.range(of: "$$",
                                   range: searchStart..<s.endIndex) {
             if !buf.isEmpty { out.append(.text(buf)); buf.removeAll() }
             let body = String(s[searchStart..<endRange.lowerBound])
-            out.append(.math(body, display: isDisplay))
+            out.append(.math(body, display: true))
             result = endRange.upperBound
+        } else if !isDisplay, searchStart <= s.endIndex,
+                  let body = inlineBody(s, from: searchStart) {
+            if !buf.isEmpty { out.append(.text(buf)); buf.removeAll() }
+            out.append(.math(String(s[body]), display: false))
+            result = s.index(after: body.upperBound)
+        }
+        return result
+    }
+
+    private static func inlineBody(_ s: String, from start: String.Index)
+        -> Range<String.Index>? {
+        var result: Range<String.Index>? = nil
+        if start < s.endIndex, !s[start].isWhitespace,
+           let close = s[start...].firstIndex(of: "$"), close > start {
+            let after = s.index(after: close)
+            let digit = after < s.endIndex && s[after].isNumber
+            if !s[s.index(before: close)].isWhitespace, !digit {
+                result = start..<close
+            }
         }
         return result
     }
