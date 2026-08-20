@@ -24,6 +24,15 @@ final class CalculatorTests: XCTestCase {
         XCTAssertEqual(e, "1024")
     }
 
+    func testCurrencySignsAreIgnored() async {
+        let a = await eval("$1.10 - $1.00")
+        XCTAssertEqual(a, "0.1")
+        let b = await eval("$100 * 2")
+        XCTAssertEqual(b, "200")
+        let c = await eval("x = $5")
+        XCTAssertEqual(c, "5")
+    }
+
     func testRealErrorsUnchanged() async {
         let bad = await eval("1 +")
         XCTAssertTrue(bad.hasPrefix("error"))

@@ -39,6 +39,7 @@ public actor Calculator {
                                   options: .regularExpression)
             .replacingOccurrences(of: #"\s*(=\s*\?+|\?+|=)\s*$"#, with: "",
                                   options: .regularExpression)
+            .replacingOccurrences(of: "$", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         var result = "error: empty expression"
         if !text.isEmpty {

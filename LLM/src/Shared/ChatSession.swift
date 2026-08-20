@@ -908,8 +908,25 @@ public actor ChatSession {
 
     // The first line, trimmed of quotes / markup / a "Title:" prefix, capped to
     // a handful of words.
+    static func withoutMarkup(_ raw: String) -> String {
+        var out = ""
+        var rest = Substring(raw)
+        while let lt = rest.firstIndex(of: "<") {
+            let tail = rest[lt...]
+            if let gt = tail.firstIndex(of: ">") {
+                out += rest[..<lt]
+                rest = tail[tail.index(after: gt)...]
+            } else {
+                out += rest
+                rest = rest[rest.endIndex...]
+            }
+        }
+        return out + rest
+    }
+
     static func cleanTitle(_ raw: String) -> String {
-        let line = raw.split(whereSeparator: \.isNewline)
+        let line = ChatSession.withoutMarkup(raw)
+            .split(whereSeparator: \.isNewline)
             .first.map(String.init) ?? ""
         let trimmed = line.trimmingCharacters(
             in: CharacterSet(charactersIn: " \t\"'`.*_#"))
@@ -926,7 +943,10 @@ public actor ChatSession {
             words.append(String(word))
             chars += word.count + 1
         }
-        return words.joined(separator: " ")
+        let prose = words.contains { word in
+            word.contains(where: { c in c.isLetter })
+        }
+        return prose ? words.joined(separator: " ") : ""
     }
 
     static let followUpInstruction =
@@ -943,7 +963,8 @@ public actor ChatSession {
     static let followupMax = 140
 
     static func cleanFollowup(_ raw: String) -> String {
-        let lines = raw.split(whereSeparator: \.isNewline)
+        let lines = ChatSession.withoutMarkup(raw)
+            .split(whereSeparator: \.isNewline)
             .map { line in line.trimmingCharacters(in: .whitespaces) }
             .filter { line in !line.isEmpty }
         let asked = lines.filter { line in line.contains("?") }

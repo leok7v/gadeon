@@ -72,4 +72,43 @@ struct TitleSeedTests {
         let once = gen + ChatSession.titleSeed(gen, wire)
         #expect(ChatSession.titleSeed(once, wire) == "")
     }
+
+    static let toolCallRaw = "<tool_call>\n<function=calculator>\n"
+        + "<parameter=expression>\n1.10 - 1.00\n</parameter>\n</function>\n"
+        + "</tool_call>"
+
+    @Test func aToolCallNeverBecomesATitle() {
+        #expect(ChatSession.cleanTitle(TitleSeedTests.toolCallRaw) == "")
+    }
+
+    @Test func aToolCallNeverBecomesAFollowup() {
+        #expect(ChatSession.cleanFollowup(TitleSeedTests.toolCallRaw) == "")
+    }
+
+    @Test func reasoningMarkersAreStripped() {
+        #expect(ChatSession.cleanTitle("<think>hm</think>Bat and ball")
+                == "hmBat and ball")
+        #expect(ChatSession.cleanTitle("<|im_end|>") == "")
+    }
+
+    @Test func aTitleWithoutLettersIsRejected() {
+        #expect(ChatSession.cleanTitle("1.10 - 1.00") == "")
+        #expect(ChatSession.cleanTitle("42") == "")
+    }
+
+    @Test func ordinaryTitlesSurvive() {
+        #expect(ChatSession.cleanTitle("Bat and ball puzzle")
+                == "Bat and ball puzzle")
+        #expect(ChatSession.cleanTitle("Title: Riddle Solution")
+                == "Riddle Solution")
+    }
+
+    @Test func anUnmatchedAngleIsNotATag() {
+        #expect(ChatSession.withoutMarkup("5 < 6 and more") == "5 < 6 and more")
+    }
+
+    @Test func aRealFollowupSurvives() {
+        let q = "How did you get 0.05 from the equation?"
+        #expect(ChatSession.cleanFollowup(q) == q)
+    }
 }
