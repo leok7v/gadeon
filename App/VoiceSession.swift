@@ -140,22 +140,26 @@ import Observation
     func answerArrived(_ piece: String) {
         disarmCue()
         if enabled {
-            for segment in answer.push(piece) { say(segment, shown: true) }
+            for segment in answer.push(piece) {
+                say(segment.spoken, shown: segment.shown)
+            }
         }
     }
 
     func reasoningArrived(_ piece: String) {
         disarmCue()
         if enabled && speakReasoning {
-            for segment in reasoning.push(piece) { say(segment) }
+            for segment in reasoning.push(piece) { say(segment.spoken) }
         }
     }
 
     func endTurn() {
         disarmCue()
         if enabled {
-            for segment in reasoning.finish() { say(segment) }
-            for segment in answer.finish() { say(segment) }
+            for segment in reasoning.finish() { say(segment.spoken) }
+            for segment in answer.finish() {
+                say(segment.spoken, shown: segment.shown)
+            }
         }
         answer = SpeakableText()
         reasoning = SpeakableText()
@@ -209,12 +213,12 @@ import Observation
         turnSilenced = true
     }
 
-    private func say(_ text: String, shown: Bool = false) {
+    private func say(_ text: String, shown: String? = nil) {
         if !turnSilenced {
             let tag = nextTag
             nextTag += 1
-            if shown {
-                answerByTag[tag] = text
+            if let shown {
+                answerByTag[tag] = shown
                     .trimmingCharacters(in: .whitespacesAndNewlines)
             }
             player?.enqueue(terminated(text), tag: tag, voice: voiceName,

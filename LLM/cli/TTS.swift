@@ -88,10 +88,10 @@ func wavBytes(_ pcm: [Float], rate: Int) -> [UInt8] {
         var chunker = SpeakableText()
         var segments = chunker.push(source)
         segments.append(contentsOf: chunker.finish())
-        for s in segments { err("  say: \(s)\n") }
+        for s in segments { err("  say: \(s.spoken)\n") }
         // One segment per line: the engine's own splitter then gives each the
         // inter-sentence pause a spoken reply would have between them.
-        return segments.joined(separator: "\n")
+        return segments.map { s in s.spoken }.joined(separator: "\n")
     }
     if let text = chunked ?? text {
         let voice = voiceName.flatMap { name in Speech.voice(named: name) }

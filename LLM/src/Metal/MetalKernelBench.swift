@@ -7,17 +7,50 @@ import Metal
 
 public enum MetalKernelBench {
 
+    // Needs MTL_CAPTURE_ENABLED=1 in the environment to be allowed at all.
+    private static func capture(_ ctx: MetalContext) -> String {
+        var note = ""
+        let env = ProcessInfo.processInfo.environment
+        if let path = env["LLM_GPU_CAPTURE"] {
+            let mgr = MTLCaptureManager.shared()
+            let d = MTLCaptureDescriptor()
+            d.captureObject = ctx.queue
+            if mgr.supportsDestination(.gpuTraceDocument) {
+                d.destination = .gpuTraceDocument
+                d.outputURL = URL(fileURLWithPath: path)
+                try? FileManager.default.removeItem(atPath: path)
+                do {
+                    try mgr.startCapture(with: d)
+                    note = "capturing to \(path)\n"
+                } catch {
+                    note = "capture refused: \(error)\n"
+                }
+            } else {
+                note = "this device cannot write a .gputrace document; set "
+                    + "MTL_CAPTURE_ENABLED=1\n"
+            }
+        }
+        return note
+    }
+
     public static func run(ggufPath: String) throws -> String {
         let model = try BonsaiModel(path: ggufPath)
         let ctx = try MetalContext(model.gguf)
         try ctx.prewarm()
+        let env = ProcessInfo.processInfo.environment
+        let capNote = capture(ctx)
         let c = model.cfg
         var picks: [(String, GGUFTensor)] = []
         for name in ["blk.0.ffn_up.weight", "blk.0.ffn_down.weight",
-                     "blk.0.attn_qkv.weight", "blk.0.ssm_out.weight"] {
+                     "blk.0.attn_qkv.weight", "blk.0.ssm_out.weight",
+                     "blk.\(c.nLayer).ffn_down.weight",
+                     "blk.\(c.nLayer).attn_q.weight"] {
             if let t = model.gguf.maybe(name) { picks.append((name, t)) }
         }
         picks.append(("lm_head", model.output))
+        if let only = env["LLM_GPU_CAPTURE_ONLY"] {
+            picks = picks.filter { p in p.0.contains(only) }
+        }
         var out = "kernel bench: "
             + URL(fileURLWithPath: ggufPath).lastPathComponent + "\n"
         out += pad("tensor", 24) + pad("kernel", 10) + pad("N", 4)
@@ -32,8 +65,8 @@ public enum MetalKernelBench {
             _ = time(ctx, t, x, y, n: 1, tile: false, model: model)
             for n in [1, 2, 3, 4, 5] {
                 for kind in ["auto", "tile"] {
-                    let ms = time(ctx, t, x, y, n: n, tile: kind == "tile",
-                                  model: model)
+                    let ms = time(ctx, t, x, y, n: n,
+                                  tile: kind == "tile", model: model)
                     if ms > 0 {
                         let gbs = Double(bytes) / (ms / 1000) / 1e9
                         out += pad(name, 24) + pad(kind, 10) + pad("\(n)", 4)
@@ -45,6 +78,10 @@ public enum MetalKernelBench {
         }
         _ = c
         out += occupancy(ctx)
+        if !capNote.isEmpty {
+            MTLCaptureManager.shared().stopCapture()
+            out += "\n" + capNote
+        }
         return out
     }
 
@@ -52,10 +89,11 @@ public enum MetalKernelBench {
     private static func occupancy(_ ctx: MetalContext) -> String {
         var out = "\nregister pressure (maxThreads/threadgroup, "
             + "1024 = uncontended)\n"
-        var names = ["q2_e8_gemv", "q4_0_gemv"]
+        var names = ["q4_0_gemv", "q4_k_gemv", "iq1_s_gemv",
+                     "iq_gemv", "iq_gemm_mm_h"]
         for r in 2...5 {
-            names.append("q2_e8_gemm_nb_r\(r)")
             names.append("q4_0_gemm_nb_r\(r)")
+            names.append("iq_gemm_nb_r\(r)")
         }
         for n in names {
             if let p = try? ctx.pipeline(n) {
@@ -86,28 +124,36 @@ public enum MetalKernelBench {
         let reps = 20
         let off = ctx.window(UInt64(t.base - model.gguf.map))
         var result = -1.0
-        let narrowOK = (t.type == .q2_e8 || t.type == .q4_0)
-            && n > 1 && n <= MetalEnc.narrowMax
-        if tile || narrowOK || n == 1 {
-            let cb = ctx.queue.makeCommandBuffer()!
-            let e = cb.makeComputeCommandEncoder()!
-            let f = MetalEnc(ctx: ctx, e: e)
-            for _ in 0..<reps {
+        let tiled = t.type == .q2_0 || t.type == .q4_0 || t.type == .q8_0
+            || Blocks.superBlocked(t.type)
+        if tile {
+            result = tiled
+                ? run(ctx, reps) { f in
+                    f.gemmTile(t, X: x, out: y, off: off, N: n)
+                } : -1
+        } else {
+            result = run(ctx, reps) { f in
                 if n == 1 {
                     f.gemv(t, x: x, out: y, off: off)
-                } else if tile {
-                    f.gemmTile(t, X: x, out: y, off: off, N: n)
                 } else {
-                    f.gemmNarrow(t, X: x, out: y, off: off, N: n)
+                    f.gemm(t, X: x, out: y, off: off, N: n)
                 }
-            }
-            e.endEncoding()
-            cb.commit()
-            cb.waitUntilCompleted()
-            if cb.error == nil {
-                result = (cb.gpuEndTime - cb.gpuStartTime) * 1000 / Double(reps)
             }
         }
         return result
+    }
+
+    // All reps on ONE command buffer: kernel time, not per-commit latency.
+    private static func run(_ ctx: MetalContext, _ reps: Int,
+                            _ body: (MetalEnc) -> Void) -> Double {
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        let f = MetalEnc(ctx: ctx, e: e)
+        for _ in 0..<reps { body(f) }
+        e.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        return cb.error == nil
+            ? (cb.gpuEndTime - cb.gpuStartTime) * 1000 / Double(reps) : -1
     }
 }

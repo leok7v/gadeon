@@ -12,6 +12,11 @@ import Foundation
 // that made it a table is exactly what speech cannot carry. Lists keep their
 // items and lose their bullets, which is what a person reading aloud does.
 
+public struct Segment: Sendable, Equatable {
+    public let spoken: String
+    public let shown: String
+}
+
 public struct SpeakableText {
 
     private var pending = ""      // the trailing partial line
@@ -28,9 +33,9 @@ public struct SpeakableText {
 
     // Whatever arrived; the complete segments it completed.
 
-    public mutating func push(_ chunk: String) -> [String] {
+    public mutating func push(_ chunk: String) -> [Segment] {
         pending += chunk
-        var out: [String] = []
+        var out: [Segment] = []
         while let nl = pending.firstIndex(of: "\n") {
             let line = String(pending[pending.startIndex..<nl])
             pending = String(pending[pending.index(after: nl)...])
@@ -64,8 +69,8 @@ public struct SpeakableText {
 
     // End of turn: everything still held, complete or not.
 
-    public mutating func finish() -> [String] {
-        var out: [String] = []
+    public mutating func finish() -> [Segment] {
+        var out: [Segment] = []
         if !pending.isEmpty {
             let line = pending
             pending = ""
@@ -74,7 +79,8 @@ public struct SpeakableText {
         atLineStart = true
         closeTable(&out)
         if inFence {
-            out.append(SpeakableText.codeSummary(fenceLang))
+            out.append(SpeakableText.segment(
+                SpeakableText.codeSummary(fenceLang)))
             inFence = false
         }
         flushProse(&out)
@@ -83,7 +89,7 @@ public struct SpeakableText {
 
     // One whole line, routed by the block it belongs to.
 
-    private mutating func take(_ line: String, into out: inout [String]) {
+    private mutating func take(_ line: String, into out: inout [Segment]) {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         // The tail of a line whose opening was already spoken: a fence or a
         // table pipe can only start a line, so only the inline shaping is
@@ -98,7 +104,8 @@ public struct SpeakableText {
         } else if inFence {
             if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
                 inFence = false
-                out.append(SpeakableText.codeSummary(fenceLang))
+                out.append(SpeakableText.segment(
+                    SpeakableText.codeSummary(fenceLang)))
             }
         } else if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
             closeTable(&out)
@@ -124,7 +131,7 @@ public struct SpeakableText {
     // terminator, and glued to the next line it would run on.
 
     private mutating func add(_ trimmed: String,
-                              into out: inout [String]) {
+                              into out: inout [Segment]) {
         let standalone = trimmed.hasPrefix("#")
             || SpeakableText.listMarkerLength(trimmed) > 0
         if standalone { flushProse(&out) }
@@ -140,30 +147,38 @@ public struct SpeakableText {
         }
     }
 
-    private mutating func harvest(_ out: inout [String]) {
+    private mutating func harvest(_ out: inout [Segment]) {
         let split = SpeakableText.splitOffSentences(prose)
         if !split.spoken.isEmpty {
-            for s in SpeakableText.sentences(split.spoken) { out.append(s) }
+            for s in SpeakableText.sentences(split.spoken) {
+                out.append(SpeakableText.segment(s))
+            }
             prose = split.rest
         }
     }
 
-    private mutating func flushProse(_ out: inout [String]) {
+    private mutating func flushProse(_ out: inout [Segment]) {
         let text = prose.trimmingCharacters(in: .whitespacesAndNewlines)
         prose = ""
         if !text.isEmpty {
-            for s in SpeakableText.sentences(text) { out.append(s) }
+            for s in SpeakableText.sentences(text) {
+                out.append(SpeakableText.segment(s))
+            }
         }
     }
 
-    private mutating func closeTable(_ out: inout [String]) {
+    private mutating func closeTable(_ out: inout [Segment]) {
         if tableRows > 0 {
             // The header and its dashed rule are not rows a listener counts.
             let rows = max(1, tableRows - 2)
-            out.append(rows == 1 ? "A table."
-                                 : "A table of \(rows) rows.")
+            out.append(SpeakableText.segment(
+                rows == 1 ? "A table." : "A table of \(rows) rows."))
             tableRows = 0
         }
+    }
+
+    private static func segment(_ shown: String) -> Segment {
+        Segment(spoken: SpokenNumbers.expand(shown), shown: shown)
     }
 
     private static func codeSummary(_ lang: String) -> String {
@@ -236,7 +251,7 @@ public struct SpeakableText {
         let bare = out.trimmingCharacters(in: .whitespaces)
         let ruleOnly = !bare.isEmpty
             && bare.allSatisfy { c in c == "-" || c == "=" || c == "|" }
-        return ruleOnly ? "" : SpokenNumbers.expand(dropEnumerators(bare))
+        return ruleOnly ? "" : dropEnumerators(bare)
     }
 
     // "Split into: 1. Definitions, 2. Differences, and 3. Evidence." -- an

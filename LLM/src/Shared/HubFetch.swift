@@ -20,10 +20,6 @@ import Foundation
 // only the rest re-download. In-place (not a staged .part tree renamed at the
 // end) is also what lets the ANE compile cache be primed per-program while
 // later files still stream -- the e5 cache keys on the FINAL path.
-//
-// Resume within a launch uses URLError.downloadTaskResumeData; surviving app
-// suspension needs a background URLSession (wire in if a cold download
-// matters).
 public enum HubError: Error {
     case http(Int, String)          // status, url
     case malformed(String)          // endpoint that did not parse
@@ -53,6 +49,8 @@ public struct HubFetch: Sendable {
     static let sentinel = ".complete"
     static let retries = 5
     static let chunk = 1 << 20
+    static let span: Int64 = 32 << 20
+    static let lanes = 4
 
     // Download everything under `prefix` at `revision` into `dest`, return the
     // set dir (dest/{sha}, or dest/{sha}/{prefix}). Already staged at that
@@ -66,6 +64,7 @@ public struct HubFetch: Sendable {
         revision: String = "main",
         files: [String]? = nil,
         excludeFromBackup: Bool = false,
+        background: Bool = false,
         report: @escaping @Sendable (Status) -> Void = { _ in }
     ) async throws -> URL {
         let fm = FileManager.default
@@ -87,7 +86,7 @@ public struct HubFetch: Sendable {
             if want.isEmpty {
                 throw HubError.notFound(files?.joined(separator: ",") ?? prefix)
             }
-            try await install(repo, sha, want, root, report)
+            try await install(repo, sha, want, root, background, report)
             fm.createFile(atPath: mark.path, contents: nil)
             prune(dest, keep: sha)
         }
@@ -168,6 +167,7 @@ public struct HubFetch: Sendable {
         _ sha: String,
         _ want: [Entry],
         _ root: URL,
+        _ background: Bool,
         _ report: @escaping @Sendable (Status) -> Void
     ) async throws {
         let fm = FileManager.default
@@ -177,12 +177,6 @@ public struct HubFetch: Sendable {
         // (throttled) so the ETA is derived from real throughput.
         let bytesTotal = want.reduce(Int64(0)) { $0 + $1.size }
         let meter = ByteMeter(total: bytesTotal, report: report)
-        // ONE session for the whole set. A session per file gave URLSession a
-        // fresh connection pool for each of the set's ~84 blobs, so the CDN
-        // saw ~84 TLS/QUIC handshakes instead of one warm pool, and each
-        // abandoned HTTP/3 connection made CFNetwork log
-        // "nw_connection_copy_protocol_metadata on unconnected nw_connection"
-        // from its own teardown path.
         let pump = Pump()
         defer { pump.done() }
         for e in want {
@@ -195,7 +189,8 @@ public struct HubFetch: Sendable {
             let kept = fm.fileExists(atPath: dst.path)
                 && (try? verify(dst, e)) != nil
             if !kept {
-                try await pull(repo, sha, e, dst, pump) { written in
+                try await pull(repo, sha, e, dst, pump,
+                               background) { written in
                     meter.live(written)
                 }
             }
@@ -205,13 +200,14 @@ public struct HubFetch: Sendable {
 
     static func pull(
         _ repo: String, _ sha: String, _ e: Entry, _ dst: URL, _ pump: Pump,
+        _ background: Bool,
         _ onBytes: @escaping @Sendable (Int64) -> Void
     ) async throws {
         let fm = FileManager.default
         let raw = "\(host)/\(repo)/resolve/\(sha)/\(esc(e.path))"
         let url = try need(URL(string: raw), raw)
+        let part = dst.appendingPathExtension("part")
         var attempt = 0
-        var resume: Data? = nil
         var verified: URL? = nil
         var last: Error? = nil
         while attempt < retries && verified == nil {
@@ -225,23 +221,24 @@ public struct HubFetch: Sendable {
                 // and hashes in chunks, so where it comes from was not
                 // apparent from reading. These say which step owns it.
                 Diag.memoryDetail?("fetch start \(e.path)")
-                let tmp = try await pump.body(url, resume, onBytes)
+                if background {
+                    try await carry(url, e, part, pump, onBytes)
+                } else {
+                    try await fill(url, e, part, pump, onBytes)
+                }
                 Diag.memoryDetail?("fetch body \(e.path)")
                 do {
-                    try verify(tmp, e)
+                    try verify(part, e)
                     Diag.memoryDetail?("fetch verified \(e.path)")
-                    verified = tmp
+                    verified = part
                 } catch {
                     // One corrupted CDN read must not fail the whole fetch:
                     // throw the blob away and re-pull from scratch (no
                     // resume -- the bytes are bad, not missing).
-                    try? fm.removeItem(at: tmp)
-                    resume = nil
+                    try? fm.removeItem(at: part)
+                    sweep(part)
                     last = error
                 }
-            } catch let err as URLError {
-                resume = err.downloadTaskResumeData
-                last = err
             } catch {
                 last = error
             }
@@ -250,7 +247,91 @@ public struct HubFetch: Sendable {
         let file = try need(verified, e.path, last)
         try? fm.removeItem(at: dst)
         try fm.moveItem(at: file, to: dst)
+        sweep(part)
         Diag.memoryDetail?("fetch moved \(e.path)")
+    }
+
+    static func fill(_ url: URL, _ e: Entry, _ part: URL, _ pump: Pump,
+                     _ onBytes: @escaping @Sendable (Int64) -> Void)
+        async throws {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: part.path) {
+            fm.createFile(atPath: part.path, contents: nil)
+        }
+        var have = try assemble(part)
+        while have < e.size && !BackgroundGate.shared.parked {
+            let wave = Wave(base: have, onBytes: onBytes)
+            var pieces: [(Int, URL)] = []
+            try await withThrowingTaskGroup(of: (Int, URL).self) { group in
+                var lane = 0
+                var at = have
+                while lane < lanes && at < e.size {
+                    let from = at
+                    let to = min(from + span, e.size) - 1
+                    let idx = lane
+                    group.addTask {
+                        var req = URLRequest(url: url)
+                        req.setValue("bytes=\(from)-\(to)",
+                                     forHTTPHeaderField: "Range")
+                        let u = try await pump.body(req, lane: idx) { n in
+                            wave.live(idx, n)
+                        }
+                        return (idx, u)
+                    }
+                    at = to + 1
+                    lane += 1
+                }
+                for try await got in group {
+                    pieces.append(got)
+                }
+            }
+            pieces.sort { a, b in a.0 < b.0 }
+            for piece in pieces {
+                try append(piece.1, to: part)
+                try? fm.removeItem(at: piece.1)
+            }
+            let now = try assemble(part)
+            if now <= have {
+                throw HubError.http(0, url.absoluteString)
+            }
+            have = now
+            onBytes(have)
+        }
+    }
+
+    static func sweep(_ part: URL) {
+        let fm = FileManager.default
+        let dir = part.deletingLastPathComponent()
+        let stem = part.lastPathComponent + "."
+        let kids = (try? fm.contentsOfDirectory(at: dir,
+            includingPropertiesForKeys: nil)) ?? []
+        for k in kids where k.lastPathComponent.hasPrefix(stem) {
+            try? fm.removeItem(at: k)
+        }
+    }
+
+    static func size(_ url: URL) -> Int64 {
+        let a = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (a?[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
+    static func append(_ src: URL, to dst: URL) throws {
+        let r = try FileHandle(forReadingFrom: src)
+        let w = try FileHandle(forWritingTo: dst)
+        try w.seekToEnd()
+        var more = true
+        while more {
+            try autoreleasepool {
+                let c = try r.read(upToCount: chunk)
+                if let c, !c.isEmpty {
+                    try w.write(contentsOf: c)
+                } else {
+                    more = false
+                }
+            }
+        }
+        try r.close()
+        try w.close()
     }
 
     static func verify(_ file: URL, _ e: Entry) throws {
@@ -392,68 +473,90 @@ private final class ByteMeter: @unchecked Sendable {
     }
 }
 
-// One URLSession for a whole set install, plus the bridge from its download
-// callbacks to async/await. The session outlives every individual blob so the
-// CDN connection pool stays warm across the set, which means the delegate is
-// shared too: each in-flight task's continuation and byte sink are keyed by
-// taskIdentifier rather than held as one pair of fields. didFinish and
-// didComplete can both fire for the same task, so a waiter is REMOVED as it
-// is taken and the continuation is consumed exactly once.
+private final class Wave: @unchecked Sendable {
+    private let lock = NSLock()
+    private let base: Int64
+    private let onBytes: @Sendable (Int64) -> Void
+    private var lanes: [Int: Int64] = [:]
+
+    init(base: Int64, onBytes: @escaping @Sendable (Int64) -> Void) {
+        self.base = base
+        self.onBytes = onBytes
+    }
+
+    func live(_ lane: Int, _ n: Int64) {
+        lock.lock()
+        lanes[lane] = n
+        let sum = lanes.values.reduce(Int64(0)) { acc, v in acc + v }
+        lock.unlock()
+        onBytes(base + sum)
+    }
+}
+
 final class Pump: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private struct Waiter {
         let cont: CheckedContinuation<URL, Error>
         let onBytes: @Sendable (Int64) -> Void
     }
 
+    static let recycle = 8
+
     private let lock = NSLock()
     private var waiters: [Int: Waiter] = [:]
-    private var live: URLSession? = nil
+    private var live: [Int: URLSession] = [:]
+    private var served: [Int: Int] = [:]
+    private var seq = 0
 
-    // Built on first use, not in init: the session retains its delegate, so
-    // handing `self` to URLSession from inside init would publish a
-    // half-constructed object.
-    private func session() -> URLSession {
+    private func session(_ lane: Int) -> URLSession {
         lock.lock()
-        let s = live ?? URLSession(configuration: .default, delegate: self,
-                                   delegateQueue: nil)
-        live = s
+        let n = (served[lane] ?? 0) + 1
+        var s = live[lane]
+        if n > Pump.recycle {
+            s?.finishTasksAndInvalidate()
+            s = nil
+        }
+        let out = s ?? URLSession(configuration: .default, delegate: self,
+                                  delegateQueue: nil)
+        served[lane] = s == nil ? 1 : n
+        live[lane] = out
         lock.unlock()
-        return s
+        return out
     }
 
-    // Ends the session so it releases its delegate (self) and drops the
-    // connection pool. The retain cycle session <-> delegate lives until here
-    // by design, so this must run on every path out of the install.
     func done() {
         lock.lock()
-        let s = live
-        live = nil
+        let all = Array(live.values)
+        live.removeAll()
+        served.removeAll()
         lock.unlock()
-        s?.finishTasksAndInvalidate()
+        for s in all {
+            s.finishTasksAndInvalidate()
+        }
     }
 
-    private func take(_ id: Int) -> Waiter? {
+    private func take(_ task: URLSessionTask) -> Waiter? {
         lock.lock()
-        let w = waiters.removeValue(forKey: id)
+        let w = waiters.removeValue(forKey: Pump.token(task))
         lock.unlock()
         return w
     }
 
-    // Streams straight to a temp file and follows the 302 to the CDN (a
-    // multi-GB blob never lands in memory), reporting live bytesWritten for
-    // the progress meter and preserving resume-on-failure (the error carries
-    // downloadTaskResumeData for the retry loop).
-    func body(_ url: URL, _ resume: Data?,
+    static func token(_ task: URLSessionTask) -> Int {
+        Int(task.taskDescription ?? "") ?? -1
+    }
+
+    func body(_ req: URLRequest, lane: Int,
               _ onBytes: @escaping @Sendable (Int64) -> Void)
         async throws -> URL {
         try await withCheckedThrowingContinuation { cont in
-            let s = session()
-            let task = resume.map { s.downloadTask(withResumeData: $0) }
-                ?? s.downloadTask(with: url)
+            let s = session(lane)
+            let task = s.downloadTask(with: req)
             lock.lock()
-            waiters[task.taskIdentifier] = Waiter(cont: cont,
-                                                  onBytes: onBytes)
+            seq += 1
+            let key = seq
+            waiters[key] = Waiter(cont: cont, onBytes: onBytes)
             lock.unlock()
+            task.taskDescription = String(key)
             task.resume()
         }
     }
@@ -465,7 +568,7 @@ final class Pump: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
             .appendingPathComponent(
                 ProcessInfo.processInfo.globallyUniqueString)
         let code = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
-        let w = take(downloadTask.taskIdentifier)
+        let w = take(downloadTask)
         if code != 200 && code != 206 {
             w?.cont.resume(throwing: HubError.http(
                 code, downloadTask.originalRequest?.url?.absoluteString ?? ""))
@@ -482,7 +585,7 @@ final class Pump: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     didCompleteWithError error: Error?) {
         if let error {
-            take(task.taskIdentifier)?.cont.resume(throwing: error)
+            take(task)?.cont.resume(throwing: error)
         }
     }
 
@@ -492,7 +595,7 @@ final class Pump: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
                     totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
         lock.lock()
-        let w = waiters[downloadTask.taskIdentifier]
+        let w = waiters[Pump.token(downloadTask)]
         lock.unlock()
         w?.onBytes(totalBytesWritten)
     }

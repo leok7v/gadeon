@@ -50,7 +50,12 @@ targets:
     supportedDestinations: [macOS, iOS]
     sources:
       - LLM/src
-      - LLM/metal
+      # IQTables/IQKernels are #included by Kernels.metal; compiled on their
+      # own they see no codebook and fail.
+      - path: LLM/metal
+        excludes:
+          - IQTables.metal
+          - IQKernels.metal
       # The pronunciation data carries no file extension, which leaves
       # xcodegen unable to infer a build phase for it: both files land in the
       # navigator and in NO copy phase, so the framework ships without them
@@ -88,6 +93,20 @@ targets:
         # speech engine is compared against is built with it, so the app and
         # Package.swift have to carry it too or the two builds diverge.
         OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
+      configs:
+        # OPTIMIZED EVEN IN DEBUG. Everything that computes lives here -- the
+        # tensor kernels, both engines, the speech synthesizer -- and -Onone
+        # costs it ~100x: measured 14.55s to synthesize 0.575s of audio in a
+        # Debug app against 0.198s through the Release CLI, and main-thread
+        # stalls of 33-86s that read exactly like real bugs. Swift has no
+        # per-file pragma, so the optimization level is set where the compute
+        # is: LLM at -O, the App target left -Onone and debuggable.
+        #
+        # The cost is that stepping into LLM is unreliable in Debug. That is
+        # the right trade: this framework is gated by `swift test` and
+        # gadeon-cli, both of which run Release anyway.
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
   # The single app target: Hub-download-only, ANE-only. The bundled-model and
   # device-CPU bring-up targets are gone -- gadeon-cli and a HF round-trip cover
   # local emit work -- so the app ships no weights.

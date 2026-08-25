@@ -66,6 +66,18 @@ enum GQ {
         GGUF.rowByteCount(t.type, t.dims[0])
     }
 
+    static func blockElems(_ t: GGUFType) -> Int {
+        let out: Int
+        switch t {
+        case .q2k, .q3k, .q4k, .q5k, .q6k, .q8k,
+             .iq2_xxs, .iq2_xs, .iq3_xxs, .iq1_s, .iq3_s, .iq2_s,
+             .iq4_xs, .iq1_m: out = Blocks.superBlock
+        case .q2_0: out = 128
+        default: out = 32
+        }
+        return out
+    }
+
     // y[m] = sum_k W[m,k] * x[k]; W has ne0 = K (input), ne1 = M (rows).
     // Rows are independent and the closure only READS the weight + activation
     // pointers, so the parallel fill is race-free -- the same argument
@@ -94,6 +106,18 @@ enum GQ {
                     acc += Float(q) * xp[k + j]
                 }
                 return acc * d
+            }
+        case .iq1_s, .iq1_m, .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs,
+             .iq3_s, .iq4_xs, .q2k, .q3k, .q4k, .q5k, .q6k:
+            let decode = Blocks.decoder(w.type)!
+            rowParallel(w, x: x, out: &out) { p, xp, k in
+                var w = [Float](repeating: 0, count: 256)
+                var acc: Float = 0
+                w.withUnsafeMutableBufferPointer { b in
+                    decode(p, b.baseAddress!)
+                    for i in 0..<256 { acc += b[i] * xp[k + i] }
+                }
+                return acc
             }
         case .bf16:
             denseMatvec(w, x: x, out: &out)
@@ -227,10 +251,10 @@ enum GQ {
     ) {
         let K = w.dims[0]
         let M = w.dims[1]
-        let per = w.type == .q4_0 ? Q4_0.qk : Q8_0.qk
-        let size = w.type == .q4_0 ? Q4_0.blockBytes : Q8_0.blockBytes
+        let per = blockElems(w.type)
         let nblk = K / per
-        let stride = nblk * size
+        let stride = GGUF.rowByteCount(w.type, K)
+        let size = stride / nblk
         x.withUnsafeBufferPointer { xb in
             out.withUnsafeMutableBufferPointer { ob in
                 nonisolated(unsafe) let base = w.base
@@ -322,6 +346,21 @@ enum GQ {
             Q8_0.dequant(base + from / Q8_0.qk * Q8_0.blockBytes,
                          count: count, into: o)
         default:
+            superBlockGather(t, base, from: from, count: count, into: o)
+        }
+    }
+
+    private static func superBlockGather(_ t: GGUFTensor,
+                                         _ base: UnsafeRawPointer,
+                                         from: Int, count: Int,
+                                         into o: UnsafeMutablePointer<Float>) {
+        if let decode = Blocks.decoder(t.type) {
+            let per = Blocks.superBlock
+            let size = GGUF.rowByteCount(t.type, per)
+            for b in 0..<(count / per) {
+                decode(base + (from / per + b) * size, o + b * per)
+            }
+        } else {
             for i in 0..<count { o[i] = element(base, t.type, from + i) }
         }
     }

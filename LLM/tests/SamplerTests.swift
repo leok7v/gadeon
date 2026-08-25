@@ -224,4 +224,20 @@ final class SamplerTests: XCTestCase {
         try? FileManager.default.removeItem(at: url)
         XCTAssertNil(p)
     }
+
+    // The default seed is FIXED, so recording it is pointless unless a
+    // caller varies it. An explicit seed must select a DIFFERENT stream.
+    func testSeedSelectsTheStream() {
+        let flat = [Float](repeating: 1.0, count: 64)
+        func draw(_ seed: UInt64) -> [Int32] {
+            var cfg = SamplerConfig(temperature: 1.0, setMask: [.temperature])
+            cfg.seed = seed
+            var s = Sampler(vocabSize: flat.count, config: cfg)
+            return (0 ..< 24).map { _ in pick(&s, flat) }
+        }
+        XCTAssertEqual(draw(0), draw(0), "the default seed is not fixed")
+        XCTAssertNotEqual(draw(0), draw(987654321), "--seed changed nothing")
+        XCTAssertEqual(draw(987654321), draw(987654321),
+                       "an explicit seed is not reproducible")
+    }
 }

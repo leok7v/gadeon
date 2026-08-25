@@ -37,8 +37,13 @@ final class StopIdsTests: XCTestCase {
             .appendingPathComponent(
                 "scripts/convert/qwen35/generation_config.4b.json")
         let ids = Tokenizer.stopIds(generationConfig: url)
-        XCTAssertTrue(ids.contains(248046), "im_end missing: \(ids)")
-        XCTAssertTrue(ids.contains(248044), "endoftext missing: \(ids)")
+        if FileManager.default.fileExists(atPath: url.path) {
+            XCTAssertTrue(ids.contains(248046), "im_end missing: \(ids)")
+            XCTAssertTrue(ids.contains(248044), "endoftext missing: \(ids)")
+        } else {
+            throw XCTSkip("the emit card lives under scripts/, which the "
+                + "public tree does not ship")
+        }
     }
 
     func testTheEmbeddedTextReadsTheSameAsTheFile() throws {

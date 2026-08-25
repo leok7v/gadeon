@@ -46,6 +46,8 @@ public final class BackgroundGate: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; return backgrounded
     }
 
+    public var parked: Bool { isBackgrounded }
+
     // Park the calling thread while the app is backgrounded, so no GPU submit
     // fires there. A 1s poll (mirrors the reference im.ai gate); returns at once
     // in the foreground, and always at once on macOS (the flag is never raised).
@@ -98,6 +100,8 @@ public final class MetalEngine {
     // and rejecting costs nothing at all. [gdn-ring]
     private var recSlots = 1
     private var recSlot = 0
+    private var specQueue: [Int32] = []
+    private var specPrimed = false
 
     // Reusable activation scratch (sized to the largest layer need).
     private let bx, bNormed, bContrib: MTLBuffer
@@ -155,7 +159,7 @@ public final class MetalEngine {
         for (_, b) in gdnRec { memset(b.contents(), 0, b.length) }
         for (_, p) in kvPool { p.truncate(to: 0) }
         recSlot = 0
-        mtp?.reset()
+        specFlush()
     }
 
     private func off(_ t: GGUFTensor) -> WeightRef {
@@ -200,6 +204,7 @@ public final class MetalEngine {
         // A prior turn's Stop must not kill this one; the app raises it again if
         // the user stops during THIS prefill (prefillBatch / the loop poll it).
         stopSignal.clear()
+        specFlush()
         var out: Int32 = 0
         if ids.count > 1 && batched {
             // Prompt prefill: the batched forward streams each weight once per
@@ -275,10 +280,38 @@ public final class MetalEngine {
         return out
     }
 
+    // A grammar mask cannot advance mid-cycle, so it stays on plain decode.
     public func decode(_ token: Int32) -> Int32 {
+        let ready = mtp != nil && sampler?.logitMask == nil
+        var out: Int32
+        if !specQueue.isEmpty {
+            out = specQueue.removeFirst()
+        } else if ready && !specPrimed {
+            // No base hidden to fold onto until one token has run plainly.
+            out = specPrime(token)
+            specPrimed = true
+        } else if ready {
+            specQueue = specDecode(token)
+            out = specQueue.removeFirst()
+        } else {
+            out = pick(forwardLogits(token: Int(token), pos: pos))
+            pos += 1
+        }
+        return out
+    }
+
+    // Plain decode with the drafter loaded but UNUSED: a baseline MTP
+    // cannot quietly become.
+    public func decodePlain(_ token: Int32) -> Int32 {
         let out = pick(forwardLogits(token: Int(token), pos: pos))
         pos += 1
         return out
+    }
+
+    private func specFlush() {
+        specQueue.removeAll()
+        specPrimed = false
+        mtp?.reset()
     }
 
     // Batched prefill: process the prompt in chunks of N tokens, streaming each
@@ -554,6 +587,7 @@ public final class MetalEngine {
         pos = b.pos
         ropeShift = b.ropeShift
         recSlot = b.recSlot
+        specFlush()
         for (il, a) in b.conv { copyIn(a, gdnConv[il]!) }
         for (il, a) in b.rec { copyIn(a, gdnRec[il]!) }
         for (il, s) in b.kv { kvPool[il]!.restore(s) }
@@ -988,8 +1022,30 @@ public final class MetalEngine {
 
     public var mtpReady: Bool { mtp != nil }
 
+    // nil when no cycle ran, so a plain turn appends nothing to the log.
+    public func drainSpecTurn() -> Engine.SpecTurn? {
+        var out: Engine.SpecTurn? = nil
+        if specCycles > 0 {
+            out = Engine.SpecTurn(cycles: specCycles,
+                                  committed: specCommitted,
+                                  drafted: specDrafted,
+                                  accepted: specAccepted)
+        }
+        specCycles = 0
+        specCommitted = 0
+        specDrafted = 0
+        specAccepted = 0
+        return out
+    }
+
+    // The ring is (drafts + 2) copies of every recurrent state, so the check
+    // is against THIS machine: a phone declines what a Mac takes.
+    static let ringShare =
+        Double(ProcessInfo.processInfo.environment["LLM_MTP_RING_SHARE"]
+               ?? "") ?? 0.05
+
     public func loadMTP(drafts: Int = 2) {
-        if let w = model.mtp, mtp == nil, drafts > 0 {
+        if let w = model.mtp, mtp == nil, drafts > 0, ringFits(drafts) {
             let c = cfg
             let width = drafts + 1
             specN = drafts
@@ -1010,7 +1066,24 @@ public final class MetalEngine {
             }
             Diag.shared.report("[mtp] ON: metal drafter, n=\(drafts), "
                 + "\(recSlots) state slots")
+        } else if model.mtp != nil, drafts > 0, !ringFits(drafts) {
+            Diag.shared.report("[mtp] OFF: the \(drafts + 2)-slot ring needs "
+                + "\(ringBytes(drafts) / 1_048_576) MB, over "
+                + "\(Int(MetalEngine.ringShare * 100))% of this machine")
         }
+    }
+
+    private func ringBytes(_ drafts: Int) -> Int {
+        let c = cfg
+        let per = c.convDim * (c.dConv - 1) + c.nVHead * c.dState * c.dState
+        var layers = 0
+        for il in 0..<c.nLayer where c.isRecurrent(il) { layers += 1 }
+        return (drafts + 2) * per * layers * MemoryLayout<Float>.stride
+    }
+
+    private func ringFits(_ drafts: Int) -> Bool {
+        let have = Double(ProcessInfo.processInfo.physicalMemory)
+        return Double(ringBytes(drafts)) < have * MetalEngine.ringShare
     }
 
     // Feeds `token` plainly and keeps the hidden it produced, which is the

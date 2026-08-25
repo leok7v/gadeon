@@ -63,46 +63,31 @@ public enum ModelCatalog {
             repo: "leok7v/Qwen3.8-27B-coreml-q6",
             revision: "f72acfa1607fe63294534d355ab89c9226c7aa17",
             bytes: 21_478_000_000),
-        // The Q2_E8 sets are ONE file each: the sampling card rides inside the
-        // gguf as general.generation_config_json, so no sibling to lose.
         "Qwen3.5-4B": Source(
             repo: "leok7v/Qwen3.5-4B",
-            revision: "5a4b0bc1fd25d6819dba6312bb2198e25b8fbcec",
-            bytes: 2_253_504_512,
-            files: ["Qwen3.5-4B-Q2_E8.gguf"]),
+            revision: "d97086ea1f947acefa4cf42eb562e8e9d8caf621",
+            bytes: 3_584_533_984,
+            files: ["Qwen3.5-4B-UD-Q4_K_XL.gguf"]),
         "Qwen3.5-9B": Source(
             repo: "leok7v/Qwen3.5-9B",
-            revision: "f81e5e43efc184ac22fd1bb2e5fbbd74548492e4",
-            bytes: 4_430_069_760,
-            files: ["Qwen3.5-9B-Q2_E8.gguf"]),
-        "Qwen3.8-27B-E8": Source(
+            revision: "b5f89c96b2a92b54096c936089c5d5aaf173cf81",
+            bytes: 6_884_262_304,
+            files: ["Qwen3.5-9B-UD-Q4_K_XL.gguf"]),
+        "Qwen3.8-27B-IQ1_S": Source(
             repo: "leok7v/Qwen3.8-27B",
-            revision: "58c70758d32231b2a1747e0f7a743db673a17f3c",
-            bytes: 8_862_138_368,
-            files: ["Qwen3.8-27B-Q2_E8.gguf"]),
-        // The ternary 27B GGUF served by the unified engine: the Q2_0 weight
-        // file, the Q8_0 vision tower (measured transparent vs BF16, cos
-        // ~0.99995 -- ViT.swift consumes it), and generation_config.json for
-        // the sampling matrix (MetalChat reads it from beside the weight).
+            revision: "720438b700b0f773ff32030524d8e70ba90866a7",
+            bytes: 7_119_830_240,
+            files: ["Qwen3.8-27B-IQ1_S.gguf"]),
         "Ternary-Bonsai-27B": Source(
             repo: "leok7v/Ternary-Bonsai-27B-gguf",
-            revision: "53a78b8ff8e8792fc65ced23afe99684e5403bba",
-            bytes: 7_794_368_480,
-            files: ["Ternary-Bonsai-27B-Q2_0.gguf",
-                    "Ternary-Bonsai-27B-mmproj-Q8_0.gguf",
-                    "generation_config.json"]),
-        // The dense 1.7B (Qwen3, text-only): a Metal/GPU ternary companion for
-        // RAM-constrained iOS. The one Q2_0 weight + its sampling matrix.
+            revision: "f089b838b0778b2f19e69918a50198341cea9e38",
+            bytes: 7_794_369_344,
+            files: ["Ternary-Bonsai-27B-Q2_0.gguf"]),
         "Ternary-Bonsai-1.7B": Source(
             repo: "leok7v/Ternary-Bonsai-1.7B-gguf",
-            revision: "877587692a0c131a4c271d593f7a26903ae1e2f1",
+            revision: "9b1a9f4775bf323e11b23a4e3ad30cf7ac9181ae",
             bytes: 463_292_000,
-            files: ["Ternary-Bonsai-1.7B-Q2_0.gguf",
-                    "generation_config.json"]),
-        // gemma-4-E2B (QAT), the one model here that hears and watches as well
-        // as reads. Self-contained: the sampling matrix, the chat template and
-        // BOTH towers (vision + audio) live in the single file, so unlike the
-        // Bonsai sets it needs no sibling mmproj or generation_config.
+            files: ["Ternary-Bonsai-1.7B-Q2_0.gguf"]),
         "gemma-4-E2B": Source(
             repo: "leok7v/gemma-4-e2b-it-qat",
             revision: "47c144d18e31fb4d6cdde6f593b0c3db986610e6",
@@ -154,9 +139,9 @@ public enum ModelCatalog {
     // The GGUF weight file inside each single-file (unified-engine) model's set
     // dir. A name here is a GGUF model (isGguf); absent is a CoreML/ANE set.
     public static let ggufFiles: [String: String] = [
-        "Qwen3.5-4B": "Qwen3.5-4B-Q2_E8.gguf",
-        "Qwen3.5-9B": "Qwen3.5-9B-Q2_E8.gguf",
-        "Qwen3.8-27B-E8": "Qwen3.8-27B-Q2_E8.gguf",
+        "Qwen3.5-4B": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
+        "Qwen3.5-9B": "Qwen3.5-9B-UD-Q4_K_XL.gguf",
+        "Qwen3.8-27B-IQ1_S": "Qwen3.8-27B-IQ1_S.gguf",
         "Ternary-Bonsai-27B": "Ternary-Bonsai-27B-Q2_0.gguf",
         "Ternary-Bonsai-1.7B": "Ternary-Bonsai-1.7B-Q2_0.gguf",
         "gemma-4-E2B": "gemma-4-e2b-it-qat.gguf",

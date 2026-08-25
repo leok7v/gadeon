@@ -71,6 +71,11 @@ public final class MetalBackend: AgentBackend, @unchecked Sendable {
 
     public func visionEncodeSeconds() async -> Double { towerSeconds }
 
+    // The engine is internal; the app reaches its spec counters here.
+    public func drainSpecTurn() -> Engine.SpecTurn? {
+        engine.drainSpecTurn()
+    }
+
     public func visionGrid() async -> VisionGrid? {
         var result: VisionGrid? = nil
         if let c = vit?.cfg {
@@ -250,6 +255,21 @@ public struct MetalChat {
         return names
             .first { n in n.contains("mmproj") && n.hasSuffix(".gguf") }
             .map { n in dir + "/" + n }
+    }
+
+    public var mtpDrafts: Int {
+        let raw = ProcessInfo.processInfo.environment["LLM_MTP_DRAFTS"]
+        var out = 0
+        if let raw, let n = Int(raw) {
+            out = n
+        } else {
+            let gb = Double(engine.model.gguf.mapSize) / 1_073_741_824
+            let trunk = engine.model.layers[0].ffnDown.type
+            let verifyLosesOnThisTrunk =
+                trunk == .iq1_s || trunk == .iq1_m
+            out = gb < 3 || verifyLosesOnThisTrunk ? 0 : 2
+        }
+        return out
     }
 
     public func backend() -> MetalBackend {

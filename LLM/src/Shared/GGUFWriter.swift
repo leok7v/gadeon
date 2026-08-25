@@ -57,6 +57,8 @@ final class GGUFWriter {
         self.alignment = alignment
     }
 
+    static func encoded(_ value: GGUFValueOut) -> Data { encode(value) }
+
     func meta(_ key: String, _ value: GGUFValueOut) {
         kv.append((key, GGUFWriter.encode(value)))
     }

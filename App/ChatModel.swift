@@ -243,6 +243,16 @@ import UniformTypeIdentifiers
     var downloading = false
     var downloadDone: Int64 = 0
     var downloadTotal: Int64 = 0
+    @ObservationIgnored private var downloadBase: Int64 = -1
+
+    func observeDownload(_ s: HubFetch.Status, set: URL) {
+        if downloadBase < 0 {
+            downloadBase = s.done
+        }
+        downloadDone = s.done
+        downloadTotal = s.total
+        primer.observe(s.file, set: set)
+    }
 
     var downloadFraction: Double {
         downloadTotal > 0 ? Double(downloadDone) / Double(downloadTotal) : 0
@@ -485,7 +495,11 @@ import UniformTypeIdentifiers
     enum ReasoningEffort: String, CaseIterable, Identifiable {
         case low = "Low", medium = "Medium", high = "High"
         var id: String { rawValue }
-        var wire: String { rawValue.lowercased() }
+        func wire(_ levels: [String]) -> String {
+            effortSpelling(rawValue.lowercased(),
+                           slot: Self.allCases.firstIndex(of: self) ?? 0,
+                           in: levels)
+        }
     }
 
     private static func effortKey(_ name: String) -> String {
@@ -499,6 +513,8 @@ import UniformTypeIdentifiers
 
     private(set) var modelSupportsReasoningEffort = false
 
+    @ObservationIgnored private var effortLevels: [String] = []
+
     private(set) var reasoningEffort: ReasoningEffort =
         ChatModel.effort(for: ChatModel.startModel())
 
@@ -509,7 +525,8 @@ import UniformTypeIdentifiers
                                       forKey: Self.effortKey(modelName))
             ChatModel.wipePrecook()
             let s = session
-            Task { await s?.setReasoningEffort(level.wire) }
+            let wire = level.wire(effortLevels)
+            Task { await s?.setReasoningEffort(wire) }
             flashHUD(messages.isEmpty
                      ? "Reasoning: \(level.rawValue)"
                      : "Reasoning: \(level.rawValue), from the next chat")
@@ -517,10 +534,19 @@ import UniformTypeIdentifiers
     }
 
     private var activeEffort: String? {
-        modelSupportsReasoningEffort ? reasoningEffort.wire : nil
+        modelSupportsReasoningEffort
+            ? reasoningEffort.wire(effortLevels) : nil
     }
 
     private static func tgKey(_ name: String) -> String { "tg.\(name)" }
+
+    private static func storedTG(_ name: String) -> Double {
+        UserDefaults.standard.double(forKey: tgKey(name))
+    }
+
+    private static func rate(_ v: Double) -> String {
+        v > 0 ? String(format: "%.1f", v) : "-"
+    }
 
     var measuredTG: Double {
         let v = UserDefaults.standard.double(forKey: Self.tgKey(modelName))
@@ -550,7 +576,10 @@ import UniformTypeIdentifiers
     private var session: ChatSession?
     private var genTask: Task<Void, Never>?
     private let primer = Primer()
+    // The last NON-ZERO rates: the ticker samples every 400ms from turn start,
+    // where tg is still 0, so the raw metric blinks 0.0 at the reader.
     private var lastPP = 0.0
+    private var lastTG = 0.0
     private var perImageTokens = 256
     private var activePresets: SamplingPresets?
     @ObservationIgnored private var phaseStart = Date()
@@ -622,6 +651,7 @@ import UniformTypeIdentifiers
                     media = c.media(ctx: gpu.ctx)
                 } else {
                     let c = try MetalChat(ggufPath: path)
+                    c.engine.loadMTP(drafts: c.mtpDrafts)
                     built = (c.backend(), c.chatTemplate,
                              c.tokenizer.vocabCount, c.samplingPresets,
                              c.shape)
@@ -670,6 +700,7 @@ import UniformTypeIdentifiers
             downloading = true
             downloadDone = 0
             downloadTotal = 0
+            downloadBase = -1
             phaseStart = Date()
             status = "downloading \(name)…"
             let dest = Bundle.modelStore().appendingPathComponent(name)
@@ -681,11 +712,10 @@ import UniformTypeIdentifiers
                 do {
                     set = try await HubFetch.fetch(
                         repo: src.repo, into: dest, revision: src.revision,
-                        files: src.files, excludeFromBackup: true) { s in
+                        files: src.files, excludeFromBackup: true,
+                        background: isOS) { s in
                         Task { @MainActor in
-                            self?.downloadDone = s.done
-                            self?.downloadTotal = s.total
-                            self?.primer.observe(s.file, set: setDir)
+                            self?.observeDownload(s, set: setDir)
                         }
                     }
                 } catch HubError.digest {
@@ -864,10 +894,14 @@ import UniformTypeIdentifiers
         generatedTitle = nil
         followupHint = ""
         statsLabel = ""
+        // Not the outgoing model's rates; pp has no EMA, so it reads "-".
+        lastPP = 0
+        lastTG = ChatModel.storedTG(name)
         modelName = name
         UserDefaults.standard.set(name, forKey: "modelName")
         visionMode = ChatModel.visionMode(for: name)
         modelSupportsReasoningEffort = false
+        effortLevels = []
         reasoningEffort = ChatModel.effort(for: name)
     }
 
@@ -898,8 +932,11 @@ import UniformTypeIdentifiers
         }
         try? fm.removeItem(
             at: Bundle.modelStore().appendingPathComponent(name))
-        for on in [true, false] {
-            try? fm.removeItem(at: precookURL(name, thinking: on))
+        let cooked = (try? fm.contentsOfDirectory(
+            at: precookDir, includingPropertiesForKeys: nil)) ?? []
+        for url in cooked
+        where url.lastPathComponent.hasPrefix(name + ".") {
+            try? fm.removeItem(at: url)
         }
         if let sha = ModelCatalog.source(name)?.revision {
             let d = UserDefaults.standard
@@ -1024,8 +1061,8 @@ import UniformTypeIdentifiers
         if let chat, let activePresets {
             modelSupportsThinking =
                 templateSupportsThinking(chat.chatTemplate)
-            modelSupportsReasoningEffort =
-                templateTakesReasoningEffort(chat.chatTemplate)
+            effortLevels = templateEffortLevels(chat.chatTemplate)
+            modelSupportsReasoningEffort = effortLevels.count > 1
             session = ChatSession(
                 backend: EngineBackend(chat),
                 template: chat.chatTemplate,
@@ -1042,8 +1079,8 @@ import UniformTypeIdentifiers
             hookTrace()
         } else if let ggufBackend, let activePresets {
             modelSupportsThinking = templateSupportsThinking(ggufTemplate)
-            modelSupportsReasoningEffort =
-                templateTakesReasoningEffort(ggufTemplate)
+            effortLevels = templateEffortLevels(ggufTemplate)
+            modelSupportsReasoningEffort = effortLevels.count > 1
             session = ChatSession(
                 backend: ggufBackend,
                 template: ggufTemplate,
@@ -1067,12 +1104,44 @@ import UniformTypeIdentifiers
             .appendingPathComponent("precook", isDirectory: true)
     }
 
-    // Keyed by the reasoning flag as well as the model: a template that spells
-    // thinking inside its system block renders two different blocks, so they
-    // are two caches rather than one that misses every time the flag moves.
-    private static func precookURL(_ name: String, thinking: Bool) -> URL {
-        precookDir.appendingPathComponent(
-            name + (thinking ? ".think" : "") + ".ctx")
+    // Named by the stamp a restore is CHECKED against; anything else can
+    // disagree with it. A matching render says nothing about matching weights.
+    private static func precookURL(_ name: String, _ stamp: String) -> URL {
+        let rev = ModelCatalog.source(name)?.revision ?? "local"
+        return precookDir.appendingPathComponent(
+            "\(name).\(rev.prefix(8)).\(stamp.prefix(16)).ctx")
+    }
+
+    // A 27B cooks to hundreds of MB.
+    private static let precookBudget = 4 << 30
+
+    private static func prunePrecook(keeping: URL) {
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.contentModificationDateKey,
+                                      .fileSizeKey]
+        let found = (try? fm.contentsOfDirectory(
+            at: precookDir, includingPropertiesForKeys: keys)) ?? []
+        var newest = found.map { url -> (url: URL, at: Date, size: Int) in
+            let v = try? url.resourceValues(forKeys: Set(keys))
+            return (url, v?.contentModificationDate ?? .distantPast,
+                    v?.fileSize ?? 0)
+        }
+        newest.sort { a, b in a.at > b.at }
+        var total = 0
+        for file in newest {
+            total += file.size
+            let stale = !ChatModel.isStampNamed(file.url) || (
+                total > precookBudget && file.url != keeping)
+            if stale { try? fm.removeItem(at: file.url) }
+        }
+    }
+
+    // Pre-stamp names, which no restore can ever match again.
+    private static func isStampNamed(_ url: URL) -> Bool {
+        let parts = url.lastPathComponent.split(separator: ".")
+        let stamp = parts.count > 2 ? parts[parts.count - 2] : ""
+        return stamp.count == 16
+            && stamp.allSatisfy { c in c.isHexDigit && !c.isUppercase }
     }
 
     private static func ensurePrecookDir() {
@@ -1086,11 +1155,23 @@ import UniformTypeIdentifiers
 
     private func primeSession(resetFirst: Bool = false) {
         if let s = session {
-            let on = thinkingActive
-            primedThinking = on
+            primedThinking = thinkingActive
+            Task { await primeOrCook(s, reset: resetFirst) }
+        }
+    }
+
+    // Read after every setting has landed, so it cannot omit one the render
+    // depends on. Empty means no cookable prefix, so only the reset is owed.
+    private func primeOrCook(_ s: ChatSession, reset: Bool) async {
+        let stamp = await s.precookStamp
+        if stamp.isEmpty {
+            if reset { await s.reset() }
+        } else {
             ChatModel.ensurePrecookDir()
-            let url = ChatModel.precookURL(modelName, thinking: on)
-            Task { await s.primeOrCook(at: url, resetFirst: resetFirst) }
+            let url = ChatModel.precookURL(modelName, stamp)
+            await s.primeOrCook(at: url, resetFirst: reset)
+            await s.awaitPriming()
+            ChatModel.prunePrecook(keeping: url)
         }
     }
 
@@ -1206,14 +1287,12 @@ import UniformTypeIdentifiers
             // block, which is the only way to OPEN reasoning; one already
             // under way takes the closing route instead.
             let fresh = messages.isEmpty
-            ChatModel.ensurePrecookDir()
-            let url = ChatModel.precookURL(modelName, thinking: on)
             let hud = thinkingFlash(on, fresh: fresh)
             if fresh { primedThinking = on }
             Task {
                 await s?.setThinking(on)
                 await s?.setSuppressReasoning(!on)
-                if fresh { await s?.primeOrCook(at: url, resetFirst: true) }
+                if fresh, let s { await primeOrCook(s, reset: true) }
             }
             flashHUD(hud)
         }
@@ -2331,9 +2410,14 @@ import UniformTypeIdentifiers
     }
 
     private func specDigest() async -> String {
+        var turn: Engine.SpecTurn? = nil
+        if let engine = chat?.engine {
+            turn = await engine.drainSpecTurn()
+        } else if let gpu = ggufBackend as? MetalBackend {
+            turn = gpu.drainSpecTurn()
+        }
         var out = ""
-        if let engine = chat?.engine,
-           let turn = await engine.drainSpecTurn() {
+        if let turn {
             out = String(
                 format: " mtp=%.2ftok/cycle accept=%.0f%% cycles=%d",
                 turn.tokensPerCycle, turn.acceptRate * 100, turn.cycles)
@@ -2383,13 +2467,14 @@ import UniformTypeIdentifiers
     private func refreshStats(_ session: ChatSession) async {
         let t = await session.lastMetrics
         if t.pp > 0 { lastPP = t.pp }
+        if t.tg > 0 { lastTG = t.tg }
         if t.ctx > 0 {
             let tokens = thinkingActive
                 ? "🤔 \(t.thinkTokens) 💬 \(t.contentTokens)"
                 : "💬 \(t.thinkTokens + t.contentTokens)"
             statsLabel = "⇄ \(t.ctx.formatted(.number))  \(tokens) "
-                + String(format: "🐏 %.1fGB t/s: %.1f/%.1f",
-                         Self.footprintGiB(), t.pp, t.tg)
+                + String(format: "🐏 %.1fGB", Self.footprintGiB())
+                + " t/s: \(Self.rate(lastPP))/\(Self.rate(lastTG))"
         }
     }
 
@@ -2497,7 +2582,11 @@ import UniformTypeIdentifiers
         return out!
     }
 
-    var downloadETA: String? { Self.eta(phaseStart, downloadFraction) }
+    var downloadETA: String? {
+        let had = max(0, downloadBase)
+        return Self.eta(phaseStart, downloadDone - had,
+                        downloadTotal - had)
+    }
 
     var optimizeETA: String? {
         optimizeFinish.map { finish in
@@ -2516,8 +2605,10 @@ import UniformTypeIdentifiers
         }
     }
 
-    private static func eta(_ start: Date, _ fraction: Double) -> String? {
+    private static func eta(_ start: Date, _ done: Int64,
+                            _ total: Int64) -> String? {
         var result: String? = nil
+        let fraction = total > 0 ? Double(done) / Double(total) : 0
         if fraction > 0.02 {
             let elapsed = Date().timeIntervalSince(start)
             result = formatETA(elapsed * (1 - fraction) / fraction)

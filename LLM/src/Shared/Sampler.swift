@@ -313,8 +313,8 @@ public struct SamplingPresets: Sendable {
         }
         if out == nil { out = from(gguf: g) }
         if out == nil {
-            fatalError("\(path) suggests no sampling: emit "
-                + "general.sampling.presets_json into it, or ship a "
+            fatalError("\(path) suggests no sampling: put the card in "
+                + "with `gadeon-cli x --meta`, or ship a "
                 + "generation_config.json beside it")
         }
         return out!
@@ -322,14 +322,7 @@ public struct SamplingPresets: Sendable {
 
     static func from(gguf g: GGUF) -> SamplingPresets? {
         let row = SamplerConfig.from(gguf: g)
-        var result: SamplingPresets? = row.setMask.isEmpty ? nil : uniform(row)
-        if let text = g.string("general.sampling.presets_json"),
-           let data = text.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data),
-           let p = obj as? [String: Any] {
-            result = from(presets: p, base: uniform(row))
-        }
-        return result
+        return row.setMask.isEmpty ? nil : uniform(row)
     }
 }
 

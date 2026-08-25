@@ -9,11 +9,19 @@ import Testing
 
 // Everything a chunker emits for one whole input, pushed in one go.
 
-private func spoken(_ text: String) -> [String] {
+private func segments(_ text: String) -> [Segment] {
     var s = SpeakableText()
     var out = s.push(text)
     out.append(contentsOf: s.finish())
     return out
+}
+
+private func spoken(_ text: String) -> [String] {
+    segments(text).map { s in s.spoken }
+}
+
+private func shown(_ text: String) -> [String] {
+    segments(text).map { s in s.shown }
 }
 
 // The same input delivered one character at a time, which is closer to how a
@@ -21,10 +29,10 @@ private func spoken(_ text: String) -> [String] {
 
 private func spokenByCharacter(_ text: String) -> [String] {
     var s = SpeakableText()
-    var out: [String] = []
+    var out: [Segment] = []
     for ch in text { out.append(contentsOf: s.push(String(ch))) }
     out.append(contentsOf: s.finish())
-    return out
+    return out.map { s in s.spoken }
 }
 
 @Suite struct SpeakableTextTests {
@@ -39,7 +47,7 @@ private func spokenByCharacter(_ text: String) -> [String] {
     @Test func aCompleteSentenceIsEmittedBeforeItsLineEnds() {
         var s = SpeakableText()
         let first = s.push("Ready to go. And then")
-        #expect(first == ["Ready to go."])
+        #expect(first.map { p in p.spoken } == ["Ready to go."])
     }
 
     // Chunk boundaries are an artifact of the token stream and must not be
@@ -56,8 +64,9 @@ private func spokenByCharacter(_ text: String) -> [String] {
     @Test func aMidLineSentenceIsStillShaped() {
         var s = SpeakableText()
         let out = s.push("It cost 2,925.26 in **1999**. And then")
-        #expect(out == ["It cost two thousand nine hundred twenty-five "
-                        + "point two six in nineteen ninety-nine."])
+        #expect(out.map { p in p.spoken }
+                == ["It cost two thousand nine hundred twenty-five "
+                    + "point two six in nineteen ninety-nine."])
     }
 
     // Marker stripping belongs to the START of a line only; a hash or a
@@ -66,7 +75,8 @@ private func spokenByCharacter(_ text: String) -> [String] {
         var s = SpeakableText()
         _ = s.push("First one. ")
         let out = s.push("Tagged #top and - dashed. ")
-        #expect(out == ["Tagged #top and - dashed."])
+        #expect(out.map { p in p.spoken }
+                == ["Tagged #top and - dashed."])
     }
 
     // "1,000" reached the phonemizer whole only when its sentence ended at a
@@ -75,7 +85,8 @@ private func spokenByCharacter(_ text: String) -> [String] {
     @Test func aGroupedThousandIsNotReadAsOneZero() {
         var s = SpeakableText()
         let out = s.push("Starting with 1,000 units. ")
-        #expect(out == ["Starting with one thousand units."])
+        #expect(out.map { p in p.spoken }
+                == ["Starting with one thousand units."])
     }
 
     @Test func codeBlocksAreDescribedNotRead() {
@@ -119,7 +130,7 @@ private func spokenByCharacter(_ text: String) -> [String] {
 
         Done.
         """)
-        #expect(out == ["Results:", "A table of 3 rows.", "Done."])
+        #expect(out == ["Results:", "A table of three rows.", "Done."])
     }
 
     @Test func listsKeepTheirItemsAndLoseTheirBullets() {
@@ -167,5 +178,13 @@ private func spokenByCharacter(_ text: String) -> [String] {
     @Test func emptyInputSaysNothing() {
         #expect(spoken("").isEmpty)
         #expect(spoken("\n\n   \n").isEmpty)
+    }
+
+    @Test func theShownFormKeepsWhatIsOnScreen() {
+        let src = "A high of 99 degrees today. **Wednesday:** 101 degrees.\n"
+        #expect(shown(src) == ["A high of 99 degrees today.",
+                               "Wednesday: 101 degrees."])
+        #expect(spoken(src) == ["A high of ninety-nine degrees today.",
+                                "Wednesday: one hundred one degrees."])
     }
 }

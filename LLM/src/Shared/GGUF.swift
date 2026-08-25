@@ -8,10 +8,13 @@ enum GGUFType: Int32 {
     case f32 = 0, f16 = 1
     case q4_0 = 2, q4_1 = 3, q5_0 = 6, q5_1 = 7, q8_0 = 8, q8_1 = 9
     case q2k = 10, q3k = 11, q4k = 12, q5k = 13, q6k = 14, q8k = 15
+    case iq2_xxs = 16, iq2_xs = 17, iq3_xxs = 18
+    case iq1_s = 19        // ggml ternary grid, 50 bytes / 256, 1.5625 bpw
+    case iq4_nl = 20, iq3_s = 21, iq2_s = 22, iq4_xs = 23
+    case iq1_m = 29        // as iq1_s with per-16 scales, 56 bytes / 256
     case bf16 = 30
     case q1_0 = 41         // PrismML 1-bit, 128/block, 18 bytes
     case q2_0 = 42         // PrismML ternary, 128/block, 34 bytes {f16 d; u8 qs[32]}
-    case q2_e8 = 120       // E8P codebook, per-row [scales][codes] SoA
 }
 
 // A single metadata value. Scalars are kept; arrays keep only their element count
@@ -150,7 +153,22 @@ final class GGUF {
         switch ty {
         case .f32:  return n * 4
         case .f16, .bf16: return n * 2
-        case .q2_0, .q2_e8: return n / 128 * 34
+        case .q2_0: return n / 128 * 34
+        case .q2k: return n / 256 * 84
+        case .q3k: return n / 256 * 110
+        case .q4k: return n / 256 * 144
+        case .q5k: return n / 256 * 176
+        case .q6k: return n / 256 * 210
+        case .q8k: return n / 256 * 292
+        case .iq2_xxs: return n / 256 * 66
+        case .iq2_xs: return n / 256 * 74
+        case .iq2_s: return n / 256 * 82
+        case .iq3_xxs: return n / 256 * 98
+        case .iq3_s: return n / 256 * 110
+        case .iq4_xs: return n / 256 * 136
+        case .iq4_nl: return n / 32 * 18
+        case .iq1_s: return n / 256 * 50
+        case .iq1_m: return n / 256 * 56
         case .q1_0: return n / 128 * 18
         case .q4_0: return n / 32 * 18   // MiniLM (Slugs) weights
         case .q8_0: return n / 32 * 34

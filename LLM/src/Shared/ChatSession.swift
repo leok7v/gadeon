@@ -102,6 +102,8 @@ public actor ChatSession {
     // than mid-sentence -- a cleaner cut than the hard cap. Rides the same
     // inject- </think> path as Quick Answer.
     private var softReasoningCap: Int
+    // 0 keeps the Sampler's own default; the turn restarts the stream either way.
+    private let samplerSeed: UInt64
     // Overthink penalty (off unless lambda > 0): a per-token logit bias on the
     // curated single-token branch-openers, installed only while thinking to
     // shorten the chain of thought. See Sampler.overthinkMarkers.
@@ -262,7 +264,8 @@ public actor ChatSession {
                 enableThinking: Bool = false,
                 reasoningEffort: String? = nil, maxTokens: Int = .max,
                 maxReasoning: Int = 0, softReasoningCap: Int = 0,
-                overthink: Float = 0, runner: (any ToolRunner)? = nil) {
+                overthink: Float = 0, seed: UInt64 = 0,
+                runner: (any ToolRunner)? = nil) {
         self.backend = backend
         self.template = template
         let wire = ChatWire.derive(template)
@@ -284,6 +287,7 @@ public actor ChatSession {
         self.maxReasoning = maxReasoning
         self.softReasoningCap = softReasoningCap
         self.overthinkLambda = overthink
+        self.samplerSeed = seed
         // Build the per-model marker set: encode each curated marker (bare and
         // space-prefixed, the two BPE shapes) and keep only single-token hits
         // -- a multi-token marker cannot be biased by a per-token subtraction.
@@ -541,12 +545,12 @@ public actor ChatSession {
     // What the template emits before any message: gemma-4 opens a system turn
     // whenever enable_thinking is set, even with no messages at all. Every
     // Qwen-shaped template renders nothing here.
-    private func leadingBlock() -> String {
+    private func leadingBlock(thinking: Bool) -> String {
         (try? renderPrompt(
             template: template, messages: [], tools: [],
             addGenerationPrompt: false,
-            enableThinking: enableThinking,
-            reasoningEffort: reasoningEffort,
+            enableThinking: thinking,
+            reasoningEffort: thinking ? reasoningEffort : nil,
             bosToken: backend.bosToken)) ?? ""
     }
 
@@ -558,22 +562,25 @@ public actor ChatSession {
             enableThinking: enableThinking,
             reasoningEffort: reasoningEffort,
             bosToken: backend.bosToken)) ?? ""
+        // NO tools and NO reasoning, so these bytes are the user TURN alone:
+        // a probe carrying either is not a suffix of `both` on a template that
+        // moves them (Qwen3.8), and the cache switches itself off.
         var probeText = (try? renderPrompt(
             template: template, messages: [probe], tools: [],
-            addGenerationPrompt: false, enableThinking: enableThinking,
-            reasoningEffort: reasoningEffort,
+            addGenerationPrompt: false, enableThinking: false,
+            reasoningEffort: nil,
             bosToken: backend.bosToken)) ?? ""
-        // Subtract the probe's own TURN, not its whole render: on a template
-        // with a leading block (above) the probe render carries one too and
-        // it differs from `both`'s, so a plain suffix test fails and the
-        // whole precooked-prefix cache silently switches itself off.
-        let lead = leadingBlock()
+        // A lead surviving thinking=false belongs to `full`, not to the turn.
+        let lead = leadingBlock(thinking: false)
         if !lead.isEmpty, probeText.hasPrefix(lead) {
             probeText = String(probeText.dropFirst(lead.count))
         }
         var full = ""
         if !both.isEmpty, !probeText.isEmpty, both.hasSuffix(probeText) {
             full = String(both.dropLast(probeText.count))
+        }
+        if full.isEmpty {
+            chatLog.error("no precook prefix under this template")
         }
         var prefix = full
         if !systemTail.isEmpty,
@@ -586,6 +593,12 @@ public actor ChatSession {
     private static func stamp(_ s: String) -> String {
         SHA256.hash(data: Data(s.utf8))
             .map { b in String(format: "%02x", b) }.joined()
+    }
+
+    // The identity of what precook would persist; empty when there is none.
+    public var precookStamp: String {
+        let prefix = systemRenders().prefix
+        return prefix.isEmpty ? "" : ChatSession.stamp(prefix)
     }
 
     // Prefill the stable prefix on an EMPTY session and persist its state,
@@ -1326,10 +1339,13 @@ public actor ChatSession {
         // fresh turn already laid, and laying it again splices one spurious
         // system turn into the KV per turn. Templates with no such block
         // render nothing here and the subtraction is a no-op.
-        let lead = fresh ? "" : leadingBlock()
+        let lead = fresh ? "" : leadingBlock(thinking: enableThinking)
         if !lead.isEmpty, closedText.hasPrefix(lead), fullText.hasPrefix(lead) {
             closedText = String(closedText.dropFirst(lead.count))
             fullText = String(fullText.dropFirst(lead.count))
+        }
+        if fullText.isEmpty {
+            chatLog.error("template rendered nothing for these variables")
         }
         if !fullText.hasPrefix(closedText) {
             // A template whose generation prompt is not a pure render suffix
@@ -1513,6 +1529,7 @@ public actor ChatSession {
         if !turnConfig.setMask.contains(.dryMultiplier) {
             turnConfig.dryMultiplier = 0.8
         }
+        if samplerSeed != 0 { turnConfig.seed = samplerSeed }
         var sampler = Sampler(vocabSize: vocabSize, config: turnConfig)
         sampler.penaltyExempt = wireTokens
         if overthinkLambda != 0 && reasons && !overthinkTokens.isEmpty {
@@ -1730,6 +1747,8 @@ public actor ChatSession {
         var wsDone = !startsInThink
         var thinkSearch = 0
         var toolAt: Int? = nil
+        // Outlives toolAt being cleared by the quoted-pair recovery below.
+        var sawToolOpen = false
         var toolSearch = 0
         var toolCloseSearch = 0
         var toolReopenSearch = 0
@@ -1807,6 +1826,7 @@ public actor ChatSession {
             if toolsActive && toolAt == nil {
                 toolAt = ChatSession.index(
                     bytes, openTag, toolSearch)
+                sawToolOpen = sawToolOpen || toolAt != nil
                 if toolAt == nil {
                     toolSearch = max(toolSearch,
                         bytes.count - openTag.count + 1)
@@ -1845,7 +1865,11 @@ public actor ChatSession {
                     var hold = openHold
                     var markAt = Int.max
                     var markLen = 0
-                    for pat in [thinkClose, thinkOpen] where !pat.isEmpty {
+                    // A close with no opener ANYWHERE this round closes
+                    // nothing; a quoted pair keeps its close, one preceded it.
+                    var marks = [thinkClose, thinkOpen]
+                    if toolsActive, !sawToolOpen { marks.append(closeTag) }
+                    for pat in marks where !pat.isEmpty {
                         hold = max(hold,
                                    ChatSession.partialSuffix(bytes, pat, n))
                         if let at = ChatSession.index(bytes, pat, emitted),
@@ -1862,6 +1886,9 @@ public actor ChatSession {
                         emitted = stop
                     }
                     if markAt == emitted, markAt + markLen <= n {
+                        if markLen == closeTag.count, !sawToolOpen {
+                            chatLog.error("suppressed a stray close tag")
+                        }
                         emitted = markAt + markLen
                     }
                 }
@@ -1897,8 +1924,8 @@ public actor ChatSession {
                 suppressReasoning || softOver || loopRescue
                 || (maxReasoning > 0 && think >= maxReasoning))
             // A completed tool call ends the decode; the caller runs it and
-            // re-seeds. The opener is searched only in the ANSWER region, so
-            // a call quoted inside reasoning never triggers.
+            // re-seeds. The opener is searched over the WHOLE stream (above),
+            // so a call the model opens inside <think> is still caught.
             if toolsActive && pending == nil, let open = toolAt {
                 if toolCloseSearch < open + openTag.count {
                     toolCloseSearch = open + openTag.count

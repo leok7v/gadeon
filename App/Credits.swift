@@ -56,8 +56,9 @@ enum Credits {
                terms: "Apache-2.0",
                source: "https://huggingface.co/prism-ml/"
                    + "Ternary-Bonsai-27B-gguf",
-               changed: "Repacked into the ternary block types this app's GPU "
-                   + "engine reads."),
+               changed: "Re-hosted as one file: the vision projector and "
+                   + "the sampling card ride in the weight file's header, "
+                   + "and the tensor data is PrismML's, unchanged."),
         Credit(name: "KittenTTS",
                author: "KittenML",
                terms: "Apache-2.0",

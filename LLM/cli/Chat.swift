@@ -57,9 +57,25 @@ func reportHints(_ s: ChatSession) async {
     err("[hint] followup = \(hint.debugDescription)\n")
 }
 
+func traceTurn(_ t0: Date, _ user: String, _ reasoning: String,
+               _ content: String, _ tools: [String], _ m: TurnMetrics) {
+    traceWrite([
+        "turn": traceCounter.next(),
+        "wall_ms": Int(Date().timeIntervalSince(t0) * 1000),
+        "user": user,
+        "reasoning": reasoning,
+        "content": content,
+        "tool_calls": tools,
+        "ctx": m.ctx,
+        "think_tokens": m.thinkTokens,
+        "gen_tokens": m.contentTokens,
+        "pp_tps": m.pp.isFinite ? m.pp : 0,
+        "tg_tps": m.tg.isFinite ? m.tg : 0,
+    ])
+}
+
 @MainActor
 func runSession(_ s: ChatSession, _ user: String) async {
-    let turn = traceCounter.next()
     let t0 = Date()
     print("\nUSER: \(user)\nASSISTANT: ", terminator: ""); fflush(stdout)
     // Reasoning (<think>) streams to stderr, the answer to stdout -- the two
@@ -78,19 +94,7 @@ func runSession(_ s: ChatSession, _ user: String) async {
     let m = await s.lastMetrics
     err(String(format: "[pp %.1f t/s | tg %.1f t/s | ctx %d | think %d | "
         + "gen %d]\n", m.pp, m.tg, m.ctx, m.thinkTokens, m.contentTokens))
-    traceWrite([
-        "turn": turn,
-        "wall_ms": Int(Date().timeIntervalSince(t0) * 1000),
-        "user": user,
-        "reasoning": reasoning.text,
-        "content": content,
-        "tool_calls": tools.list,
-        "ctx": m.ctx,
-        "think_tokens": m.thinkTokens,
-        "gen_tokens": m.contentTokens,
-        "pp_tps": m.pp.isFinite ? m.pp : 0,
-        "tg_tps": m.tg.isFinite ? m.tg : 0,
-    ])
+    traceTurn(t0, user, reasoning.text, content, tools.list, m)
 }
 
 func segment(_ user: String, first: Bool) -> String {
@@ -184,10 +188,24 @@ func runLongDoc(_ user: String) async throws {
         : "[longdoc] MISMATCH -- first token differs, inspect block boundaries\n")
 }
 
-// Bonsai / ternary GGUF path: arg1 is a .gguf file -> run the pure-Swift SIMD
-// (CPU) engine through the SAME backend-agnostic ChatSession the CoreML path
-// uses. Everything above the AgentBackend seam (tokenizer, jinja template,
-// sampler, multi-turn continuation) is shared; only the compute backend differs.
+// Falling through to an engine 100x slower is the bug this fixes, not the
+// error handler for it.
+@MainActor func metalChatOrExit(_ path: String) -> MetalChat {
+    var result: MetalChat? = nil
+    do {
+        result = try MetalChat(ggufPath: path)
+    } catch {
+        err("Metal backend unavailable: \(error)\n"
+            + "re-run with --cpu for the pure-Swift SIMD engine\n")
+        exit(2)
+    }
+    return result!
+}
+
+// Bonsai / ternary GGUF path: arg1 is a .gguf file -> run the GPU engine (the
+// pure-Swift SIMD one under --cpu) through the SAME backend-agnostic
+// ChatSession the CoreML path uses. Everything above the AgentBackend seam
+// (tokenizer, jinja template, sampler, multi-turn continuation) is shared.
 @MainActor func runGgufMain() async throws {
     // BEFORE the architecture routing on purpose: the kernels are shared, so
     // a golden capture has to run over BOTH lineages from one entry point.
@@ -385,13 +403,11 @@ func runLongDoc(_ user: String) async throws {
     // Minimal greedy templated probe (GGUF reference): the same probeWrap +
     // argmax + EOS-stop as the CoreML --probe, over the AgentBackend, so a
     // CoreML-vs-GGUF answer comparison uses the identical prompt and decode rule.
-    // --metal routes the fast GPU backend (pp30/tg8 t/s) -- the ground truth on
-    // the same 2-bit weights; default is the SIMD/CPU engine.
     if rawArgs.contains("--probe") {
         let backend: any AgentBackend
         let ptok: Tokenizer
-        if rawArgs.contains("--metal") {
-            let chat = try MetalChat(ggufPath: arg1)
+        if useGPU {
+            let chat = metalChatOrExit(arg1)
             backend = chat.backend(); ptok = chat.tokenizer
         } else {
             let chat = try BonsaiChat(ggufPath: arg1)
@@ -420,17 +436,16 @@ func runLongDoc(_ user: String) async throws {
         print("PROBE txt: \(ptok.decode(out))")
         exit(0)
     }
-    // --metal routes the same ChatSession through the GPU MetalEngine; default
-    // is the pure-Swift SIMD/CPU engine. Both load everything from the one GGUF
-    // and expose the identical AgentBackend seam.
-    let useMetal = rawArgs.contains("--metal")
+    // Both engines load everything from the one GGUF and expose the identical
+    // AgentBackend seam, so only the compute differs.
+    let useMetal = useGPU
     err("loading GGUF \(arg1)...\n")
     let backend: any AgentBackend
     let template: String
     let vocabCount: Int
     let bonsaiPresets: SamplingPresets
     if useMetal {
-        let chat = try MetalChat(ggufPath: arg1)
+        let chat = metalChatOrExit(arg1)
         backend = chat.backend(); template = chat.chatTemplate
         vocabCount = chat.tokenizer.vocabCount
         bonsaiPresets = greedyDecode ? SamplingPresets.greedy
@@ -458,7 +473,7 @@ func runLongDoc(_ user: String) async throws {
         enableThinking: enableThinking, reasoningEffort: reasoningEffort,
         maxTokens: maxTokens,
         maxReasoning: maxReasoning, softReasoningCap: softReasoning,
-        overthink: overthink, runner: toolRunner)
+        overthink: overthink, seed: seedVal, runner: toolRunner)
     if let pkVal {
         let url = URL(fileURLWithPath: pkVal)
         let t0 = Date()
@@ -483,14 +498,19 @@ func runLongDoc(_ user: String) async throws {
                 + "\(grid.mergedTokens) tok/tile\n")
             print("\nUSER: [image] \(text)\nASSISTANT: ", terminator: "")
             fflush(stdout)
+            let t0 = Date()
+            let reasoning = Acc()
+            var content = ""
             let stream = bsession.replyVision(
                 text, tiles: tiles, gridH: grid.gridH, gridW: grid.gridW,
                 tokensPerImage: grid.mergedTokens,
-                onReasoning: { r in err(r) })
+                onReasoning: { r in err(r); reasoning.add(r) })
             for await piece in stream {
-                print(piece, terminator: ""); fflush(stdout)
+                print(piece, terminator: ""); fflush(stdout); content += piece
             }
             print()
+            traceTurn(t0, "img:\(path) \(text)", reasoning.text, content,
+                      [], await bsession.lastMetrics)
         } else {
             err("no vision: mmproj missing or this backend has no tower\n")
         }
@@ -507,15 +527,22 @@ func runLongDoc(_ user: String) async throws {
         } else {
             print("\nUSER: \(user)\nASSISTANT: ", terminator: "")
             fflush(stdout)
-            for await piece in bsession.reply(user,
-                                              onReasoning: { r in err(r) }) {
-                print(piece, terminator: ""); fflush(stdout)
+            let t0 = Date()
+            let reasoning = Acc()
+            let tools = Acc()
+            var content = ""
+            let stream = bsession.reply(
+                user, onReasoning: { r in err(r); reasoning.add(r) },
+                onTool: { name in tools.add(name) })
+            for await piece in stream {
+                print(piece, terminator: ""); fflush(stdout); content += piece
             }
             print()
             let m = await bsession.lastMetrics
             err(String(format:
                 "[ctx %d | think %d | gen %d | pp %.1f t/s | tg %.1f t/s]\n",
                 m.ctx, m.thinkTokens, m.contentTokens, m.pp, m.tg))
+            traceTurn(t0, user, reasoning.text, content, tools.list, m)
         }
     }
     // --title gates conversation-title generation: run a turn, then generate
@@ -601,6 +628,11 @@ func runLongDoc(_ user: String) async throws {
         ids = Array(padded.prefix(benchCtxVal))
     }
     let gen = capVal ?? (verify ? 64 : 128)
+    // Both arms warm before either is timed: plain runs first and would
+    // otherwise pay the cold cache alone.
+    eng.reset()
+    var warm = eng.extend(ids)
+    for _ in 0 ..< 8 { warm = eng.decode(warm) }
     eng.reset()
     var plain: [Int32] = []
     var next = eng.extend(ids)
@@ -608,7 +640,7 @@ func runLongDoc(_ user: String) async throws {
     var k = 0
     while k < gen {
         plain.append(next)
-        next = eng.decode(next)
+        next = eng.decodePlain(next)
         k += 1
     }
     let plainSec = Date().timeIntervalSince(g0)
@@ -616,13 +648,12 @@ func runLongDoc(_ user: String) async throws {
     var spec: [Int32] = []
     var cur = eng.extend(ids)
     let s0 = Date()
-    spec.append(cur)
-    cur = eng.specPrime(cur)
-    while spec.count < gen {
+    // Through decode(), the path the app takes: gates the queue too.
+    var k2 = 0
+    while k2 < gen {
         spec.append(cur)
-        let toks = eng.specDecode(cur)
-        spec += toks.dropLast()
-        cur = toks[toks.count - 1]
+        cur = eng.decode(cur)
+        k2 += 1
     }
     let specSec = Date().timeIntervalSince(s0)
     spec = Array(spec.prefix(gen))

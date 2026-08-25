@@ -393,9 +393,11 @@ struct SettingsView: View {
     private var viewPane: some View {
         VStack(alignment: .leading, spacing: 10) {
             title("View")
-            Toggle("Status Bar", isOn: $model.statusLine)
+            Toggle("Debug", isOn: $model.statusLine)
                 .toggleStyle(.switch)
-            explain("Context used, speed and memory, under the message box.")
+            explain("Status bar under the message box with context, speed "
+                + "and memory, and a session details button in the "
+                + "transcript actions.")
             Toggle("Markdown", isOn: $model.renderMarkdown)
                 .toggleStyle(.switch)
             explain("Show replies with headings, lists, code and tables.")

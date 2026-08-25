@@ -2,8 +2,34 @@ import LLM
 import SwiftUI
 import UIKit
 
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    nonisolated(unsafe) static var completion: (() -> Void)?
+
+    func application(
+        _ app: UIApplication,
+        didFinishLaunchingWithOptions opts:
+            [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        Relay.idle = {
+            DispatchQueue.main.async {
+                AppDelegate.completion?()
+                AppDelegate.completion = nil
+            }
+        }
+        Relay.shared.start()
+        return true
+    }
+
+    func application(_ app: UIApplication,
+                     handleEventsForBackgroundURLSession id: String,
+                     completionHandler: @escaping () -> Void) {
+        AppDelegate.completion = completionHandler
+        Relay.shared.start()
+    }
+}
+
 @main struct GadeonApp: App {
     @State private var model = ChatModel()
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @Environment(\.scenePhase) private var scenePhase
     var body: some Scene {
         WindowGroup {

@@ -45,6 +45,7 @@ public enum MetalSelfTest {
         step(try checkGemv(model, ctx))
         step(try checkGemm(model, ctx))
         step(try checkNarrow(model, ctx))
+        step(try checkGemvTypes(model, ctx))
         step(try checkVisionBlocks(ctx))
         step(try checkDequant(model, ctx))
         step(try checkForward(model))
@@ -454,7 +455,7 @@ public enum MetalSelfTest {
                                   _ ctx: MetalContext) throws -> String {
         let w = model.layers[0].ffnGate
         let k = w.dims[0], m = w.dims[1]
-        let n = 5
+        let n = MetalEnc.narrowMax + 28
         var xflat: [Float] = []
         for c in 0..<n { xflat += fill(k, seed: UInt64(c + 10)) }
         let xb = ctx.makeF32(xflat)
@@ -490,14 +491,12 @@ public enum MetalSelfTest {
 
     // The narrow GEMMs against N gemv calls of the same weight. The two
     // differ only in the ORDER of one reduction, so anything past fp32
-    // rounding is a layout bug rather than a tolerance to widen.
-
     private static func checkNarrow(_ model: BonsaiModel,
                                     _ ctx: MetalContext) throws -> String {
         var lines: [String] = []
         var failed = 0
         var ran = 0
-        for ty in [GGUFType.q2_e8, .q4_0] {
+        for ty in [GGUFType.q4_0] + superTypes {
             if let w = widest(model, ty) {
                 let k = w.dims[0], m = w.dims[1]
                 let off = ctx.window(UInt64(w.base - model.gguf.map))
@@ -509,7 +508,7 @@ public enum MetalSelfTest {
                     let cb = ctx.queue.makeCommandBuffer()!
                     let e = cb.makeComputeCommandEncoder()!
                     let f = MetalEnc(ctx: ctx, e: e)
-                    f.gemmNarrow(w, X: xb, out: narrow, off: off, N: n)
+                    f.gemm(w, X: xb, out: narrow, off: off, N: n)
                     for c in 0..<n {
                         f.gemv(w, x: xb, out: narrow, off: off,
                                xOff: c * k * 4,
@@ -556,6 +555,42 @@ public enum MetalSelfTest {
 
     // Q2_0 GEMV vs Q2_0.matvec on the layer-0 ffn_gate (present in both
     // lineages; dense qwen3 has no GDN in-projection).
+    static let superTypes: [GGUFType] = [
+        .q4k, .q5k, .q6k, .q2k, .q3k, .iq1_s, .iq1_m, .iq2_xxs,
+        .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_xs,
+    ]
+
+    private static func checkGemvTypes(_ model: BonsaiModel,
+                                       _ ctx: MetalContext) throws -> String {
+        var lines: [String] = []
+        var failed = 0
+        var ran = 0
+        for ty in superTypes {
+            if let w = widest(model, ty) {
+                let k = w.dims[0], m = w.dims[1]
+                let x = fill(k, seed: 21)
+                var ref = [Float](repeating: 0, count: m)
+                QB.matvec(w, x: x, out: &ref)
+                let gpu = try gemv(ctx, weight: w,
+                                   mapBase: model.gguf.map, x: x)
+                let d = maxAbsDiff(ref, gpu)
+                let mag = ref.reduce(Float(0)) { peak, v in
+                    max(peak, abs(v))
+                }
+                let rel = mag > 0 ? d / mag : d
+                let ok = rel < 1e-4
+                if !ok { failed += 1 }
+                ran += 1
+                lines.append(String(format: "  %@ [%d,%d]  rel %.2e  %@",
+                                    "\(ty)", k, m, rel,
+                                    ok ? "PASS" : "FAIL"))
+            }
+        }
+        return "gemv vs Swift oracle, per type \(ran - failed)/\(ran)  "
+            + (failed == 0 ? "PASS" : "FAIL")
+            + (lines.isEmpty ? "" : "\n" + lines.joined(separator: "\n"))
+    }
+
     private static func checkGemv(_ model: BonsaiModel,
                                   _ ctx: MetalContext) throws -> String {
         let w = model.layers[0].ffnGate

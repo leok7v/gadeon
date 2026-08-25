@@ -337,15 +337,39 @@ public func renderPrompt(template: String, messages: [AgentMessage],
     ])
 }
 
-public func templateTakesReasoningEffort(_ template: String) -> Bool {
+// Ascending. Qwen3.8 RAISES on any other word, which callers swallow as "".
+public func templateEffortLevels(_ template: String) -> [String] {
     let probe = [AgentMessage(role: "user", content: "x")]
-    func render(_ level: String) -> String {
-        (try? renderPrompt(template: template, messages: probe, tools: [],
-                           addGenerationPrompt: true, enableThinking: true,
-                           reasoningEffort: level)) ?? ""
+    var levels: [String] = []
+    var renders: [String] = []
+    for level in ["low", "medium", "high", "xhigh"] {
+        let text = (try? renderPrompt(
+            template: template, messages: probe, tools: [],
+            addGenerationPrompt: true, enableThinking: true,
+            reasoningEffort: level)) ?? ""
+        if !text.isEmpty, !renders.contains(text) {
+            levels.append(level)
+            renders.append(text)
+        }
     }
-    let low = render("low")
-    return !low.isEmpty && low != render("medium")
+    return levels
+}
+
+public func templateTakesReasoningEffort(_ template: String) -> Bool {
+    templateEffortLevels(template).count > 1
+}
+
+// One of a UI's ascending levels as the TEMPLATE spells it (slot 0 = lowest).
+public func effortSpelling(_ name: String, slot: Int,
+                           in levels: [String]) -> String {
+    var out = name
+    if !levels.isEmpty, !levels.contains(name) {
+        var index = levels.count / 2
+        if slot <= 0 { index = 0 }
+        if slot >= 2 { index = levels.count - 1 }
+        out = levels[index]
+    }
+    return out
 }
 
 // Whether a model reasons at all, asked of its OWN template rather than of its

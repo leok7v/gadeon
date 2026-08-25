@@ -11,8 +11,12 @@ import PackagePlugin
 struct MetalBuild: BuildToolPlugin {
     func createBuildCommands(context: PluginContext,
                              target: Target) throws -> [Command] {
-        let src = context.package.directoryURL
-            .appendingPathComponent("metal/Kernels.metal")
+        let dir = context.package.directoryURL
+        let src = dir.appendingPathComponent("metal/Kernels.metal")
+        // The two included files are inputs, not translation units: an edit
+        // to either has to re-run this command.
+        let inc = ["metal/IQTables.metal", "metal/IQKernels.metal"]
+            .map { dir.appendingPathComponent($0) }
         let out = context.pluginWorkDirectoryURL
             .appendingPathComponent("default.metallib")
         return [.buildCommand(
@@ -20,7 +24,7 @@ struct MetalBuild: BuildToolPlugin {
             executable: URL(fileURLWithPath: "/usr/bin/xcrun"),
             arguments: ["-sdk", "macosx", "metal", "-O2",
                         "-o", out.path, src.path],
-            inputFiles: [src],
+            inputFiles: [src] + inc,
             outputFiles: [out])]
     }
 }

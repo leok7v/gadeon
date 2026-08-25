@@ -175,7 +175,7 @@ final class Safetensors {
         let rows = shape[0]
         let cols = shape[1]
         let stride = grid.count == 2 ? grid[1] : 1
-        let block = Q2E8.qk
+        let block = 128
         values.withUnsafeMutableBufferPointer { vb in
             let v = vb.baseAddress!
             for r in 0..<rows {

@@ -5,6 +5,7 @@ import LLM
 final class VoicePlayer: @unchecked Sendable {
 
     private static let readAhead = 2
+    private static let primerSeconds = 0.25
     private let engine = AVAudioEngine()
     private let node = AVAudioPlayerNode()
     private let format: AVAudioFormat
@@ -85,6 +86,7 @@ final class VoicePlayer: @unchecked Sendable {
             unsynthesized.append((trimmed, tag))
             lock.unlock()
             log("enqueue \(trimmed.count) chars | \(counts())")
+            nodeQueue.async { [weak self] in self?.startEngine() }
             pump(voice: voice, speed: speed)
         }
     }
@@ -211,6 +213,23 @@ final class VoicePlayer: @unchecked Sendable {
         if !already {
             AudioSession.beginPlayback()
             try? engine.start()
+            prime()
+        }
+    }
+
+    private func prime() {
+        let frames = AVAudioFrameCount(Double(Speech.sampleRate)
+                                       * VoicePlayer.primerSeconds)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                      frameCapacity: frames)
+        lock.lock()
+        let paused = isPaused
+        lock.unlock()
+        if let buffer, let channel = buffer.floatChannelData {
+            buffer.frameLength = frames
+            channel[0].update(repeating: 0, count: Int(frames))
+            node.scheduleBuffer(buffer, completionHandler: nil)
+            if !paused { node.play() }
         }
     }
 

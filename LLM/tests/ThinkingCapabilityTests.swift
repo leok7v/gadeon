@@ -35,14 +35,15 @@ final class ThinkingCapabilityTests: XCTestCase {
         {%- endif %}
         """
 
+    // The Qwen3.8 acceptance set and raise VERBATIM: a stand-in may reduce
+    // the shipped template, never forgive an input it rejects.
     private let effortful = """
         {%- if enable_thinking is undefined or enable_thinking is true %}
         {%- set e = reasoning_effort|default('xhigh') %}
-        {%- if e == 'high' %}{%- set e = 'xhigh' %}{%- endif %}
         {%- if e not in ('xhigh', 'medium', 'low') %}
         {{- raise_exception('Unexpected reasoning effort ' ~ e) }}
         {%- endif %}
-        {{- 'effort=' ~ e }}
+        {%- if e != 'medium' %}{{- 'effort=' ~ e }}{%- endif %}
         {%- endif %}
         {% for message in messages %}{{ message.content }}{% endfor %}
         """
@@ -69,8 +70,36 @@ final class ThinkingCapabilityTests: XCTestCase {
 
     func testEachLevelReachesTheTemplate() throws {
         XCTAssertTrue(try render("low").contains("effort=low"))
-        XCTAssertTrue(try render("medium").contains("effort=medium"))
-        XCTAssertTrue(try render("high").contains("effort=xhigh"))
+        XCTAssertFalse(try render("medium").contains("effort="))
+        XCTAssertTrue(try render("xhigh").contains("effort=xhigh"))
+    }
+
+    func testLevelsAreTheOnesTheTemplateAccepts() {
+        XCTAssertThrowsError(try render("high"),
+            "the shipped template REFUSES `high`; a gate that forgives it "
+            + "passes while the app renders an empty prompt")
+        XCTAssertEqual(templateEffortLevels(effortful),
+                       ["low", "medium", "xhigh"])
+        XCTAssertEqual(templateEffortLevels(reasoning).count, 1,
+            "a template ignoring the variable offers no choice")
+    }
+
+    func testUiLevelsMapOntoAcceptedSpellings() throws {
+        let levels = templateEffortLevels(effortful)
+        let wires = ["low", "medium", "high"].enumerated().map { slot, name in
+            effortSpelling(name, slot: slot, in: levels)
+        }
+        XCTAssertEqual(wires, ["low", "medium", "xhigh"])
+        for wire in wires {
+            XCTAssertFalse(try render(wire).isEmpty,
+                "\(wire) rendered nothing")
+        }
+    }
+
+    func testSpellingKeepsAnAcceptedName() {
+        XCTAssertEqual(
+            effortSpelling("high", slot: 2, in: ["low", "high"]), "high")
+        XCTAssertEqual(effortSpelling("high", slot: 2, in: []), "high")
     }
 
     func testReasoningTemplateReportsThinkingSupported() {

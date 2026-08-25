@@ -179,6 +179,10 @@ public struct Tokenizer: Sendable {
         self.eosId = Int32(stops?.first
             ?? (g.int("tokenizer.ggml.eos_token_id") ?? 0))
         self.eosIds = Set((stops ?? [Int(self.eosId)]).map(Int32.init))
+        addStops((g.ints("tokenizer.ggml.eos_token_ids") ?? [])
+            .map(Int32.init))
+        addStops([specialSet.contains(Tokenizer.endOfText)
+            ? (v[Tokenizer.endOfText] ?? -1) : -1])
         addStops(Tokenizer.stopIds(
             generationConfigText: g.string(Tokenizer.generationConfigKey)))
     }
@@ -187,6 +191,8 @@ public struct Tokenizer: Sendable {
     // and the stop set both read travels INSIDE the weight file rather than
     // beside it. Arch-neutral: both readers are arch-agnostic.
     public static let generationConfigKey = "general.generation_config_json"
+
+    static let endOfText = "<|endoftext|>"
 
     static func bytesToUnicode() -> [UInt8: Character] {
         var bs = Array(33...126) + Array(161...172) + Array(174...255)

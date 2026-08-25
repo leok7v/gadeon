@@ -63,7 +63,7 @@ private func stripped(_ args: [String], _ name: String) -> Int? {
     }
 }
 
-private func cost(_ logits: UnsafePointer<Float>, _ len: Int,
+func cost(_ logits: UnsafePointer<Float>, _ len: Int,
                   _ want: Int32) -> Double {
     var peak: Float = 0
     let n = vDSP_Length(len)

@@ -812,6 +812,147 @@ final class ChatSessionTests: XCTestCase {
         try? FileManager.default.removeItem(at: url)
     }
 
+    // The reasoning sentence sits INSIDE the tools system block when tools are
+    // present and in a block of its OWN when they are not, as Qwen3.8 does.
+    private let effortTemplate = """
+        {%- set ri = '' %}
+        {%- if enable_thinking %}
+        {%- if reasoning_effort|default('xhigh') != 'medium' %}
+        {%- set ri = 'Reasoning effort is set to ' ~ \
+        reasoning_effort|default('xhigh') ~ '.' %}
+        {%- endif %}{%- endif %}
+        {%- if tools %}
+        {{- '<|im_start|>system\\n' }}
+        {%- if ri %}{{- ri + '\\n\\n' }}{%- endif %}
+        {{- '# Tools\\n' }}
+        {%- for tool in tools %}{{- '\\n' }}{{- tool | tojson }}{%- endfor %}
+        {%- if messages[0].role == 'system' %}
+        {{- '\\n\\n' + messages[0].content }}
+        {%- endif %}
+        {{- '<|im_end|>\\n' }}
+        {%- elif messages[0].role == 'system' %}
+        {{- '<|im_start|>system\\n' + (ri + '\\n\\n' if ri else '') \
+        + messages[0].content + '<|im_end|>\\n' }}
+        {%- elif ri %}
+        {{- '<|im_start|>system\\n' + ri + '<|im_end|>\\n' }}
+        {%- endif %}
+        {%- for m in messages %}{%- if m.role != 'system' %}
+        {{- '<|im_start|>' + m.role + '\\n' + m.content + '<|im_end|>\\n' }}
+        {%- endif %}{%- endfor %}
+        {%- if add_generation_prompt %}{{- '<|im_start|>assistant\\n' }}
+        {%- endif %}
+        """
+
+    // A 4B emitted exactly this, and it rendered in the bubble.
+    func testUnmatchedToolCloseNeverReachesTheAnswer() async throws {
+        let voc = vocab([(1, "The answer is 42."),
+                         (2, "\n</tool_call>\n"),
+                         (3, "Anything else?")])
+        let backend = MockBackend(scripts: [[1, 2, 3]], vocab: voc)
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256,
+            runner: SafeToolRunner(slugsPath: nil, wikipedia: false,
+                                   network: false))
+        let answer = await drain(session.reply("go"))
+        XCTAssertFalse(answer.contains("</tool_call>"),
+                       "unmatched close reached the reader: \(answer)")
+        XCTAssertTrue(answer.contains("42"), answer)
+        XCTAssertTrue(answer.contains("Anything else?"), answer)
+    }
+
+    // The guard must not touch a REAL call: its close belongs to an opener.
+    func testMatchedToolCallStillRuns() async throws {
+        let voc = vocab([(1, "<tool_call>\n<function=get_current_time>\n"),
+                         (2, "</function>\n</tool_call>"),
+                         (3, "Done.")])
+        let backend = MockBackend(scripts: [[1, 2], [3]], vocab: voc)
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256,
+            runner: SafeToolRunner(slugsPath: nil, wikipedia: false,
+                                   network: false))
+        // Round 1 is reached only via the rewind a completed call triggers.
+        let answer = await drain(session.reply("go"))
+        XCTAssertTrue(answer.contains("Done."),
+                      "the call did not run: \(answer)")
+    }
+
+    func testPrecookSurvivesReasoningInstructions() async throws {
+        let voc = vocab([(1001, "ok")])
+        let runner = SafeToolRunner(slugsPath: nil, wikipedia: false,
+                                    network: false)
+        for effort in ["low", "xhigh", "medium"] {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("precook_\(UUID().uuidString).ctx")
+            let cook = ChatSession(
+                backend: TapeBackend(scripts: [[1001]], vocab: voc),
+                template: effortTemplate, system: "You are a bot.",
+                systemTail: "\nNow: T1", vocabSize: 256,
+                enableThinking: true, reasoningEffort: effort, runner: runner)
+            try await cook.precook(to: url)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path),
+                "effort=\(effort) cooked nothing")
+            let primed = ChatSession(
+                backend: TapeBackend(scripts: [[1001]], vocab: voc),
+                template: effortTemplate, system: "You are a bot.",
+                systemTail: "\nNow: T2", vocabSize: 256,
+                enableThinking: true, reasoningEffort: effort, runner: runner)
+            let hit = await primed.prime(from: url)
+            XCTAssertTrue(hit, "effort=\(effort) did not prime")
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    // What the cache may and may NOT be keyed on, asked of the render itself.
+    func testPrecookStampFollowsTheRenderNotTheFlags() async throws {
+        let voc = vocab([(1001, "ok")])
+        func stamp(_ think: Bool, _ tools: Bool) async -> String {
+            let s = ChatSession(
+                backend: TapeBackend(scripts: [[1001]], vocab: voc),
+                template: effortTemplate, system: "You are a bot.",
+                vocabSize: 256, enableThinking: think,
+                reasoningEffort: "medium",
+                runner: SafeToolRunner(slugsPath: nil, wikipedia: false,
+                                       network: tools))
+            return await s.precookStamp
+        }
+        let onNoTools = await stamp(true, false)
+        let offNoTools = await stamp(false, false)
+        let onTools = await stamp(true, true)
+        XCTAssertFalse(onNoTools.isEmpty)
+        XCTAssertEqual(onNoTools, offNoTools,
+            "thinking is in the key but moves no bytes")
+        XCTAssertNotEqual(onNoTools, onTools,
+            "the tool tier moves bytes but was not in the key")
+    }
+
+    // The sentence is IN the cooked prefix, so the levels cannot share a file.
+    func testPrecookStampMovesWithEffort() async throws {
+        let voc = vocab([(1001, "ok")])
+        var bytes: [String: Int] = [:]
+        for effort in ["low", "xhigh"] {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("precook_\(UUID().uuidString).ctx")
+            let cook = ChatSession(
+                backend: TapeBackend(scripts: [[1001]], vocab: voc),
+                template: effortTemplate, system: "You are a bot.",
+                vocabSize: 256, enableThinking: true, reasoningEffort: effort)
+            try await cook.precook(to: url)
+            let other = ChatSession(
+                backend: TapeBackend(scripts: [[1001]], vocab: voc),
+                template: effortTemplate, system: "You are a bot.",
+                vocabSize: 256, enableThinking: true,
+                reasoningEffort: effort == "low" ? "xhigh" : "low")
+            let crossed = await other.prime(from: url)
+            XCTAssertFalse(crossed, "\(effort) primed the other level's file")
+            bytes[effort] = (try? Data(contentsOf: url))?.count ?? 0
+            try? FileManager.default.removeItem(at: url)
+        }
+        XCTAssertNotEqual(bytes["low"], bytes["xhigh"],
+            "the two levels cooked identical files")
+    }
+
     // A changed system prompt misses the stamp: prime returns false and the
     // session is untouched (a plain fresh first turn follows).
     func testPrimeMissesOnChangedPrompt() async throws {

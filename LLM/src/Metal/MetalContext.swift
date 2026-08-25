@@ -254,8 +254,8 @@ public final class MetalContext {
     static let matrixKernels: Set<String> = [
         "q2_0_gemm", "q2_0_gemm_mm", "q2_0_gemm_mm_h", "q8_0_gemm_mm_h",
         "q4_0_gemm_mm_h", "q8_0_gemm_mm", "q4_0_gemm_mm",
-        "q2_e8_gemm_mm", "q2_e8_gemm_mm_h",
         "f16w_gemm_mm", "attn_batch_mm",
+        "iq_gemm_mm", "iq_gemm_mm_h",
     ]
 
     // Build every pipeline this GPU can, before any encoding starts. After
@@ -319,19 +319,6 @@ public final class MetalContext {
     // Shared because it is read-only and always zero, and grown rather than
     // sized up front because the batch width is the engine's to choose.
     private var blank: MTLBuffer?
-
-    private var book: MTLBuffer?
-
-    func e8pTable() -> MTLBuffer {
-        if book == nil {
-            let t = E8P.packedTable()
-            book = t.withUnsafeBytes { src in
-                device.makeBuffer(bytes: src.baseAddress!, length: src.count,
-                                  options: .storageModeShared)!
-            }
-        }
-        return book!
-    }
 
     func noBlocks(_ rows: Int) -> MTLBuffer {
         let need = rows * 2 * MemoryLayout<UInt32>.stride

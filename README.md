@@ -95,7 +95,8 @@ tokens (`tg128`), reported tokens/sec.
 All five use the same `gadeon-cli <model> --bench` (raw 512-token prefill, 128
 greedy decodes, one warmup pass): the four Qwen3.5 / QwenPaw models on the Neural
 Engine, and the ternary Bonsai-27B through the pure-Swift Metal (GPU) backend
-(`--metal`, batched prefill). The ternary Bonsai models run on the GPU by design:
+(the default for a GGUF; `--cpu` opts out to the SIMD engine, and `--metal` is
+still accepted as a no-op). The ternary Bonsai models run on the GPU by design:
 the Neural Engine expands a 2-bit weight to fp16 before the DMA, so a ternary
 model pays fp16 bandwidth there and the 2-bit format buys nothing. That is a
 property of the format, not of the model size, so it holds for the whole ternary

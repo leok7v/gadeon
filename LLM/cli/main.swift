@@ -20,6 +20,9 @@ let forceIngest = rawArgs.contains("--ingest")
 let noCarry = rawArgs.contains("--no-carry")
 // run the trunk on CPU, not the ANE (A/B)
 let cpuOnly = rawArgs.contains("--cpu")
+// The accelerator is the default; --cpu is the one opt-out. Read HERE because
+// the flag sweep below strips --cpu out of rawArgs.
+let useGPU = !cpuOnly
 // Optional generation cap `-n N`: decode stops after N tokens; absent ->
 // unlimited (runs to EOS). No memory reason to cap -- the paged KV grows
 // lazily, so context is bounded only by the model's 256K training length, not
@@ -37,14 +40,19 @@ let benchCtxVal = stripValue(&rawArgs, "--ctx", Int.init)
 // or byte-compare against an earlier dump. The acceptance test for a kernel
 // REFACTOR, where cosine is too weak to see a one-ulp change.
 let metalGoldenDir = stripValue(&rawArgs, "--metal-golden")
-// --reasoning-effort none|on|low|medium|high. Qwen3.5 implements only none /
-// on, so anything but `none` enables thinking; absent -> none (empty-think,
-// the direct-answer default).
+// --reasoning-effort none|on|<level>, where <level> is a word the model's own
+// template takes (Qwen3.8: low|medium|xhigh; Qwen3.5 takes none). Anything but
+// `none` enables thinking; absent -> none (empty-think, direct answer).
 let reVal = stripValue(&rawArgs, "--reasoning-effort")
 let enableThinking = reVal.map { $0 != "none" } ?? false
 let reasoningEffort = reVal.flatMap { v in
     ["none", "on"].contains(v) ? nil : v
 }
+// --seed N (or LLM_SEED), like llama.cpp's. Absent -> the Sampler's own
+// default, which is FIXED: variety is the invoker's to supply.
+let seedVal = stripValue(&rawArgs, "--seed", UInt64.init)
+    ?? ProcessInfo.processInfo.environment["LLM_SEED"].flatMap(UInt64.init)
+    ?? 0
 // --overthink LAMBDA: bias the curated branch-opening tokens down while
 // thinking to shorten chain-of-thought (arxiv 2606.00206). Absent / 0 -> off.
 let overthink = stripValue(&rawArgs, "--overthink", Float.init) ?? 0
@@ -152,12 +160,14 @@ if rawArgs.contains("--count") { try probeCount() }
 if rawArgs.contains("--place") { try await placeProbe() }
 await probeNet()
 
-if rawArgs.contains("--q2e8-gate") { runQ2E8Gate(rawArgs) }
-if rawArgs.contains("--gptq-gate") { runGPTQGate(rawArgs) }
-if rawArgs.contains("--spectrum") { runSpectrum(rawArgs) }
-if rawArgs.contains("--codebook") { runCodebook(rawArgs) }
-if rawArgs.contains("--e8p-gate") { runE8PGate(rawArgs) }
-if rawArgs.contains("--q2e8-convert") { runQ2E8Convert(rawArgs) }
+if rawArgs.contains("--meta") { runMeta(rawArgs) }
+if rawArgs.contains("--graft") { runGraft(rawArgs) }
+if rawArgs.contains("--drafter") { runDrafter(rawArgs) }
+if rawArgs.contains("--splice") { runSplice(rawArgs) }
+if arg1.hasSuffix(".gguf"), rawArgs.contains("--kld")
+    || rawArgs.contains("--kld-dump") { try runDivergence(arg1, rawArgs) }
+if rawArgs.contains("--puzzle-rescore") { runPuzzleRescore(rawArgs) }
+if rawArgs.contains("--puzzle-gate") { await runPuzzleGate(rawArgs) }
 if arg1.hasSuffix(".gguf") { try await runGgufMain() }
 
 let store = URL(fileURLWithPath: "models")
@@ -255,7 +265,7 @@ let session: ChatSession? = (longDoc || forceIngest) ? nil : ChatSession(
     presets: activePresets, enableThinking: enableThinking,
     reasoningEffort: reasoningEffort, maxTokens: maxTokens,
     maxReasoning: maxReasoning, softReasoningCap: softReasoning,
-    overthink: overthink, runner: toolRunner)
+    overthink: overthink, seed: seedVal, runner: toolRunner)
 if let pkVal, let session {
     let url = URL(fileURLWithPath: pkVal)
     let t0 = Date()

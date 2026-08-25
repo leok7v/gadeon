@@ -78,12 +78,12 @@ enum GemmaCLIError: Error, CustomStringConvertible {
         exit(0)
     }
     if args.contains("--gemma-park-gate") {
-        try await gemmaParkGate(chat, args.contains("--metal"))
+        try await gemmaParkGate(chat, useGPU)
         exit(0)
     }
     if let dir = valueAfter(args, "--gemma-image-gate") {
         try gemmaImageGate(chat, dir, args.contains("--ref-embeds"),
-                           args.contains("--metal"))
+                           useGPU)
         exit(0)
     }
     if let dir = valueAfter(args, "--gemma-unified-gate") {
@@ -116,14 +116,14 @@ enum GemmaCLIError: Error, CustomStringConvertible {
     }
     if let file = valueAfter(args, "--gemma-video-say") {
         try await gemmaVideoSay(chat, file, turns.first, cap,
-                                metal: args.contains("--metal"),
+                                metal: useGPU,
                                 withAudio: args.contains("--with-audio"),
                                 dumpFrames: valueAfter(args, "--dump-frames"))
         exit(0)
     }
     if let file = valueAfter(args, "--gemma-image-say") {
         try await gemmaImageSay(chat, file, turns.first, cap,
-                                metal: args.contains("--metal"),
+                                metal: useGPU,
                                 clip: valueAfter(args, "--with-audio"),
                                 seconds: valueAfter(args, "--seconds")
                                     .flatMap { s in Double(s) })
@@ -144,14 +144,14 @@ enum GemmaCLIError: Error, CustomStringConvertible {
                                     .flatMap { s in Double(s) },
                                 offset: valueAfter(args, "--offset")
                                     .flatMap { s in Double(s) } ?? 0,
-                                metal: args.contains("--metal"),
+                                metal: useGPU,
                                 dump: valueAfter(args, "--dump-proj"),
                                 gated: args.contains("--gate"))
         exit(0)
     }
     if args.contains("--gemma-mic") {
         try await gemmaMic(chat, turns.first, cap,
-                           metal: args.contains("--metal"),
+                           metal: useGPU,
                            seconds: valueAfter(args, "--seconds")
                                .flatMap { s in Double(s) })
         exit(0)
@@ -161,7 +161,7 @@ enum GemmaCLIError: Error, CustomStringConvertible {
         exit(0)
     }
     if args.contains("--bench") {
-        let metal = args.contains("--metal")
+        let metal = useGPU
         try await runBackendBench(
             metal ? try chat.metalBackend() : chat.backend(),
             metal ? "Metal/GPU" : "SIMD/CPU ")
@@ -183,7 +183,7 @@ enum GemmaCLIError: Error, CustomStringConvertible {
         // they run on the CPU.
         let backend: any AgentBackend
         var ctx: MetalContext? = nil
-        if args.contains("--metal") {
+        if useGPU {
             let gpu = try chat.metalBackend()
             ctx = gpu.ctx
             backend = gpu
@@ -209,13 +209,12 @@ enum GemmaCLIError: Error, CustomStringConvertible {
             enableThinking: false, bosToken: chat.bosToken)) ?? question
     }
     let ids = chat.encode(prompt)
-    // --metal runs the SAME weights through the GPU engine; the two paths are
-    // each other's oracle, so a divergence here is a port bug rather than a
-    // model one.
-    let backend: any AgentBackend = args.contains("--metal")
+    // --cpu runs the SAME weights through the SIMD engine; the two paths are
+    // each other's oracle, so a divergence is a port bug not a model one.
+    let backend: any AgentBackend = useGPU
         ? try chat.metalBackend() : chat.backend()
     err("[probe] prompt \(ids.count) tokens on "
-        + (args.contains("--metal") ? "Metal/GPU\n" : "SIMD/CPU\n"))
+        + (useGPU ? "Metal/GPU\n" : "SIMD/CPU\n"))
     let p0 = Date()
     var next = try await backend.extend(ids)
     let pp = Date().timeIntervalSince(p0)
