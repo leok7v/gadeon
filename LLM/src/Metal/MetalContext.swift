@@ -48,57 +48,7 @@ public final class MetalContext {
     }
     private let windows: [Window]
 
-    // How many buffers the mapping is split across, at minimum.
-    //
-    // maxBufferLength is a HARD per-device ceiling (2048 MB on an A14), and a
-    // 2.5 GB set in one buffer cannot be mapped there on any amount of free
-    // memory. Splitting is therefore not optional. Splitting UNCONDITIONALLY,
-    // at min(that ceiling, total/N), is what makes it testable: on every
-    // machine this repo runs, the total/N term is the smaller one, so a Mac
-    // with a 12 GB buffer limit walks the SAME boundaries as an A14 with 2 GB.
-    // The goldens captured on the Mac then gate the phone's path instead of
-    // standing in for it.
-    //
-    // N is FINE rather than the 4 the ceiling alone needs, because referencing
-    // one tensor makes its WHOLE window resident: coarse windows drag
-    // unrelated weights along with every dispatch. Computed over
-    // gemma-4-E2B's own tensor offsets (2541 MB, 35 layers, both embedding
-    // tables CPU-gathered so their windows are never bound), the bytes one
-    // command buffer REFERENCES are --
-    //
-    //     windows | whole chunk | 5 layers | 1 layer per buffer
-    //           4 |      993 MB |   993 MB |             993 MB
-    //          32 |      786 MB |   540 MB |                   -
-    //          64 |      714 MB |   298 MB |              78 MB
-    //
-    // -- at 4 the layers span two windows totalling 993 MB and no split can
-    // go below that, since L30's own tensors sit in both.
-    //
-    // READ THAT AS REFERENCES, NOT AS RESIDENCY. It is what the driver is
-    // ASKED to make resident, and the driver does not oblige per buffer:
-    // MEASURED on macOS by sampling vm_stat's wired count around a prefill,
-    // 4 reps each, the delta is 1008 MB at one layer per buffer against
-    // 1090 MB for the whole chunk on one -- i.e. it stays at the ~993 MB
-    // every bindable window sums to, whichever way the work is cut. So the
-    // fine cut is nearly free and buys nearly nothing HERE. It is kept
-    // because a device under real pressure is a different regime (iOS was
-    // measured releasing 1859 -> 801 MB the moment a prefill ended) and this
-    // is the only lever that could pay there.
-    // The buffers are views of one read-only mapping, so 32 of them cost 32
-    // objects and nothing else.
-    //
-    // Env-readable because a 4.3% prefill drop was once attributed to
-    // splitting the mapping and never A/B'd. This settles it: 1 is the unsplit
-    // mapping, wherever maxBufferLength allows one. MEASURED on gemma-4-E2B,
-    // ABBA with a cooldown, pp521 t/s over 4 reps each -- 1 window 425.0,
-    // 4 windows 423.8, 64 windows 422.6. So the split costs 0.6% at the very
-    // most, against a 0.7-1.1% spread WITHIN each group, and the 4.3% was
-    // never its doing. 0.6% of prefill for 993 -> 78 MB of residency is not a
-    // trade worth thinking about twice.
-    static let minWindows: Int = {
-        let raw = ProcessInfo.processInfo.environment["LLM_METAL_WINDOWS"]
-        return max(1, raw.flatMap { v in Int(v) } ?? 64)
-    }()
+    static let minWindows = 64
 
     init(_ gguf: GGUF) throws {
         let dev = MTLCreateSystemDefaultDevice()
@@ -252,10 +202,9 @@ public final class MetalContext {
     // The kernels written against simdgroup_float8x8 / simdgroup_half8x8.
     // Listed here because it is a property of the MSL, not of any one caller.
     static let matrixKernels: Set<String> = [
-        "q2_0_gemm", "q2_0_gemm_mm", "q2_0_gemm_mm_h", "q8_0_gemm_mm_h",
-        "q4_0_gemm_mm_h", "q8_0_gemm_mm", "q4_0_gemm_mm",
+        "q2_0_gemm_mm_h", "q4_0_gemm_mm_h", "q8_0_gemm_mm_h",
+        "iq4_nl_gemm_mm_h", "iq_gemm_mm_h",
         "f16w_gemm_mm", "attn_batch_mm",
-        "iq_gemm_mm", "iq_gemm_mm_h",
     ]
 
     // Build every pipeline this GPU can, before any encoding starts. After

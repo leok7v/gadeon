@@ -2,11 +2,11 @@ import Foundation
 import Testing
 @testable import LLM
 
-let chatGgufPath = ProcessInfo.processInfo.environment["GADEON_CHAT_GGUF"]
+let chatGgufPath = TestWeights.find("GADEON_CHAT_GGUF")
 
 let needsChatWeights = ConditionTrait.enabled(
     if: chatGgufPath != nil,
-    "set GADEON_CHAT_GGUF to a MetalChat-lineage GGUF")
+    "set GADEON_CHAT_GGUF; these generate for minutes, so they are opt-in")
 
 struct BatAndBallTests {
 

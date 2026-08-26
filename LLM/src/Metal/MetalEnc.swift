@@ -128,18 +128,19 @@ struct MetalEnc {
         switch w.type {
         case .iq1_s: name = "iq1_s_gemv"
         case .iq1_m: name = "iq1_m_gemv"
-        case .q4k where MetalEnc.kqGemv: name = "q4_k_gemv"
-        case .q5k where MetalEnc.kqGemv: name = "q5_k_gemv"
-        case .q6k where MetalEnc.kqGemv: name = "q6_k_gemv"
-        case .q2k where MetalEnc.kqGemv: name = "q2_k_gemv"
-        case .q3k where MetalEnc.kqGemv: name = "q3_k_gemv"
-        case .iq2_xxs where MetalEnc.kqGemv: name = "iq2_xxs_gemv"
-        case .iq2_xs where MetalEnc.kqGemv: name = "iq2_xs_gemv"
-        case .iq2_s where MetalEnc.kqGemv: name = "iq2_s_gemv"
-        case .iq3_xxs where MetalEnc.kqGemv: name = "iq3_xxs_gemv"
-        case .iq3_s where MetalEnc.kqGemv: name = "iq3_s_gemv"
-        case .iq4_xs where MetalEnc.kqGemv: name = "iq4_xs_gemv"
-        default: name = "iq_gemv"
+        case .q4k: name = "q4_k_gemv"
+        case .q5k: name = "q5_k_gemv"
+        case .q6k: name = "q6_k_gemv"
+        case .q2k: name = "q2_k_gemv"
+        case .q3k: name = "q3_k_gemv"
+        case .iq2_xxs: name = "iq2_xxs_gemv"
+        case .iq2_xs: name = "iq2_xs_gemv"
+        case .iq2_s: name = "iq2_s_gemv"
+        case .iq3_xxs: name = "iq3_xxs_gemv"
+        case .iq3_s: name = "iq3_s_gemv"
+        case .iq4_xs: name = "iq4_xs_gemv"
+        default:
+            fatalError("MetalEnc.gemv: no kernel for \(w.type) (\(w.name))")
         }
         groups(name, (w.dims[1] + rows - 1) / rows, tpg: 32) { e in
             e.setBuffer(off.buf, offset: 0, index: 0)
@@ -170,44 +171,7 @@ struct MetalEnc {
         }
     }
 
-    // ---- Q2_0 batched mat-mat: out[N,M] = X[N,K] @ W  (prefill) ----------
-    // Grid (ceil(N/8), M) simdgroups; the kernel amortizes each weight row
-    // across a tile of 8 token-columns.
-    // Half tiles (smem 6144 in-bounds / 8192 for a partial tile) beat the f32
-    // kernel's 12288 by raising resident-threadgroup occupancy: prefill is
-    // compute-bound, so the win is more simdgroups in flight, not fewer bytes.
-    // MEASURED on an M3, interleaved A/B with a cooldown before every run
-    // (uncooled runs throttle and invert the result): 27B 42.7 -> 47.6 t/s
-    // (+11.5%, four reps 1.104-1.127), 1.7B 602 -> 638 t/s (+6.0%). Parity
-    // holds -- every token-level self-test matches the SIMD oracle, and the
-    // GEMM sits at 1.9e-4 RELATIVE error, inside fp16's own 4.9e-4 epsilon.
-    // LLM_F16_TILES=0 restores the f32 tiles for an A/B. It governs all three
-    // weight types, and its REACH is wider than the name suggests: every
-    // gemma projection goes through `linear(X:N:)`, so it swaps the vision
-    // and audio towers onto f32 tiles as well as the text prefill.
-    // The q4_0/q8_0 f32 twins were written to test whether fp16 tiles were
-    // what kept batched prefill from reproducing the per-token path. They are
-    // NOT -- measured, both paths land equally close to HF's own logits
-    // (0.99875 batched / 0.99890 with f32 tiles / 0.99901 per-token) -- and
-    // f32 costs 6% of prefill. See gemmaBatchGate for why exact agreement is
-    // unreachable in the first place. Kept as the A/B instrument that
-    // settled it.
-    static let f16Tiles =
-        ProcessInfo.processInfo.environment["LLM_F16_TILES"] != "0"
-
-    // LLM_ATTN_MM=0 takes the batched attention back to the scalar body, which
-    // is the A/B instrument: the two compute the same thing by different
-    // means, and only a measurement says which is faster on a given part.
-    static let attnMatrix =
-        ProcessInfo.processInfo.environment["LLM_ATTN_MM"] != "0"
-
-    // The widest batch the narrow kernels are compiled for.
-    // LLM_NARROW_MAX=0 restores the tile everywhere.
-    static let kqGemv =
-        ProcessInfo.processInfo.environment["LLM_KQ_GEMV"] != "0"
-
-    static let narrowMax = min(5,
-        Int(ProcessInfo.processInfo.environment["LLM_NARROW_MAX"] ?? "") ?? 5)
+    static let narrowMax = 5
 
     static func narrowRows() -> Int { 16 }
 
@@ -241,19 +205,19 @@ struct MetalEnc {
         let name: String
         switch w.type {
         case .q2_0:
-            name = MetalEnc.f16Tiles ? "q2_0_gemm_mm_h" : "q2_0_gemm_mm"
+            name = "q2_0_gemm_mm_h"
         case .q4_0:
-            name = MetalEnc.f16Tiles ? "q4_0_gemm_mm_h" : "q4_0_gemm_mm"
+            name = "q4_0_gemm_mm_h"
         case .iq4_nl:
-            name = MetalEnc.f16Tiles ? "iq4_nl_gemm_mm_h" : "iq4_nl_gemm_mm"
+            name = "iq4_nl_gemm_mm_h"
         case .q8_0:
-            name = MetalEnc.f16Tiles ? "q8_0_gemm_mm_h" : "q8_0_gemm_mm"
+            name = "q8_0_gemm_mm_h"
         case .f32, .f16, .bf16:
             name = ""
         default:
             precondition(Blocks.superBlocked(w.type),
                          "MetalEnc.gemm: no kernel for \(w.type) (\(w.name))")
-            name = MetalEnc.f16Tiles ? "iq_gemm_mm_h" : "iq_gemm_mm"
+            name = "iq_gemm_mm_h"
         }
         if narrow {
             gemmNarrow(w, X: X, out: out, off: off, N: N)
@@ -280,14 +244,13 @@ struct MetalEnc {
         let fullTile = m % 64 == 0 && N % 32 == 0
         let name: String
         switch w.type {
-        case .q2_0: name = MetalEnc.f16Tiles ? "q2_0_gemm_mm_h" : "q2_0_gemm_mm"
-        case .q4_0: name = MetalEnc.f16Tiles ? "q4_0_gemm_mm_h" : "q4_0_gemm_mm"
+        case .q2_0: name = "q2_0_gemm_mm_h"
+        case .q4_0: name = "q4_0_gemm_mm_h"
         case .iq4_nl:
-            name = MetalEnc.f16Tiles ? "iq4_nl_gemm_mm_h" : "iq4_nl_gemm_mm"
-        case .q8_0: name = MetalEnc.f16Tiles ? "q8_0_gemm_mm_h" : "q8_0_gemm_mm"
+            name = "iq4_nl_gemm_mm_h"
+        case .q8_0: name = "q8_0_gemm_mm_h"
         default:
-            name = Blocks.superBlocked(w.type)
-                ? (MetalEnc.f16Tiles ? "iq_gemm_mm_h" : "iq_gemm_mm") : ""
+            name = Blocks.superBlocked(w.type) ? "iq_gemm_mm_h" : ""
         }
         if name.hasPrefix("iq_gemm_mm") {
             iqGemmTiled(name, w, X: X, out: out, off: off, N: N,
@@ -314,7 +277,7 @@ struct MetalEnc {
         e.setBytes(&a, length: MemoryLayout<IQArgs>.stride, index: 3)
         e.setBytes(&nn, length: 4, index: 4)
         e.setThreadgroupMemoryLength(
-            MetalEnc.f16Tiles ? (fullTile ? 6144 : 8192) : 12288, index: 0)
+            fullTile ? 6144 : 8192, index: 0)
         e.dispatchThreadgroups(
             MTLSize(width: (N + 31) / 32, height: (m + 63) / 64, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
@@ -336,7 +299,7 @@ struct MetalEnc {
                      "MetalEnc.gemm: \(name) needs simdgroup matrix units; "
                      + "this GPU has none, so its caller should have been "
                      + "gated (see Gemma4MetalBackend.supportsSoftTokens)")
-        let tgmem = MetalEnc.f16Tiles ? (fullTile ? 6144 : 8192) : 12288
+        let tgmem = fullTile ? 6144 : 8192
         push(name)
         let pipe = try! ctx.pipeline(name)
         e.setComputePipelineState(pipe)
@@ -374,9 +337,9 @@ struct MetalEnc {
     static func dqRowName(_ t: GGUFType) -> String {
         let out: String
         switch t {
-        case .q2k where kqGemv: out = "q2_k_dequant_row"
-        case .q4k where kqGemv: out = "q4_k_dequant_row"
-        case .q6k where kqGemv: out = "q6_k_dequant_row"
+        case .q2k: out = "q2_k_dequant_row"
+        case .q4k: out = "q4_k_dequant_row"
+        case .q6k: out = "q6_k_dequant_row"
         default: out = "iq_dequant_row"
         }
         return out
@@ -385,9 +348,9 @@ struct MetalEnc {
     static func embedName(_ t: GGUFType) -> String {
         let out: String
         switch t {
-        case .q2k where kqGemv: out = "q2_k_embed_batch"
-        case .q4k where kqGemv: out = "q4_k_embed_batch"
-        case .q6k where kqGemv: out = "q6_k_embed_batch"
+        case .q2k: out = "q2_k_embed_batch"
+        case .q4k: out = "q4_k_embed_batch"
+        case .q6k: out = "q6_k_embed_batch"
         default: out = "iq_embed_batch"
         }
         return out
@@ -1014,12 +977,6 @@ struct MetalEnc {
         }
     }
 
-    // The register-resident simdgroup-cooperative scan (state held across the
-    // N-loop) is the default; LLM_GDN_SCAN2=0 falls back to the per-column
-    // device-memory scan for an A/B.
-    static let gdnScan2 =
-        ProcessInfo.processInfo.environment["LLM_GDN_SCAN2"] != "0"
-
     func gdnScanBatch(convOutN: MTLBuffer, keyDim: Int, valueDim: Int,
                       convDim: Int, gN: MTLBuffer, betaN: MTLBuffer,
                       S: MTLBuffer, oN: MTLBuffer, nV: Int, nK: Int, dS: Int,
@@ -1044,7 +1001,7 @@ struct MetalEnc {
         // register slices, so it needs dS a multiple of 32 and <= 256
         // (ls[8]); any other
         // state size falls back to the per-column device-memory scan.
-        if MetalEnc.gdnScan2 && dS % 32 == 0 && dS <= 256 {
+        if dS % 32 == 0 && dS <= 256 {
             // A threadgroup's 4 simdgroups cover 4 output columns, so the grid
             // spans dS/4 column-groups x nV heads, 128 threads (4 simdgroups)
             // each.
@@ -1254,7 +1211,7 @@ struct MetalEnc {
                    scale: Float,
                    basePos: Int, N: Int, gated: Int, window: Int = 0,
                    blocks: MTLBuffer? = nil,
-                   matrix: Bool = MetalEnc.attnMatrix) {
+                   matrix: Bool = true) {
         precondition(hd % 4 == 0 && hd <= 512,
                      "attn_batch: half4 V slices need hd % 4 == 0, and the "
                      + "four-slice accumulator caps head dim at 512")

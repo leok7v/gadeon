@@ -171,20 +171,12 @@ public final class MetalEngine {
     // no lm_head).
     // Prefill `ids` onto the CURRENT state; only the LAST token runs the lm_head
     // (the rest advance state hidden-only).
-    // Batched-GEMM prefill via the simdgroup-matrix q2_0_gemm_mm: MEASURED
-    // pp 36.4 t/s on an idle M3 over the 512-token bench prompt vs
-    // token-by-token's 7.8 t/s
-    // (4.7x). ON by default now that the matrix-unit GEMM beats N GEMVs; disable
-    // with LLM_BATCHED_PREFILL=0 for an A/B. (The earlier scalar 2D-tile
-    // q2_0_gemm was 3.3x SLOWER -- the win is entirely the matrix-unit kernel.)
-    static let batchedPrefill =
-        ProcessInfo.processInfo.environment["LLM_BATCHED_PREFILL"] != "0"
     // The batched forward is built on the simdgroup-matrix GEMM, so it exists
     // only where the GPU has matrix units. An A13 (Apple6) falls back to the
     // token-by-token path: far slower to read a prompt, but every kernel it
     // encodes is plain SIMD, which is what makes the small ternary models
     // runnable on those phones at all.
-    var batched: Bool { MetalEngine.batchedPrefill && ctx.matrixUnits }
+    var batched: Bool { ctx.matrixUnits }
     // Prefill chunk (tokens per batched forward). Each chunk re-streams all
     // weights once, so bigger = fewer streams; capped by activation memory + the
     // serial-over-N GDN scan. Tunable for the sweep; default set from it.

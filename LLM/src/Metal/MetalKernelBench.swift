@@ -90,7 +90,7 @@ public enum MetalKernelBench {
         var out = "\nregister pressure (maxThreads/threadgroup, "
             + "1024 = uncontended)\n"
         var names = ["q4_0_gemv", "q4_k_gemv", "iq1_s_gemv",
-                     "iq_gemv", "iq_gemm_mm_h"]
+                     "iq3_xxs_gemv", "iq_gemm_mm_h"]
         for r in 2...5 {
             names.append("q4_0_gemm_nb_r\(r)")
         }

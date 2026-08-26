@@ -120,88 +120,6 @@ kernel void q2_0_gemv(
 }
 
 
-// Q2_0 batched mat-mat (prefill): out[N,M] = X[N,K] @ W[K,M]
-// Token-major: X[col*K + k], out[col*M + m]. Each threadgroup owns one weight
-// row m and a tile of TN=8 token-columns, so the weight row is STREAMED
-// ONCE and reused across the 8 columns -- the weight-amortization that makes
-// prefill scale (token-by-token re-streams the whole 7 GB per token). 32
-// lanes cooperate: lane
-// L reads byte 2+L of each block (4 codes), coalesced; simd_sum reduces per
-// column. d*(sum(code*x) - sum(x)) = d*sum((code-1)*x), matching Q2_0.matvec.
-kernel void q2_0_gemm(
-        device const uchar * weights [[buffer(0)]],
-        device const float * X       [[buffer(1)]],
-        device       float * out     [[buffer(2)]],
-        constant GemvArgs  & a       [[buffer(3)]],
-        constant uint      & N       [[buffer(4)]],
-        uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiisg [[thread_index_in_simdgroup]]) {
-    // 2-D tile: NR0=8 weight rows x TN=4 token-columns per simdgroup. TPB=8
-    // lanes cooperate per 128-weight block (coalesced qs, 4 blocks in flight);
-    // each block's SW=16 codes of a row are decoded ONCE and dotted against
-    // all
-    // TN columns' activation slices (weight reused across cols), while the row
-    // tile reuses each column's slice (activation reused across rows).
-    // simd_sum
-    // reduces the 32 lanes per (row,col).
-    const ushort NR0 = 8, TN = 4, TPB = 8, SW = 16;
-    const uint row0 = tgpig.y * NR0;
-    const uint col0 = tgpig.x * TN;
-    const uint nblk = a.K / 128;
-    const ulong rowBytes = (ulong) nblk * 34;
-    device const uchar * W = weights + a.woff;
-    const ushort grp = tiisg / TPB;
-    const ushort il  = (tiisg % TPB) * SW;
-    float acc[8][4];
-    for (ushort r = 0; r < NR0; r++) {
-        for (ushort t = 0; t < TN; t++) { acc[r][t] = 0.0f; }
-    }
-    for (uint ib = grp; ib < nblk; ib += 32 / TPB) {
-        float yl[4][16];
-        float sy[4] = { 0, 0, 0, 0 };
-        for (ushort t = 0; t < TN; t++) {
-            const uint col = col0 + t;
-            device const float * xc = X + (ulong) (col < N ? col : 0) * a.K
-                + ib * 128 + il;
-            for (ushort i = 0; i < SW; i++) {
-                yl[t][i] = xc[i];
-                sy[t] += xc[i];
-            }
-        }
-        for (ushort r = 0; r < NR0; r++) {
-            const uint row = row0 + r;
-            if (row < a.M) {
-                device const uchar * bp = W + row * rowBytes + (ulong) ib * 34;
-                const float d = (float) (*(device const half *) bp);
-                device const uchar * qs = bp + 2 + il / 4;
-                float lo[4] = { 0, 0, 0, 0 }, hi[4] = { 0, 0, 0, 0 };
-                for (ushort i = 0; i < SW; i++) {
-                    const uchar code = (qs[i >> 2] >> ((i & 3) * 2)) & 3;
-                    if (code & 1) {
-                        for (ushort t = 0; t < TN; t++) { lo[t] += yl[t][i]; }
-                    }
-                    if (code & 2) {
-                        for (ushort t = 0; t < TN; t++) { hi[t] += yl[t][i]; }
-                    }
-                }
-                for (ushort t = 0; t < TN; t++) {
-                    acc[r][t] += d * (lo[t] + 2.0f * hi[t] - sy[t]);
-                }
-            }
-        }
-    }
-    for (ushort r = 0; r < NR0; r++) {
-        const uint row = row0 + r;
-        for (ushort t = 0; t < TN; t++) {
-            const uint col = col0 + t;
-            const float s = simd_sum(acc[r][t]);
-            if (tiisg == 0 && row < a.M && col < N) {
-                out[(ulong) col * a.M + row] = s;
-            }
-        }
-    }
-}
-
 // Quantized simdgroup-matrix GEMM (prefill): out[N,M] = X[N,K] @ W[K,M].
 // One body for all three block types at both tile precisions. Weight rows are
 // [K,M]; X is token-major f32; out[n*M+m] matches GQ.matvec's column order.
@@ -217,20 +135,6 @@ struct block_iq4_nl { half d; uchar qs[16]; };
 // Q4_0 splits a byte into element j (LOW nibble) and j+16 (HIGH), w =
 // (q-8)*d -- so its two sub-blocks are every low nibble and every high one
 // rather than two contiguous spans. [gemm-tiles]
-static inline void dq_q2_0(device const block_q2_0 * xb, short il,
-                           thread float4x4 & reg) {
-    device const uchar * qs = xb->qs;      // il-th 16-elem sub-block = 4 bytes
-    const float d = (float) xb->d;
-    const int bo = il * 4;
-    for (int i = 0; i < 4; i++) {
-        const uchar b = qs[bo + i];
-        reg[i][0] = ((float) ((b >> 0) & 3) - 1.0f) * d;
-        reg[i][1] = ((float) ((b >> 2) & 3) - 1.0f) * d;
-        reg[i][2] = ((float) ((b >> 4) & 3) - 1.0f) * d;
-        reg[i][3] = ((float) ((b >> 6) & 3) - 1.0f) * d;
-    }
-}
-
 static inline void dq_q2_0_h(device const block_q2_0 * xb, short il,
                              thread half4x4 & reg) {
     device const uchar * qs = xb->qs;
@@ -246,19 +150,6 @@ static inline void dq_q2_0_h(device const block_q2_0 * xb, short il,
 }
 
 
-static inline void dq_q4_0(device const block_q4_0 * xb, short il,
-                           thread float4x4 & reg) {
-    device const uchar * qs = xb->qs;
-    const float d = (float) xb->d;
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            const uchar byte = qs[i * 4 + j];
-            const uchar code = il == 0 ? (byte & 0x0F) : (byte >> 4);
-            reg[i][j] = ((float) code - 8.0f) * d;
-        }
-    }
-}
-
 static inline void dq_q4_0_h(device const block_q4_0 * xb, short il,
                              thread half4x4 & reg) {
     device const uchar * qs = xb->qs;
@@ -268,18 +159,6 @@ static inline void dq_q4_0_h(device const block_q4_0 * xb, short il,
             const uchar byte = qs[i * 4 + j];
             const uchar code = il == 0 ? (byte & 0x0F) : (byte >> 4);
             reg[i][j] = ((half) code - 8.0h) * d;
-        }
-    }
-}
-
-static inline void dq_q8_0(device const block_q8_0 * xb, short il,
-                           thread float4x4 & reg) {
-    device const char * qs = xb->qs;
-    const float d = (float) xb->d;
-    const int bo = il * 16;
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            reg[i][j] = (float) qs[bo + i * 4 + j] * d;
         }
     }
 }
@@ -444,9 +323,8 @@ inline void gemm_mm_impl(
                   tiitg, sgitg);
 }
 
-// The six instantiations. A kernel cannot be a template in MSL, so each is a
-// named entry point over the shared body; MetalEnc.gemm picks one by the
-// tensor's type and LLM_F16_TILES.
+// A kernel cannot be a template in MSL, so each is a named entry point over
+// the shared body; MetalEnc.gemm picks one by the tensor's type.
 #define GEMM_MM_KERNEL(NAME, BLOCK, REG, NSUB, QK, DQ)                      \
 kernel void NAME(                                                           \
         device const uchar * weights [[buffer(0)]],                         \
@@ -462,11 +340,8 @@ kernel void NAME(                                                           \
         weights, X, dst, a, N, shmem, tgpig, tiitg, sgitg);                 \
 }
 
-GEMM_MM_KERNEL(q2_0_gemm_mm,   block_q2_0, float, 8, 128, dq_q2_0)
 GEMM_MM_KERNEL(q2_0_gemm_mm_h, block_q2_0, half,  8, 128, dq_q2_0_h)
-GEMM_MM_KERNEL(q4_0_gemm_mm,   block_q4_0, float, 2,  32, dq_q4_0)
 GEMM_MM_KERNEL(q4_0_gemm_mm_h, block_q4_0, half,  2,  32, dq_q4_0_h)
-GEMM_MM_KERNEL(q8_0_gemm_mm,   block_q8_0, float, 2,  32, dq_q8_0)
 GEMM_MM_KERNEL(q8_0_gemm_mm_h, block_q8_0, half,  2,  32, dq_q8_0_h)
 
 // Included, not compiled on their own: the tables are the codebooks the
@@ -474,19 +349,6 @@ GEMM_MM_KERNEL(q8_0_gemm_mm_h, block_q8_0, half,  2,  32, dq_q8_0_h)
 // BELOW simd_mm_slice and store_mm_tile because the IQ tile shares them.
 #include "IQTables.metal"
 #include "IQKernels.metal"
-
-static inline void dq_iq4_nl(device const block_iq4_nl * xb, short il,
-                             thread float4x4 & reg) {
-    device const uchar * qs = xb->qs;
-    const float d = (float) xb->d;
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 4; j++) {
-            const uchar byte = qs[i * 4 + j];
-            const uchar code = il == 0 ? (byte & 0x0F) : (byte >> 4);
-            reg[i][j] = (float) kvalues_iq4nl[code] * d;
-        }
-    }
-}
 
 static inline void dq_iq4_nl_h(device const block_iq4_nl * xb, short il,
                                thread half4x4 & reg) {
@@ -501,7 +363,6 @@ static inline void dq_iq4_nl_h(device const block_iq4_nl * xb, short il,
     }
 }
 
-GEMM_MM_KERNEL(iq4_nl_gemm_mm,   block_iq4_nl, float, 2,  32, dq_iq4_nl)
 GEMM_MM_KERNEL(iq4_nl_gemm_mm_h, block_iq4_nl, half,  2,  32, dq_iq4_nl_h)
 
 // Q2_0 row dequant (token embedding): out[k] = (code-1)*d
@@ -3096,13 +2957,6 @@ them out of the sharing.
 
 ### [gemm-tiles]  the simdgroup-matrix GEMM, its tile precision, and its cost
 
-SHAPE. A 128-thread threadgroup owns a 64(M) x 32(N) output tile. Weight
-rows are dequantized into a 64x32 staging tile and activations into a
-32x32 one, both in threadgroup memory, then multiplied on the 8x8 hardware
-matrix units. The scalar q2_0_gemm next door does the same product with
-per-lane accumulation and loses about 10x, which is why prefill routes
-here and only decode uses the GEMV.
-
 TILE PRECISION. Half tiles are the shipping default. They halve the
 staging memory (6144 B against 12288), and since prefill is compute-bound
 the win is more resident threadgroups in flight rather than fewer bytes
@@ -3110,17 +2964,6 @@ moved. MEASURED on an M3, interleaved A/B with a cooldown before every run
 -- uncooled runs throttle and can invert the result: 27B 42.7 -> 47.6 t/s
 (+11.5%, four reps 1.104-1.127), 1.7B 602 -> 638 t/s (+6.0%). Parity holds
 at 1.9e-4 RELATIVE error, inside fp16's own 4.9e-4 epsilon.
-
-The f32 twins exist as the A/B instrument, not as a fallback. They were
-written to test whether fp16 tiles were what kept batched gemma prefill
-from reproducing the per-token path. They are NOT: the batched-vs-per-token
-cosine moved 0.9885 -> 0.9895, i.e. nowhere, and both land equally close to
-HF's own logits (0.99875 half, 0.99890 f32, 0.99901 per-token). The real
-mechanism is SRQ's `rint()`, which is discontinuous, so ANY reordering of a
-reduction flips a whole quantization step. f32 tiles cost 6% of prefill for
-that non-difference. `LLM_F16_TILES`=0 selects them, and its reach is wider
-than the name suggests: every gemma projection goes through
-MetalEnc.linear(X:N:), so it swaps the vision and audio towers too.
 
 THE SPILL PATH. A tile that runs off the end of M or N cannot
 `simdgroup_store` straight to dst, so it stages through threadgroup memory as

@@ -130,9 +130,6 @@ public final class Gemma4MetalEngine {
     // ABBA with a cooldown, 4 reps each, 1 buffer 422.3 / 12 buffers 422.2 /
     // 35 (one per layer) 421.7, a 0.15% spread against a 1% run-to-run one.
     // The queue runs them back to back and nothing drains.
-    //
-    // Env-readable for the same reason LLM_F16_TILES is: it is the A/B
-    // instrument, and the iOS half of that measurement is still owed.
     public static let prefillLayers: Int = {
         let raw = ProcessInfo.processInfo
             .environment["LLM_GEMMA_PREFILL_LAYERS"]

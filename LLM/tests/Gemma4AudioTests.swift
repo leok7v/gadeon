@@ -99,7 +99,7 @@ struct Gemma4AudioTests {
     // Silence is the input on purpose -- there are no pauses to find in it,
     // so the packer must still cover the clip by falling back to hard cuts
     // at the ceiling rather than emitting one span or looping.
-    @Test(needsGemmaWeights) func overlongClipIsChunked() throws {
+    @Test(needsNamedGemmaWeights) func overlongClipIsChunked() throws {
         let path = try #require(gemmaGgufPath)
         let chat = try GemmaChat(ggufPath: path)
         let wire = try chat.audioWire()

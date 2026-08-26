@@ -366,43 +366,6 @@ struct IQEmbedArgs {
     ulong woff; uint K; uint M; uint rowBytes; uint ty; uint blk;
 };
 
-kernel void iq_gemv(
-        device const uchar * weights [[buffer(0)]],
-        device const float * x       [[buffer(1)]],
-        device       float * out     [[buffer(2)]],
-        constant IQArgs    & a       [[buffer(3)]],
-        uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiisg [[thread_index_in_simdgroup]]) {
-    const uint NR0 = 8;
-    const uint row0 = tgpig.x * NR0;
-    const uint nblk = a.K / 256;
-    const ulong rowBytes = (ulong) nblk * a.blk;
-    device const uchar * W = weights + a.woff;
-    float acc[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
-    float w[32];
-    for (uint ib = tiisg; ib < nblk; ib += 32) {
-        device const float * y = x + (ulong) ib * 256;
-        for (uint r = 0; r < NR0; ++r) {
-            const uint row = row0 + r;
-            if (row < a.M) {
-                device const uchar * bp = W + (ulong) row * rowBytes
-                                            + (ulong) ib * a.blk;
-                float s = 0.0f;
-                for (uint sb = 0; sb < 8; ++sb) {
-                    dq_sub(a.ty, bp, sb, w);
-                    device const float * yy = y + sb * 32;
-                    for (uint j = 0; j < 32; ++j) { s += w[j] * yy[j]; }
-                }
-                acc[r] += s;
-            }
-        }
-    }
-    for (uint r = 0; r < NR0; ++r) {
-        const float s = simd_sum(acc[r]);
-        if (tiisg == 0 && row0 + r < a.M) { out[row0 + r] = s; }
-    }
-}
-
 template <typename D>
 void iq_dq_row_impl(device const uchar * weights, device float * out,
                     constant IQArgs & a, uint gid) {
@@ -571,19 +534,6 @@ inline void iq_gemm_impl(
     }
     store_mm_tile(mc, dst, shmem, r0, r1, M, (int) N, nr0, nr1,
                   tiitg, sgitg);
-}
-
-kernel void iq_gemm_mm(
-        device const uchar * weights [[buffer(0)]],
-        device const float * X       [[buffer(1)]],
-        device       float * dst     [[buffer(2)]],
-        constant IQArgs    & a       [[buffer(3)]],
-        constant uint      & N       [[buffer(4)]],
-        threadgroup uchar  * shmem   [[threadgroup(0)]],
-        uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiitg [[thread_index_in_threadgroup]],
-        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
-    iq_gemm_impl<float>(weights, X, dst, a, N, shmem, tgpig, tiitg, sgitg);
 }
 
 kernel void iq_gemm_mm_h(

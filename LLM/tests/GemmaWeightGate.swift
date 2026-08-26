@@ -9,8 +9,13 @@ import Testing
 // nothing is reported as PASSED, so a plain `swift test` reads as though it
 // covered the gemma engine, tower and speech paths when it ran none of them.
 // Skipped says so, and names the variable that would turn them on.
-let gemmaGgufPath = ProcessInfo.processInfo.environment["GADEON_GEMMA_GGUF"]
+let gemmaGgufPath = TestWeights.find("GADEON_GEMMA_GGUF",
+                                     named: "gemma-4-e2b-it-qat.gguf")
 
 let needsGemmaWeights = ConditionTrait.enabled(
     if: gemmaGgufPath != nil,
-    "set GADEON_GEMMA_GGUF to the repacked gemma-4 GGUF")
+    "no gemma-4-e2b-it-qat.gguf found; GADEON_GEMMA_GGUF overrides")
+
+let needsNamedGemmaWeights = ConditionTrait.enabled(
+    if: ProcessInfo.processInfo.environment["GADEON_GEMMA_GGUF"] != nil,
+    "minutes-long; name GADEON_GEMMA_GGUF explicitly to run it")
