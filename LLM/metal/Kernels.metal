@@ -209,6 +209,7 @@ kernel void q2_0_gemm(
 struct block_q2_0 { half d; uchar qs[32]; };
 struct block_q4_0 { half d; uchar qs[16]; };
 struct block_q8_0 { half d; char qs[32]; };
+struct block_iq4_nl { half d; uchar qs[16]; };
 
 // One 16-element sub-block into a 4x4 register tile. The `_h` twins write
 // half DIRECTLY rather than through a float intermediate. Q2_0 codes are
@@ -474,6 +475,35 @@ GEMM_MM_KERNEL(q8_0_gemm_mm_h, block_q8_0, half,  2,  32, dq_q8_0_h)
 #include "IQTables.metal"
 #include "IQKernels.metal"
 
+static inline void dq_iq4_nl(device const block_iq4_nl * xb, short il,
+                             thread float4x4 & reg) {
+    device const uchar * qs = xb->qs;
+    const float d = (float) xb->d;
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            const uchar byte = qs[i * 4 + j];
+            const uchar code = il == 0 ? (byte & 0x0F) : (byte >> 4);
+            reg[i][j] = (float) kvalues_iq4nl[code] * d;
+        }
+    }
+}
+
+static inline void dq_iq4_nl_h(device const block_iq4_nl * xb, short il,
+                               thread half4x4 & reg) {
+    device const uchar * qs = xb->qs;
+    const half d = xb->d;
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            const uchar byte = qs[i * 4 + j];
+            const uchar code = il == 0 ? (byte & 0x0F) : (byte >> 4);
+            reg[i][j] = (half) kvalues_iq4nl[code] * d;
+        }
+    }
+}
+
+GEMM_MM_KERNEL(iq4_nl_gemm_mm,   block_iq4_nl, float, 2,  32, dq_iq4_nl)
+GEMM_MM_KERNEL(iq4_nl_gemm_mm_h, block_iq4_nl, half,  2,  32, dq_iq4_nl_h)
+
 // Q2_0 row dequant (token embedding): out[k] = (code-1)*d
 // `woff` already points at the wanted row's first block; one thread per
 // weight.
@@ -531,6 +561,48 @@ kernel void q4_0_gemv(
                     const uchar b = qs[i];
                     s += ((float) (b & 0x0F) - 8.0f) * yl[i];
                     s += ((float) (b >> 4) - 8.0f) * yh[i];
+                }
+                acc[r] += s * d;
+            }
+        }
+    }
+    for (uint r = 0; r < NR0; r++) {
+        const float s = simd_sum(acc[r]);
+        if (tiisg == 0 && row0 + r < a.M) { out[row0 + r] = s; }
+    }
+}
+
+kernel void iq4_nl_gemv(
+        device const uchar * weights [[buffer(0)]],
+        device const float * x       [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant GemvArgs  & a       [[buffer(3)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint NR0 = 8;
+    const uint row0 = tgpig.x * NR0;
+    const uint nblk = a.K / 32;
+    const ulong rowBytes = (ulong) nblk * 18;
+    device const uchar * W = weights + a.woff;
+    float acc[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (uint ib = tiisg; ib < nblk; ib += 32) {
+        device const float * y = x + (ulong) ib * 32;
+        float yl[16], yh[16];
+        for (ushort i = 0; i < 16; i++) {
+            yl[i] = y[i];
+            yh[i] = y[i + 16];
+        }
+        for (uint r = 0; r < NR0; r++) {
+            const uint row = row0 + r;
+            if (row < a.M) {
+                device const uchar * bp = W + row * rowBytes + (ulong) ib * 18;
+                const float d = (float) (*(device const half *) bp);
+                device const uchar * qs = bp + 2;
+                float s = 0.0f;
+                for (ushort i = 0; i < 16; i++) {
+                    const uchar b = qs[i];
+                    s += (float) kvalues_iq4nl[b & 0x0F] * yl[i];
+                    s += (float) kvalues_iq4nl[b >> 4] * yh[i];
                 }
                 acc[r] += s * d;
             }

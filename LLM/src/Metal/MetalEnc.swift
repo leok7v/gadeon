@@ -102,6 +102,7 @@ struct MetalEnc {
         switch ty {
         case .q2_0: name = "q2_0_gemv"
         case .q4_0: name = "q4_0_gemv"
+        case .iq4_nl: name = "iq4_nl_gemv"
         case .q8_0: name = "q8_0_gemv"
         case .bf16: name = "bf16_gemv"
         case .f16: name = "f16_gemv"
@@ -263,6 +264,8 @@ struct MetalEnc {
             name = MetalEnc.f16Tiles ? "q2_0_gemm_mm_h" : "q2_0_gemm_mm"
         case .q4_0:
             name = MetalEnc.f16Tiles ? "q4_0_gemm_mm_h" : "q4_0_gemm_mm"
+        case .iq4_nl:
+            name = MetalEnc.f16Tiles ? "iq4_nl_gemm_mm_h" : "iq4_nl_gemm_mm"
         case .q8_0:
             name = MetalEnc.f16Tiles ? "q8_0_gemm_mm_h" : "q8_0_gemm_mm"
         case .f32, .f16, .bf16:
@@ -301,6 +304,8 @@ struct MetalEnc {
         switch w.type {
         case .q2_0: name = MetalEnc.f16Tiles ? "q2_0_gemm_mm_h" : "q2_0_gemm_mm"
         case .q4_0: name = MetalEnc.f16Tiles ? "q4_0_gemm_mm_h" : "q4_0_gemm_mm"
+        case .iq4_nl:
+            name = MetalEnc.f16Tiles ? "iq4_nl_gemm_mm_h" : "iq4_nl_gemm_mm"
         case .q8_0: name = MetalEnc.f16Tiles ? "q8_0_gemm_mm_h" : "q8_0_gemm_mm"
         default: name = ""
         }

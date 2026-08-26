@@ -58,6 +58,11 @@ public enum ModelCatalog {
             revision: "720438b700b0f773ff32030524d8e70ba90866a7",
             bytes: 7_119_830_240,
             files: ["Qwen3.8-27B-IQ1_S.gguf"]),
+        "Qwen3.8-27B-Q4_K_S": Source(
+            repo: "leok7v/Qwen3.8-27B",
+            revision: "f059da6a0630803243d78418f5cefc39bb9654ec",
+            bytes: 16_285_821_056,
+            files: ["Qwen3.8-27B-Q4_K_S.gguf"]),
         "Ternary-Bonsai-27B": Source(
             repo: "leok7v/Ternary-Bonsai-27B-gguf",
             revision: "f089b838b0778b2f19e69918a50198341cea9e38",
@@ -122,6 +127,7 @@ public enum ModelCatalog {
         "Qwen3.5-4B": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
         "Qwen3.5-9B": "Qwen3.5-9B-UD-Q4_K_XL.gguf",
         "Qwen3.8-27B-IQ1_S": "Qwen3.8-27B-IQ1_S.gguf",
+        "Qwen3.8-27B-Q4_K_S": "Qwen3.8-27B-Q4_K_S.gguf",
         "Ternary-Bonsai-27B": "Ternary-Bonsai-27B-Q2_0.gguf",
         "Ternary-Bonsai-1.7B": "Ternary-Bonsai-1.7B-Q2_0.gguf",
         "gemma-4-E2B": "gemma-4-e2b-it-qat.gguf",

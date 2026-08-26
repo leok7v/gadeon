@@ -496,7 +496,7 @@ public enum MetalSelfTest {
         var lines: [String] = []
         var failed = 0
         var ran = 0
-        for ty in [GGUFType.q4_0] + superTypes {
+        for ty in [GGUFType.q4_0] + gemvTypes {
             if let w = widest(model, ty) {
                 let k = w.dims[0], m = w.dims[1]
                 let off = ctx.window(UInt64(w.base - model.gguf.map))
@@ -555,9 +555,9 @@ public enum MetalSelfTest {
 
     // Q2_0 GEMV vs Q2_0.matvec on the layer-0 ffn_gate (present in both
     // lineages; dense qwen3 has no GDN in-projection).
-    static let superTypes: [GGUFType] = [
+    static let gemvTypes: [GGUFType] = [
         .q4k, .q5k, .q6k, .q2k, .q3k, .iq1_s, .iq1_m, .iq2_xxs,
-        .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_xs,
+        .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq4_xs, .iq4_nl,
     ]
 
     private static func checkGemvTypes(_ model: BonsaiModel,
@@ -565,7 +565,7 @@ public enum MetalSelfTest {
         var lines: [String] = []
         var failed = 0
         var ran = 0
-        for ty in superTypes {
+        for ty in gemvTypes {
             if let w = widest(model, ty) {
                 let k = w.dims[0], m = w.dims[1]
                 let x = fill(k, seed: 21)

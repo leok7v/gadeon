@@ -241,7 +241,7 @@ public enum MetalGolden {
         // the bounds-checked threadgroup path runs too. That path is written
         // once per kernel today and is exactly what a template must preserve.
         for ty in [GGUFType.q2_0, .q4_0, .q8_0, .bf16, .f32]
-            + MetalSelfTest.superTypes {
+            + MetalSelfTest.gemvTypes {
             if let w = matrix(ty) {
                 let K = w.dims[0], M = w.dims[1]
                 let tag = "\(ty)"
@@ -255,7 +255,7 @@ public enum MetalGolden {
                 // go through gemmRows, which is a gemv loop and would only
                 // re-measure the case above.
                 if ty == .q2_0
-                    || ty == .q4_0 || ty == .q8_0
+                    || ty == .q4_0 || ty == .q8_0 || ty == .iq4_nl
                     || Blocks.superBlocked(ty) {
                     for n in [8, 33] {
                         let xm = ctx.makeF32(fill(n * K, seed: 31))

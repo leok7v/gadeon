@@ -14,6 +14,31 @@
 // same shape Q2_0.matvec already has.
 import Foundation
 
+enum IQ4_NL {
+    static let qk = 32
+    static let blockBytes = 18
+    static let kvalues: [Float] = [
+        -127, -104, -83, -65, -49, -35, -22, -10,
+        1, 13, 25, 38, 53, 69, 89, 113,
+    ]
+
+    static func dequant(_ base: UnsafeRawPointer, count n: Int,
+                        into out: UnsafeMutablePointer<Float>) {
+        var p = base
+        var o = 0
+        for _ in 0..<(n / qk) {
+            let d = Float(p.loadUnaligned(as: Float16.self))
+            for j in 0..<16 {
+                let b = p.load(fromByteOffset: 2 + j, as: UInt8.self)
+                out[o + j] = kvalues[Int(b & 0x0F)] * d
+                out[o + j + 16] = kvalues[Int(b >> 4)] * d
+            }
+            p += blockBytes
+            o += qk
+        }
+    }
+}
+
 enum Q4_0 {
     static let qk = 32
     static let blockBytes = 18
@@ -94,6 +119,17 @@ enum GQ {
                     let b = p.load(fromByteOffset: 2 + j, as: UInt8.self)
                     acc += (Float(b & 0x0F) - 8) * xp[k + j]
                     acc += (Float(b >> 4) - 8) * xp[k + j + 16]
+                }
+                return acc * d
+            }
+        case .iq4_nl:
+            rowParallel(w, x: x, out: &out) { p, xp, k in
+                var acc: Float = 0
+                let d = Float(p.loadUnaligned(as: Float16.self))
+                for j in 0..<16 {
+                    let b = p.load(fromByteOffset: 2 + j, as: UInt8.self)
+                    acc += IQ4_NL.kvalues[Int(b & 0x0F)] * xp[k + j]
+                    acc += IQ4_NL.kvalues[Int(b >> 4)] * xp[k + j + 16]
                 }
                 return acc * d
             }
@@ -342,6 +378,9 @@ enum GQ {
         case .q4_0:
             Q4_0.dequant(base + from / Q4_0.qk * Q4_0.blockBytes,
                          count: count, into: o)
+        case .iq4_nl:
+            IQ4_NL.dequant(base + from / IQ4_NL.qk * IQ4_NL.blockBytes,
+                           count: count, into: o)
         case .q8_0:
             Q8_0.dequant(base + from / Q8_0.qk * Q8_0.blockBytes,
                          count: count, into: o)
