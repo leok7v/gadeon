@@ -31,5 +31,15 @@ enum Blocks {
 
     static func superBlocked(_ t: GGUFType) -> Bool { decoder(t) != nil }
 
+    static func codebook(_ t: GGUFType) -> Bool {
+        let out: Bool
+        switch t {
+        case .iq1_s, .iq1_m, .iq2_xxs, .iq2_xs, .iq2_s,
+             .iq3_xxs, .iq3_s, .iq4_xs, .iq4_nl: out = true
+        default: out = false
+        }
+        return out
+    }
+
     static let superBlock = 256
 }

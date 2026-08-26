@@ -265,9 +265,7 @@ public struct MetalChat {
         } else {
             let gb = Double(engine.model.gguf.mapSize) / 1_073_741_824
             let trunk = engine.model.layers[0].ffnDown.type
-            let verifyLosesOnThisTrunk =
-                trunk == .iq1_s || trunk == .iq1_m
-            out = gb < 3 || verifyLosesOnThisTrunk ? 0 : 2
+            out = gb < 3 || Blocks.codebook(trunk) ? 0 : 2
         }
         return out
     }
