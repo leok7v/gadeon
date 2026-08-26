@@ -1,20 +1,10 @@
 import Foundation
 
-// The HF source for each model the picker offers -- multi-file CoreML/ANE sets
-// AND single-file ternary GGUFs served by the unified LLM engine (Metal/SIMD).
-// Both download through the same HubFetch flow into modelStore/<name>/<sha>/;
-// the revision is a PINNED commit sha so a later Hub push cannot swap weights
-// under a released binary. `bytes` is the on-disk size, shown in the consent
-// prompt. This lives in Shared/ (next to HubFetch), not CoreML/, because it is
-// backend-agnostic.
 public enum ModelCatalog {
     public struct Source: Sendable {
         public let repo: String
         public let revision: String        // pinned commit sha
         public let bytes: Int64
-        // Exact files to fetch (nil = the whole repo). A self-contained GGUF
-        // needs only its one weight file, not the repo's vision projector +
-        // docs; a CoreML set needs every file (nil).
         public let files: [String]?
 
         public init(repo: String, revision: String, bytes: Int64,
@@ -27,22 +17,6 @@ public enum ModelCatalog {
     }
 
     public static let sources: [String: Source] = [
-        // Revisions pin the commit carrying each set's generation_config.json
-        // with the per-mode sampling matrix (_sampling_presets) the runtime
-        // selects on the fly.
-        // 0.8B + 2B vision towers are pal8 (8-bit palettized) as of these pins:
-        // ~half the tower, OCR identical to fp16 (measured A/B). 4B/9B
-        // stay fp16.
-        // These pins carry the ORIGIN-form config.json (rope_theta nested at
-        // text_config.rope_parameters; the engine cross-verifies its I/O-derived
-        // geometry against it at load). The 0.8B pin also adds the Apache-2.0
-        // LICENSE the origin ships.
-        // The 4B and 9B come from the -MTP repos: their trunks carry a third
-        // "verify" function in the same weight blob, so self-speculative
-        // decode costs only the drafter (4B +86 MB, 9B +174 MB) rather than a
-        // second copy of the weights. Both drafters are baked from the origin
-        // Qwen3.5 safetensors, and the 4B's shared-blob verify makes its
-        // speculative output identical to its own greedy decode.
         "Qwen3.5-4B": Source(
             repo: "leok7v/Qwen3.5-4B",
             revision: "d97086ea1f947acefa4cf42eb562e8e9d8caf621",
@@ -58,6 +32,21 @@ public enum ModelCatalog {
             revision: "720438b700b0f773ff32030524d8e70ba90866a7",
             bytes: 7_119_830_240,
             files: ["Qwen3.8-27B-IQ1_S.gguf"]),
+        "Qwen3.8-27B-IQ2_XXS": Source(
+            repo: "leok7v/Qwen3.8-27B",
+            revision: "a591204415988a3f525ccc0ae1408585ca9a3368",
+            bytes: 8_459_696_256,
+            files: ["Qwen3.8-27B-IQ2_XXS.gguf"]),
+        "Qwen3.8-27B-IQ3_XXS": Source(
+            repo: "leok7v/Qwen3.8-27B",
+            revision: "a591204415988a3f525ccc0ae1408585ca9a3368",
+            bytes: 11_862_468_736,
+            files: ["Qwen3.8-27B-IQ3_XXS.gguf"]),
+        "Qwen3.8-27B-IQ4_XS": Source(
+            repo: "leok7v/Qwen3.8-27B",
+            revision: "a591204415988a3f525ccc0ae1408585ca9a3368",
+            bytes: 15_180_454_016,
+            files: ["Qwen3.8-27B-IQ4_XS.gguf"]),
         "Qwen3.8-27B-Q4_K_S": Source(
             repo: "leok7v/Qwen3.8-27B",
             revision: "f059da6a0630803243d78418f5cefc39bb9654ec",
@@ -102,31 +91,17 @@ public enum ModelCatalog {
             files: ["gemma-4-12b-it-qat.gguf"]),
     ]
 
-    private static let qwen38 = "Qwen3.8-27B"
-    private static let qwen38WideMinGB = 48
-    private static let qwen38Narrow = Source(
-        repo: "leok7v/Qwen3.8-27B-coreml-q4",
-        revision: "3288aa7c54439b3016ede414eb980371d1266cb2",
-        bytes: 14_632_000_000)
-
-    private static var installedGB: Int {
-        Int((ProcessInfo.processInfo.physicalMemory + (1 << 29)) >> 30)
-    }
-
     public static func source(_ name: String) -> Source? {
-        var out = sources[name]
-        if name == qwen38, installedGB < qwen38WideMinGB {
-            out = qwen38Narrow
-        }
-        return out
+        sources[name]
     }
 
-    // The GGUF weight file inside each single-file (unified-engine) model's set
-    // dir. A name here is a GGUF model (isGguf); absent is a CoreML/ANE set.
     public static let ggufFiles: [String: String] = [
         "Qwen3.5-4B": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
         "Qwen3.5-9B": "Qwen3.5-9B-UD-Q4_K_XL.gguf",
         "Qwen3.8-27B-IQ1_S": "Qwen3.8-27B-IQ1_S.gguf",
+        "Qwen3.8-27B-IQ2_XXS": "Qwen3.8-27B-IQ2_XXS.gguf",
+        "Qwen3.8-27B-IQ3_XXS": "Qwen3.8-27B-IQ3_XXS.gguf",
+        "Qwen3.8-27B-IQ4_XS": "Qwen3.8-27B-IQ4_XS.gguf",
         "Qwen3.8-27B-Q4_K_S": "Qwen3.8-27B-Q4_K_S.gguf",
         "Ternary-Bonsai-27B": "Ternary-Bonsai-27B-Q2_0.gguf",
         "Ternary-Bonsai-1.7B": "Ternary-Bonsai-1.7B-Q2_0.gguf",

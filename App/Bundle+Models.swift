@@ -50,6 +50,9 @@ enum Models {
             if gb >= 8 { list.append("Qwen3.5-4B") }
             if gb >= 16 { list.append("Qwen3.5-9B") }
             if gb >= 16 { list.append("Qwen3.8-27B-IQ1_S") }
+            if gb >= 16 { list.append("Qwen3.8-27B-IQ2_XXS") }
+            if gb >= 16 { list.append("Qwen3.8-27B-IQ3_XXS") }
+            if gb >= 24 { list.append("Qwen3.8-27B-IQ4_XS") }
             if gb >= 24 { list.append("Qwen3.8-27B-Q4_K_S") }
             if gb >= 24 { list.append("Ternary-Bonsai-27B") }
             list.append("Ternary-Bonsai-1.7B")
@@ -81,7 +84,10 @@ enum Models {
             case "Qwen3.5-4B": out = "Qwen3.5 4B"
             case "Qwen3.5-9B": out = "Qwen3.5 9B"
             case "Qwen3.8-27B-IQ1_S": out = "Qwen3.8 27B 1-bit"
-            case "Qwen3.8-27B-Q4_K_S": out = "Qwen3.8 27B 4-bit"
+            case "Qwen3.8-27B-IQ2_XXS": out = "Qwen3.8 27B 2-bit"
+            case "Qwen3.8-27B-IQ3_XXS": out = "Qwen3.8 27B 3-bit"
+            case "Qwen3.8-27B-IQ4_XS": out = "Qwen3.8 27B 4-bit IQ"
+            case "Qwen3.8-27B-Q4_K_S": out = "Qwen3.8 27B 4-bit K"
             case "Ternary-Bonsai-27B": out = "Bonsai 27B"
             case "Ternary-Bonsai-1.7B": out = "Bonsai 1.7B"
             case "gemma-4-E2B": out = "Gemma E2B"

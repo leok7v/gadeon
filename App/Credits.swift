@@ -45,7 +45,8 @@ enum Credits {
                source: "https://huggingface.co/Qwen/Qwen3.8-27B",
                changed: "Runs from a community GGUF quantization, with our "
                    + "vision tower and sampling card grafted into the one "
-                   + "file."),
+                   + "file, and the community's own speculative-decode "
+                   + "layer folded in where its build shipped without one."),
         Credit(name: "Ternary Bonsai",
                author: "PrismML",
                terms: "Apache-2.0",
