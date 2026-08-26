@@ -414,7 +414,7 @@ public final class MetalEngine {
         let base = pos
         let mergedRows = (feats.first?.count ?? 0) / c.nEmbd
         let spans = starts.map { s in (start: s, gh: gridH, gw: gridW) }
-        let plan = Engine.visionPositionsMulti(
+        let plan = VisionPositions.visionPositionsMulti(
             ids.count, spans, startScalar: base + ropeShift)
         ropeShift = plan.next - (base + ids.count)
         let chunk = MetalEngine.prefillChunk
@@ -1023,10 +1023,10 @@ public final class MetalEngine {
     public var mtpReady: Bool { mtp != nil }
 
     // nil when no cycle ran, so a plain turn appends nothing to the log.
-    public func drainSpecTurn() -> Engine.SpecTurn? {
-        var out: Engine.SpecTurn? = nil
+    public func drainSpecTurn() -> SpecTurn? {
+        var out: SpecTurn? = nil
         if specCycles > 0 {
-            out = Engine.SpecTurn(cycles: specCycles,
+            out = SpecTurn(cycles: specCycles,
                                   committed: specCommitted,
                                   drafted: specDrafted,
                                   accepted: specAccepted)

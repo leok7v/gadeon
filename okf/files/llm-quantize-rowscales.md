@@ -18,4 +18,4 @@ already stores.
 Format is "RSC1", a count, then name and float vector per entry. It stops at
 reading and applying; producing the scales is the tuning step, which lives
 outside this repo for now. See
-`calibration-corpus-and-recovery`.
+`aneq-archive`.

@@ -251,7 +251,6 @@ import UniformTypeIdentifiers
         }
         downloadDone = s.done
         downloadTotal = s.total
-        primer.observe(s.file, set: set)
     }
 
     var downloadFraction: Double {
@@ -356,16 +355,9 @@ import UniformTypeIdentifiers
     }
 
     var compiling = false
-    var compileDoneLoC = 0
-    var compileTotalLoC = 0
-    var compileFraction: Double {
-        compileTotalLoC > 0
-            ? min(1.0, Double(compileDoneLoC) / Double(compileTotalLoC)) : 0
-    }
 
     var loadError: String? = nil
 
-    var firstCompile = true
 
     var wikipedia = true
     var webAccess = true
@@ -569,13 +561,11 @@ import UniformTypeIdentifiers
 
     private let log = Logger(subsystem: "io.github.leok7v.gadeon",
                               category: "ui")
-    private var chat: AneChat?
     private var ggufBackend: (any AgentBackend)?
     private var ggufTemplate = ""
     private var ggufVocabCount = 0
     private var session: ChatSession?
     private var genTask: Task<Void, Never>?
-    private let primer = Primer()
     // The last NON-ZERO rates: the ticker samples every 400ms from turn start,
     // where tg is still 0, so the raw metric blinks 0.0 at the reader.
     private var lastPP = 0.0
@@ -583,7 +573,6 @@ import UniformTypeIdentifiers
     private var perImageTokens = 256
     private var activePresets: SamplingPresets?
     @ObservationIgnored private var phaseStart = Date()
-    @ObservationIgnored private var optimizeFinish: Date?
 
     func acceptEULA() {
         eulaAccepted = true
@@ -608,11 +597,11 @@ import UniformTypeIdentifiers
         ChatModel.pruneUnavailable()
         let setDir = ModelCatalog.localSet(name, in: Bundle.modelStore())
         if let setDir, ModelCatalog.isComplete(setDir) {
-            if ModelCatalog.isGguf(name),
-               let path = ModelCatalog.ggufPath(name, in: Bundle.modelStore()) {
+            if let path = ModelCatalog.ggufPath(name,
+                                                in: Bundle.modelStore()) {
                 buildGguf(name: name, path: path)
             } else {
-                build(setDir: setDir)
+                loadError = Self.prepFailed
             }
         } else if ModelCatalog.source(name) != nil {
             downloadName = name
@@ -624,16 +613,12 @@ import UniformTypeIdentifiers
 
     private func buildGguf(name: String, path: String) {
         compiling = true
-        compileDoneLoC = 0
-        compileTotalLoC = 0
         phaseStart = Date()
         loadError = nil
-        firstCompile = false
         // DROP THE OUTGOING MODEL BEFORE MAPPING THE NEW ONE, or a switch
         // needs room for the sum of both. `session` retains the backend, so
         // clearing it first is what actually lets the backend go.
         session = nil
-        chat = nil
         media = nil
         ggufBackend = nil
         Task.detached { [weak self] in
@@ -689,7 +674,6 @@ import UniformTypeIdentifiers
 
     func retry() {
         loadError = nil
-        clearCompileCache()
         load(name: modelName)
     }
 
@@ -706,7 +690,6 @@ import UniformTypeIdentifiers
             let dest = Bundle.modelStore().appendingPathComponent(name)
             let setDir = dest.appendingPathComponent(src.revision)
             Task.detached { [weak self] in
-                AneCache.shared.downloadBegan()
                 var set: URL? = nil
                 var failure = "download failed, check your connection"
                 do {
@@ -723,16 +706,15 @@ import UniformTypeIdentifiers
                 } catch {
                 }
                 await MainActor.run {
-                    self?.primer.cancel()
                     self?.downloading = false
-                    if let self, let set {
+                    if let self, set != nil {
                         Self.saveSeconds("download", name,
                             Date().timeIntervalSince(self.phaseStart))
-                        if ModelCatalog.isGguf(name), let path =
-                            ModelCatalog.ggufPath(name, in: Bundle.modelStore()) {
+                        if let path = ModelCatalog.ggufPath(
+                            name, in: Bundle.modelStore()) {
                             self.buildGguf(name: name, path: path)
                         } else {
-                            self.build(setDir: set)
+                            self.status = failure
                         }
                     } else {
                         self?.status = failure
@@ -740,96 +722,6 @@ import UniformTypeIdentifiers
                 }
             }
         }
-    }
-
-    private func build(setDir: URL, attempt: Int = 0) {
-        compiling = true
-        compileDoneLoC = 0
-        compileTotalLoC = 0
-        phaseStart = Date()
-        optimizeFinish = nil
-        activePresets = Self.presets(setDir)
-        loadError = nil
-        let key = Self.compiledKey(setDir)
-        firstCompile = !UserDefaults.standard.bool(forKey: key)
-            || AneCache.shared.containerMigrated()
-        Task.detached { [weak self] in
-            let cacheBefore = AneCache.shared.buildBegan()
-            Engine.primeCacheDir(setDir)
-            AneCache.shared.restoreFromShadow()
-            let total = Engine.compileTotalLoC(setDir)
-            await MainActor.run { self?.compileTotalLoC = total }
-            let report: @Sendable (Int) -> Void = { loc in
-                Task { @MainActor in
-                    self?.compileDoneLoC += loc
-                    self?.tightenOptimizeETA()
-                }
-            }
-            let built = try? AneChat(modelsDir: setDir, onCompiledLoC: report)
-            let vision = await built?.engine.supportsVision() ?? false
-            await MainActor.run {
-                self?.chat = built
-                if let built {
-                    self?.modelSupportsVision = vision
-                    self?.modelSupportsSoftTokens = false
-                    self?.modelShape = built.shape
-                    self?.media = nil
-                    self?.makeSession()
-                } else {
-                    self?.buildFailed(setDir, attempt)
-                }
-            }
-            if let built {
-                do {
-                    try await built.engine.warmup()
-                    try await built.loadHeavy()
-                    try await built.loadCarry()
-                    await built.loadMTP()
-                    await built.engine.offloadVision()
-                    AneCache.shared.buildEnded(setDir: setDir,
-                                               before: cacheBefore)
-                    await MainActor.run {
-                        if let self, self.firstCompile {
-                            Self.saveSeconds("optimize", self.modelName,
-                                Date().timeIntervalSince(self.phaseStart))
-                        }
-                        self?.compiling = false
-                        self?.status = ""
-                        UserDefaults.standard.set(true, forKey: key)
-                        self?.primeSession()
-                    }
-                } catch {
-                    await MainActor.run {
-                        self?.chat = nil
-                        self?.session = nil
-                        self?.buildFailed(setDir, attempt)
-                    }
-                }
-            }
-        }
-    }
-
-    private func buildFailed(_ setDir: URL, _ attempt: Int) {
-        if AneCache.cacheMode == .hardlink, attempt == 0 {
-            AneCache.shared.purgeSet(setDir)
-            build(setDir: setDir, attempt: 1)
-        } else {
-            chat = nil
-            session = nil
-            compiling = false
-            loadError = Self.prepFailed
-        }
-    }
-
-    private static func compiledKey(_ setDir: URL) -> String {
-        let n = Engine.programCount(setDir)
-        let mil = setDir.appendingPathComponent("mf0of\(n).mlmodelc")
-            .appendingPathComponent("model.mil")
-        let attrs = try? FileManager.default.attributesOfItem(atPath: mil.path)
-        let size = (attrs?[.size] as? Int) ?? 0
-        let os = ProcessInfo.processInfo.operatingSystemVersion
-        return "compiled.\(setDir.lastPathComponent).\(size)"
-            + ".\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"
     }
 
     func switchModel(_ name: String) {
@@ -867,8 +759,6 @@ import UniformTypeIdentifiers
         commitCurrent()
         genTask?.cancel()
         session?.requestStop()
-        primer.cancel()
-        chat = nil
         ggufBackend = nil
         session = nil
         modelSupportsVision = false
@@ -883,7 +773,6 @@ import UniformTypeIdentifiers
         clampCaret()
         downloading = false
         compiling = false
-        compileDoneLoC = 0
         loadError = nil
         // The identity goes with the messages, or the next conversation
         // commits into this one's id and overwrites it.
@@ -926,10 +815,6 @@ import UniformTypeIdentifiers
 
     private static func erase(_ name: String) {
         let fm = FileManager.default
-        if !ModelCatalog.isGguf(name),
-           let set = ModelCatalog.localSet(name, in: Bundle.modelStore()) {
-            AneCache.shared.releaseSet(set)
-        }
         try? fm.removeItem(
             at: Bundle.modelStore().appendingPathComponent(name))
         let cooked = (try? fm.contentsOfDirectory(
@@ -1058,26 +943,7 @@ import UniformTypeIdentifiers
     }
 
     private func makeSession() {
-        if let chat, let activePresets {
-            modelSupportsThinking =
-                templateSupportsThinking(chat.chatTemplate)
-            effortLevels = templateEffortLevels(chat.chatTemplate)
-            modelSupportsReasoningEffort = effortLevels.count > 1
-            session = ChatSession(
-                backend: EngineBackend(chat),
-                template: chat.chatTemplate,
-                system: systemStable,
-                systemTail: systemDynamic,
-                vocabSize: chat.tokenizer.vocabCount,
-                presets: activePresets,
-                enableThinking: thinkingActive,
-                reasoningEffort: activeEffort,
-                maxReasoning: thinkTokenCap * 2,
-                softReasoningCap: thinkTokenCap,
-                overthink: Self.overthinkLambda,
-                runner: toolRunner)
-            hookTrace()
-        } else if let ggufBackend, let activePresets {
+        if let ggufBackend, let activePresets {
             modelSupportsThinking = templateSupportsThinking(ggufTemplate)
             effortLevels = templateEffortLevels(ggufTemplate)
             modelSupportsReasoningEffort = effortLevels.count > 1
@@ -1729,40 +1595,15 @@ import UniformTypeIdentifiers
         if let id = Bundle.main.bundleIdentifier {
             d.removePersistentDomain(forName: id)
         }
-        clearCompileCache()
         ChatModel.wipePrecook()
         try? FileManager.default.removeItem(at: Bundle.modelStore())
-        if let support = FileManager.default.urls(
-            for: .applicationSupportDirectory, in: .userDomainMask).first {
-            try? FileManager.default.removeItem(
-                at: support.appendingPathComponent("anecache"))
-        }
         quitApp()
     }
 
     static let prepFailed = "This model could not be prepared. Try Again "
-        + "clears the compile cache and recompiles; if it keeps failing, this "
-        + "device's Neural Engine is likely unsupported."
+        + "loads it once more; if it keeps failing, delete the model and "
+        + "download it again."
 
-    private func clearCompileCache() {
-        let d = UserDefaults.standard
-        for k in d.dictionaryRepresentation().keys
-            where k.hasPrefix("compiled.") {
-            d.removeObject(forKey: k)
-        }
-        d.synchronize()
-        let fm = FileManager.default
-        if let caches = fm.urls(for: .cachesDirectory,
-                                in: .userDomainMask).first {
-            var paths = [
-                caches.appendingPathComponent("com.apple.e5rt.e5bundlecache")]
-            if let id = Bundle.main.bundleIdentifier {
-                paths.append(caches.appendingPathComponent(id)
-                    .appendingPathComponent("com.apple.e5rt.e5bundlecache"))
-            }
-            for p in paths { try? fm.removeItem(at: p) }
-        }
-    }
 
     func send() {
         followupHint = ""
@@ -2410,10 +2251,8 @@ import UniformTypeIdentifiers
     }
 
     private func specDigest() async -> String {
-        var turn: Engine.SpecTurn? = nil
-        if let engine = chat?.engine {
-            turn = await engine.drainSpecTurn()
-        } else if let gpu = ggufBackend as? MetalBackend {
+        var turn: SpecTurn? = nil
+        if let gpu = ggufBackend as? MetalBackend {
             turn = gpu.drainSpecTurn()
         }
         var out = ""
@@ -2588,22 +2427,6 @@ import UniformTypeIdentifiers
                         downloadTotal - had)
     }
 
-    var optimizeETA: String? {
-        optimizeFinish.map { finish in
-            Self.formatETA(max(0, finish.timeIntervalSinceNow))
-        }
-    }
-
-    private func tightenOptimizeETA() {
-        if compileFraction > 0.02 {
-            let now = Date()
-            let elapsed = now.timeIntervalSince(phaseStart)
-            let candidate = elapsed * (1 - compileFraction) / compileFraction
-            let current = optimizeFinish?.timeIntervalSince(now) ?? candidate
-            let blended = current + (candidate - current) * 0.35
-            optimizeFinish = now.addingTimeInterval(max(0, blended))
-        }
-    }
 
     private static func eta(_ start: Date, _ done: Int64,
                             _ total: Int64) -> String? {

@@ -72,7 +72,7 @@ public final class MetalBackend: AgentBackend, @unchecked Sendable {
     public func visionEncodeSeconds() async -> Double { towerSeconds }
 
     // The engine is internal; the app reaches its spec counters here.
-    public func drainSpecTurn() -> Engine.SpecTurn? {
+    public func drainSpecTurn() -> SpecTurn? {
         engine.drainSpecTurn()
     }
 

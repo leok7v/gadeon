@@ -6,17 +6,17 @@ import XCTest
 // mid-conversation image continues from the running position (the extend
 // carry), and expandPads must replicate each image placeholder into that
 // image's own merged-token run.
-final class EngineVisionTests: XCTestCase {
+final class VisionPositionsTests: XCTestCase {
 
     // Text-only positions advance a shared 3D scalar from startScalar; next is
     // the scalar just past the last token (the decode start). startScalar 0
     // reproduces the fresh-prefill numbering exactly.
     func testTextPositionsStartAtScalar() {
-        let fresh = Engine.visionPositionsMulti(3, [])
+        let fresh = VisionPositions.visionPositionsMulti(3, [])
         XCTAssertEqual(fresh.next, 3)
         XCTAssertEqual(fresh.pos.map { $0.0 }, [0, 1, 2])
 
-        let plan = Engine.visionPositionsMulti(3, [], startScalar: 5)
+        let plan = VisionPositions.visionPositionsMulti(3, [], startScalar: 5)
         XCTAssertEqual(plan.next, 8)
         XCTAssertEqual(plan.pos.map { $0.0 }, [5, 6, 7])
         XCTAssertEqual(plan.pos.map { $0.1 }, [5, 6, 7])
@@ -27,7 +27,7 @@ final class EngineVisionTests: XCTestCase {
     // token (r,c) -> (s, s+r, s+c); after the image the scalar advances by
     // max(gh,gw)/merge = 2, so next = startScalar + 2.
     func testImagePositionsBasedAtScalar() {
-        let plan = Engine.visionPositionsMulti(
+        let plan = VisionPositions.visionPositionsMulti(
             4, [(start: 0, gh: 4, gw: 4)], startScalar: 10)
         XCTAssertEqual(plan.pos[0].0, 10)
         XCTAssertEqual([plan.pos[0].1, plan.pos[0].2], [10, 10])
@@ -40,7 +40,7 @@ final class EngineVisionTests: XCTestCase {
     // A text token then an image: the image bases at the post-text scalar, and
     // text resumes past the image's grid extent.
     func testTextThenImageChainsScalar() {
-        let plan = Engine.visionPositionsMulti(
+        let plan = VisionPositions.visionPositionsMulti(
             5, [(start: 1, gh: 4, gw: 4)], startScalar: 10)
         XCTAssertEqual(plan.pos[0].0, 10)          // text at the seed scalar
         XCTAssertEqual(plan.pos[1].0, 11)          // image bases at 11

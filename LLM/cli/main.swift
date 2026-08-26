@@ -67,23 +67,10 @@ let softReasoning = stripValue(&rawArgs, "--soft-reasoning", Int.init) ?? 0
 // system-block template (gemma-4) takes mid-conversation, where the flag
 // itself no longer reaches the model.
 let suppressReasoning = rawArgs.contains("--no-reason")
-// --vl-gate DIR runs the vision roundtrip: load the fixture (patches.bin +
-// vl_ref.json dumped by scripts/convert/vl_gate.py), fuse-prefill the image +
-// prompt, greedy-decode, and check the first token against HF's argmax.
-let vlDir = stripValue(&rawArgs, "--vl-gate")
 // --vl-preprocess PNG REF.bin gates the Swift image preprocessor byte-vs-HF
-// (no model needed). --vl-image PNG runs the real path: Swift-preprocess ->
-// build the VL prompt -> fuse-prefill -> decode.
 let vpPair = stripPair(&rawArgs, "--vl-preprocess")
 let vpPng = vpPair?.0
 let vpBin = vpPair?.1
-let viPng = stripValue(&rawArgs, "--vl-image")
-// --vl-chat PNG drives the MULTI-TURN vision path: turn 1 is the image via
-// ChatSession.replyVision, later turns are text follow-ups that must still see
-// the image (the carry gate for multi-turn image).
-let vcPng = stripValue(&rawArgs, "--vl-chat")
-// Comma-separated images through ONE numbered turn (the A-inside-B gate).
-let viPair = stripValue(&rawArgs, "--vl-images")
 // --system PROMPT sets the system message (@path reads it from a file); absent
 // -> the neutral default.
 let sysVal = stripValue(&rawArgs, "--system")
@@ -155,9 +142,6 @@ let turnArgs = (rawArgs.count > 2 ? Array(rawArgs[2...]) : [])
             : arg
     }
 
-probeCompile()
-if rawArgs.contains("--count") { try probeCount() }
-if rawArgs.contains("--place") { try await placeProbe() }
 await probeNet()
 
 if rawArgs.contains("--meta") { runMeta(rawArgs) }
@@ -170,142 +154,5 @@ if rawArgs.contains("--puzzle-rescore") { runPuzzleRescore(rawArgs) }
 if rawArgs.contains("--puzzle-gate") { await runPuzzleGate(rawArgs) }
 if arg1.hasSuffix(".gguf") { try await runGgufMain() }
 
-let store = URL(fileURLWithPath: "models")
-let direct = URL(fileURLWithPath: arg1)
-let local = ModelCatalog.localSet(arg1, in: store)
-let modelsDir: URL
-if FileManager.default.fileExists(
-    atPath: direct.appendingPathComponent("tokenizer.json").path) {
-    modelsDir = direct
-} else if let local, ModelCatalog.isComplete(local) {
-    modelsDir = local
-} else if let src = ModelCatalog.source(arg1) {
-    err("model \(arg1) not in ./models; fetching \(src.repo)\n")
-    // GADEON_PRIME=1: compile each finished .mlmodelc in-process while later
-    // files still stream, so the post-download load takes e5 cache hits
-    // (in-place download puts files at their final, cache-keyed paths).
-    // cancel() stops the priming -- past that point the main load would
-    // only contend with it for the serial ANECompilerService.
-    let primer = ProcessInfo.processInfo.environment["GADEON_PRIME"] == "1"
-        ? Primer() : nil
-    let setDir = store.appendingPathComponent(arg1)
-        .appendingPathComponent(src.revision)
-    modelsDir = try await HubFetch.fetch(
-        repo: src.repo, prefix: "", into: store.appendingPathComponent(arg1),
-        revision: src.revision) { s in
-        err(progressLine(s.done, s.total, s.file))
-        Task { @MainActor in primer?.observe(s.file, set: setDir) }
-    }
-    err("\n")
-    primer?.cancel()
-} else {
-    modelsDir = direct
-}
-
-err("loading models...\n")
-let chat = try AneChat(modelsDir: modelsDir, cpuOnly: cpuOnly)
-// The engine loads the essential (decode) set at init, then the common heavy
-// prefill set. The carry (>512) set compiles on demand in the app; a batch
-// tool has no cold-launch budget, so block-load it up front so --longdoc +
-// batched prefill work on the first turn. --no-carry skips both
-// batched-prefill sets (the ~40s/prog compile), so decode-only profiling
-// starts instantly.
-if !noCarry {
-    err("loading heavy prefill set...\n")
-    try await chat.loadHeavy()
-    err("loading on-demand carry set...\n")
-    try await chat.loadCarry()
-}
-let eng = chat.engine
-let tok = chat.tokenizer
-err("ready (plain decode).\n")
-
-
-if rawArgs.contains("--bench") { try await benchCoreML() }
-if rawArgs.contains("--bench-mtp") { try await benchMTP() }
-if rawArgs.contains("--verify-mtp") { try await verifyMTP() }
-if rawArgs.contains("--probe") { try await probeCoreML() }
-
-// Default chat routes through ChatSession (the shipping multi-turn path).
-// --ingest keeps the raw token-by-token ChatML path (A/B reference); --longdoc
-// keeps the block-carry probe. reasoning-effort none by default.
-let fallbackTemplate = """
-{% for message in messages %}<|im_start|>{{ message.role }}
-{{ message.content }}<|im_end|>
-{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant
-{% endif %}
-"""
-let templateURL = modelsDir.appendingPathComponent("chat_template.jinja")
-let template = (try? String(contentsOf: templateURL, encoding: .utf8))
-    ?? fallbackTemplate
-let genCfgURL = modelsDir.appendingPathComponent("generation_config.json")
-let loadedPresets = try SamplingPresets.from(generationConfig: genCfgURL)
-if loadedPresets == nil {
-    err("\(genCfgURL.path) suggests no sampling\n")
-    exit(1)
-}
-let activePresets = greedyDecode ? SamplingPresets.greedy : loadedPresets!
-let shownConfig = activePresets.select(thinking: enableThinking, vision: false)
-err(String(format: "sampler[%@]: temp=%.2f top_p=%.2f top_k=%d " +
-    "presence=%.1f repeat=%.2f\n", enableThinking ? "thinking" : "instruct",
-    shownConfig.temperature, shownConfig.topP, shownConfig.topK,
-    shownConfig.presencePenalty, shownConfig.repeatPenalty))
-// The chat path autodetects the MTP self-spec drafter (a set without the
-// tensors is a silent no-op); the bench/probe baselines above stay plain.
-if !longDoc && !forceIngest {
-    await chat.loadMTP()
-    if await eng.mtpReady() {
-        err("MTP self-speculative decode on (n=\(Engine.specDrafts))\n")
-    }
-}
-let session: ChatSession? = (longDoc || forceIngest) ? nil : ChatSession(
-    backend: EngineBackend(chat), template: template,
-    system: systemPrompt, systemTail: systemTimeTail,
-    vocabSize: tok.vocabCount,
-    presets: activePresets, enableThinking: enableThinking,
-    reasoningEffort: reasoningEffort, maxTokens: maxTokens,
-    maxReasoning: maxReasoning, softReasoningCap: softReasoning,
-    overthink: overthink, seed: seedVal, runner: toolRunner)
-if let pkVal, let session {
-    let url = URL(fileURLWithPath: pkVal)
-    let t0 = Date()
-    if await session.prime(from: url) {
-        err(String(format: "[precook] primed in %.2fs\n",
-                   Date().timeIntervalSince(t0)))
-    } else {
-        try await session.precook(to: url)
-        err(String(format: "[precook] cooked + saved in %.1fs\n",
-                   Date().timeIntervalSince(t0)))
-    }
-}
-
-if let vlDir {
-    try await runVLGate(vlDir)
-} else if let viPair {
-    try await runVLImages(viPair.split(separator: ",").map(String.init),
-                          turnArgs.first ?? VLPrompt.defaultPrompt)
-} else if let vcPng {
-    try await runVLChat(vcPng, turnArgs)
-} else if let viPng {
-    try await runVLImage(viPng, turnArgs.first ?? VLPrompt.defaultPrompt)
-} else if longDoc {
-    try await runLongDoc(turnArgs.first
-        ?? "The ISDA Master Agreement is the most widely used")
-} else if !turnArgs.isEmpty {
-    var isFirst = true
-    for turn in turnArgs {
-        try await runTurn(turn, first: isFirst); isFirst = false
-    }
-} else {
-    err("enter messages (Ctrl-D to end):\n")
-    var isFirst = true
-    var line = readLine(strippingNewline: true)
-    while let text = line, text != "/quit" {
-        if !text.isEmpty {
-            try await runTurn(text, first: isFirst); isFirst = false
-        }
-        line = readLine(strippingNewline: true)
-    }
-}
-
-if rawArgs.contains("--hint"), let session { await reportHints(session) }
+err("\(arg1): not a .gguf -- this build runs GGUF models only\n")
+exit(2)

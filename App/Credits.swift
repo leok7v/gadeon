@@ -35,22 +35,17 @@ enum Credits {
         Credit(name: "Qwen3.5",
                author: "Qwen, Alibaba",
                terms: "Apache-2.0",
-               source: "https://huggingface.co/Qwen/Qwen3.5-0.8B",
-               changed: "Converted to Core ML so it runs on the Neural "
-                   + "Engine."),
+               source: "https://huggingface.co/Qwen/Qwen3.5-4B",
+               changed: "Runs from a community GGUF quantization, with our "
+                   + "vision tower and sampling card grafted into the one "
+                   + "file."),
         Credit(name: "Qwen3.8",
                author: "Qwen, Alibaba",
                terms: "Apache-2.0",
                source: "https://huggingface.co/Qwen/Qwen3.8-27B",
-               changed: "Converted to Core ML so it runs on the Neural "
-                   + "Engine, with its own multi-token-prediction drafter "
-                   + "folded in."),
-        Credit(name: "QwenPaw-Flash",
-               author: "AgentScope",
-               terms: "Apache-2.0",
-               source: "https://huggingface.co/agentscope-ai/QwenPaw-Flash-9B",
-               changed: "Converted to Core ML for the Neural Engine, with "
-                   + "multi-token prediction folded in."),
+               changed: "Runs from a community GGUF quantization, with our "
+                   + "vision tower and sampling card grafted into the one "
+                   + "file."),
         Credit(name: "Ternary Bonsai",
                author: "PrismML",
                terms: "Apache-2.0",

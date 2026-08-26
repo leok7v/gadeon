@@ -19,5 +19,5 @@ exists so the GPU kernel has a CPU oracle rather than only itself.
 A type missing from `QB` falls through to `GQ.gather`, which decodes an
 unknown type AS BF16 rather than refusing -- so a new type must be added here,
 not left to the default.
-See `ternary-ane-fp16-expansion` for what this costs on the other engine,
-and `e8-lattice-codebook` for the codebook itself.
+See `aneq-archive` for what this costs on the other engine,
+and `aneq-archive` for the codebook itself.

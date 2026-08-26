@@ -11,7 +11,7 @@ struct DisclaimerView: View {
                     Text("Before you begin")
                         .appFont(.title2).bold()
                     Text("Gadeon runs a small language model entirely on this "
-                        + "device (Apple Neural Engine). Your conversations "
+                        + "device, on its GPU. Your conversations "
                         + "stay local and are never sent to any server. "
                         + "Optional lookups (Wikipedia, web search; see "
                         + "Settings) download public data from the web.")

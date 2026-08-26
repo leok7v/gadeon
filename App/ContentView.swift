@@ -68,7 +68,6 @@ struct ContentView: View {
                 pinchShown = nil
             }
     }
-    @State private var optimizingPhrase = Whimsical.current(.optimizing)
     @State private var downloadingPhrase = Whimsical.current(.downloading)
     @State private var sidebarOpen = false
     @State private var renaming: ConversationStore.Convo?
@@ -254,7 +253,7 @@ struct ContentView: View {
             } else if let err = model.loadError {
                 failureView(err)
             } else if model.compiling {
-                compileProgress
+                loadProgress
             } else {
                 preparing
             }
@@ -449,38 +448,15 @@ struct ContentView: View {
         .padding(32)
     }
 
-    private var compileProgress: some View {
+    private var loadProgress: some View {
         VStack(spacing: 16) {
-            Group {
-                if model.compileTotalLoC > 0 {
-                    ProgressView(value: model.compileFraction)
-                } else {
-                    ProgressView()
-                }
-            }
-            .frame(maxWidth: 320)
-            if model.firstCompile {
-                VStack(spacing: 4) {
-                    Text("Optimizing for your device…").appFont(.headline)
-                    Text(Models.display(model.modelName))
-                        .appFont(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                Text("It will take a while.\nLater launches will be fast.")
-                    .appFont(.callout)
+            ProgressView()
+                .frame(maxWidth: 320)
+            VStack(spacing: 4) {
+                Text("Loading…").appFont(.headline)
+                Text(Models.display(model.modelName))
+                    .appFont(.subheadline)
                     .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                stageWhimsical(.optimizing, $optimizingPhrase)
-            } else {
-                VStack(spacing: 4) {
-                    Text("Loading…").appFont(.headline)
-                    Text(Models.display(model.modelName))
-                        .appFont(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            if let eta = model.optimizeETA {
-                Text(eta).appFont(.caption).foregroundStyle(.tertiary)
             }
         }
         .padding(.vertical, 32)

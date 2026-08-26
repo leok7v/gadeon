@@ -19,4 +19,4 @@ allocate: the all-empty vision block table, and Q2_E8's 256-entry codebook. The
 codebook is a plain device buffer rather than threadgroup memory because it is
 512 bytes in its 2-bit packed form and stays in L2 -- a per-threadgroup copy of
 the 4 KB float table would have doubled the weight traffic of a 1024x6144
-tensor. See `e8-lattice-codebook`.
+tensor. See `aneq-archive`.

@@ -186,9 +186,6 @@ schemes:
         - variable: OS_ACTIVITY_MODE
           value: disable
           isEnabled: false
-        - variable: ANE_CACHE_MODE
-          value: disable
-          isEnabled: false
         - variable: GADEON_LOG_MEM
           value: "1"
           isEnabled: false

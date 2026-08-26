@@ -37,32 +37,12 @@ public enum ModelCatalog {
         // text_config.rope_parameters; the engine cross-verifies its I/O-derived
         // geometry against it at load). The 0.8B pin also adds the Apache-2.0
         // LICENSE the origin ships.
-        "Qwen3.5-0.8B": Source(
-            repo: "leok7v/Qwen3.5-0.8B-coreml",
-            revision: "2a965bb43c7ee13a90fdad98dbc867a8c2a630b9",
-            bytes: 663_000_000),
-        "QwenPaw-Flash-2B": Source(
-            repo: "leok7v/QwenPaw-Flash-2B-coreml",
-            revision: "9cf1086cdf9bc9ca653df488061c75986679a974",
-            bytes: 1_640_000_000),
         // The 4B and 9B come from the -MTP repos: their trunks carry a third
         // "verify" function in the same weight blob, so self-speculative
         // decode costs only the drafter (4B +86 MB, 9B +174 MB) rather than a
         // second copy of the weights. Both drafters are baked from the origin
         // Qwen3.5 safetensors, and the 4B's shared-blob verify makes its
         // speculative output identical to its own greedy decode.
-        "QwenPaw-Flash-4B": Source(
-            repo: "leok7v/QwenPaw-Flash-4B-MTP-coreml",
-            revision: "d20d2c120980b4802dfcd1686865fc1a969276af",
-            bytes: 3_951_000_000),
-        "QwenPaw-Flash-9B": Source(
-            repo: "leok7v/QwenPaw-Flash-9B-MTP-coreml",
-            revision: "84e90005d20dcdf0d5fcbb53564176373651a1b5",
-            bytes: 7_854_000_000),
-        "Qwen3.8-27B": Source(
-            repo: "leok7v/Qwen3.8-27B-coreml-q6",
-            revision: "f72acfa1607fe63294534d355ab89c9226c7aa17",
-            bytes: 21_478_000_000),
         "Qwen3.5-4B": Source(
             repo: "leok7v/Qwen3.5-4B",
             revision: "d97086ea1f947acefa4cf42eb562e8e9d8caf621",

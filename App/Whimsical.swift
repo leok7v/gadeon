@@ -3,7 +3,7 @@ import Foundation
 enum Whimsical {
 
     enum Stage: String {
-        case reasoning, prefill, documents, vision, consulting, optimizing,
+        case reasoning, prefill, documents, vision, consulting,
              downloading
         case listening, mulling
         case heard
@@ -14,7 +14,6 @@ enum Whimsical {
     static let documents = load("documents").shuffled()
     static let vision = load("vision").shuffled()
     static let consulting = load("consulting").shuffled()
-    static let optimizing = load("optimizing").shuffled()
     static let downloading = load("downloading").shuffled()
     static let listening = load("listening").shuffled()
     static let mulling = load("mulling").shuffled()
@@ -28,7 +27,6 @@ enum Whimsical {
         case .documents: result = documents
         case .vision: result = vision
         case .consulting: result = consulting
-        case .optimizing: result = optimizing
         case .downloading: result = downloading
         case .listening: result = listening
         case .mulling: result = mulling

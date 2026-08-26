@@ -14,4 +14,4 @@ a declared tensor was never written, so a truncated or misordered emit cannot
 reach disk quietly.
 
 Byte sizes come from GGUF.rowByteCount, shared with the reader, so the two
-sides of a private block type cannot drift. See `q2x-block-and-qwen38-gguf`.
+sides of a private block type cannot drift. See `aneq-archive`.

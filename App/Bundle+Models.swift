@@ -1,10 +1,5 @@
 import Foundation
 import LLM
-import Metal
-
-let apple7orBetter: Bool = {
-    MTLCreateSystemDefaultDevice()?.supportsFamily(.apple7) ?? false
-}()
 
 var installedGB: Int {
     Int((ProcessInfo.processInfo.physicalMemory + (1 << 29)) >> 30)
@@ -45,10 +40,6 @@ enum Models {
         let gb = installedGB
         var list: [String] = []
         if isOS {
-            if gb >= 4 && apple7orBetter && offersSmall(gb) {
-                list.append("Qwen3.5-0.8B")
-            }
-            if gb >= 6 { list.append("QwenPaw-Flash-2B") }
             if gb >= 8 {
                 list.append("gemma-4-E4B")
             } else {
@@ -56,10 +47,6 @@ enum Models {
             }
             list.append("Ternary-Bonsai-1.7B")
         } else {
-            if offersSmall(gb) { list.append("Qwen3.5-0.8B") }
-            list += ["QwenPaw-Flash-2B", "QwenPaw-Flash-4B"]
-            if gb >= 16 { list.append("QwenPaw-Flash-9B") }
-            if gb > 24 { list.append("Qwen3.8-27B") }
             if gb >= 8 { list.append("Qwen3.5-4B") }
             if gb >= 16 { list.append("Qwen3.5-9B") }
             if gb >= 16 { list.append("Qwen3.8-27B-IQ1_S") }
@@ -72,13 +59,9 @@ enum Models {
         return list
     }
 
-    private static func offersSmall(_ gb: Int) -> Bool {
-        gb < 8 || debugBuild
-    }
-
     static var supported: Bool { !all.isEmpty }
 
-    static let fallback = "Qwen3.5-0.8B"
+    static let fallback = "Ternary-Bonsai-1.7B"
 
     static var start: String {
         let list = all
@@ -91,21 +74,12 @@ enum Models {
     private static let e2b = "gemma-4-E2B"
     private static let e4b = "gemma-4-E4B"
 
-    static func runsOnANE(_ name: String) -> Bool {
-        ModelCatalog.source(name) != nil && !ModelCatalog.isGguf(name)
-    }
-
     static func display(_ name: String) -> String {
         var out = name
         switch name {
-            case "Qwen3.5-0.8B": out = "Qwen3.5 0.8B"
             case "Qwen3.5-4B": out = "Qwen3.5 4B"
             case "Qwen3.5-9B": out = "Qwen3.5 9B"
             case "Qwen3.8-27B-IQ1_S": out = "Qwen3.8 27B"
-            case "QwenPaw-Flash-2B": out = "QwenPaw 2B"
-            case "QwenPaw-Flash-4B": out = "QwenPaw 4B"
-            case "QwenPaw-Flash-9B": out = "QwenPaw 9B"
-            case "Qwen3.8-27B": out = "Qwen3.8 27B"
             case "Ternary-Bonsai-27B": out = "Bonsai 27B"
             case "Ternary-Bonsai-1.7B": out = "Bonsai 1.7B"
             case "gemma-4-E2B": out = "Gemma E2B"
@@ -113,7 +87,7 @@ enum Models {
             case "gemma-4-12B": out = "Gemma 12B"
             default: out = name
         }
-        return Models.runsOnANE(name) ? out + " 🌀" : out
+        return out
     }
 
 }
