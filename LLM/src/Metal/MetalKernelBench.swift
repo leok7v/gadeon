@@ -93,7 +93,6 @@ public enum MetalKernelBench {
                      "iq_gemv", "iq_gemm_mm_h"]
         for r in 2...5 {
             names.append("q4_0_gemm_nb_r\(r)")
-            names.append("iq_gemm_nb_r\(r)")
         }
         for n in names {
             if let p = try? ctx.pipeline(n) {

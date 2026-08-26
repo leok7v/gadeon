@@ -209,26 +209,7 @@ struct MetalEnc {
     static let narrowMax = min(5,
         Int(ProcessInfo.processInfo.environment["LLM_NARROW_MAX"] ?? "") ?? 5)
 
-    static let iqRows =
-        ProcessInfo.processInfo.environment["LLM_IQ_ROWS"] == "1"
-
     static func narrowRows() -> Int { 16 }
-
-    static func iqNarrowRows(_ n: Int) -> Int { n > 3 ? 4 : 8 }
-
-    func iqGemmNarrow(_ w: GGUFTensor, X: MTLBuffer, out: MTLBuffer,
-                      off: WeightRef, N: Int) {
-        var a = iqArgs(off, w.type, k: w.dims[0], m: w.dims[1])
-        let rows = MetalEnc.iqNarrowRows(N)
-        let stem = w.type == .iq1_s ? "iq1_s_gemm_nb_r" : "iq_gemm_nb_r"
-        groups(stem + "\(N)", (w.dims[1] + rows - 1) / rows,
-               tpg: 32) { e in
-            e.setBuffer(off.buf, offset: 0, index: 0)
-            e.setBuffer(X, offset: 0, index: 1)
-            e.setBuffer(out, offset: 0, index: 2)
-            e.setBytes(&a, length: MemoryLayout<IQArgs>.stride, index: 3)
-        }
-    }
 
     func gemmNarrow(_ w: GGUFTensor, X: MTLBuffer, out: MTLBuffer,
                     off: WeightRef, N: Int) {
@@ -253,7 +234,6 @@ struct MetalEnc {
             && N > 1 && N <= MetalEnc.narrowMax
         let iqNarrow = Blocks.superBlocked(w.type)
             && N > 1 && N <= MetalEnc.narrowMax
-        let iqRows = MetalEnc.iqRows && iqNarrow
         // The half-tile spill path needs 8192B f32 temp; a fully in-bounds
         // tile
         // (M multiple of 64, N of 32) never spills, so 6144 suffices.
@@ -277,10 +257,8 @@ struct MetalEnc {
         }
         if narrow {
             gemmNarrow(w, X: X, out: out, off: off, N: N)
-        } else if iqRows {
-            gemmRows(w, X: X, out: out, off: off, N: N)
         } else if iqNarrow {
-            iqGemmNarrow(w, X: X, out: out, off: off, N: N)
+            gemmRows(w, X: X, out: out, off: off, N: N)
         } else if name.hasPrefix("iq_gemm_mm") {
             iqGemmTiled(name, w, X: X, out: out, off: off, N: N,
                         fullTile: fullTile)
@@ -307,9 +285,14 @@ struct MetalEnc {
         case .iq4_nl:
             name = MetalEnc.f16Tiles ? "iq4_nl_gemm_mm_h" : "iq4_nl_gemm_mm"
         case .q8_0: name = MetalEnc.f16Tiles ? "q8_0_gemm_mm_h" : "q8_0_gemm_mm"
-        default: name = ""
+        default:
+            name = Blocks.superBlocked(w.type)
+                ? (MetalEnc.f16Tiles ? "iq_gemm_mm_h" : "iq_gemm_mm") : ""
         }
-        if !name.isEmpty {
+        if name.hasPrefix("iq_gemm_mm") {
+            iqGemmTiled(name, w, X: X, out: out, off: off, N: N,
+                        fullTile: fullTile)
+        } else if !name.isEmpty {
             gemmTiled(name, w, X: X, out: out, off: off, N: N, a: &a, nn: &nn,
                       fullTile: fullTile)
         }
