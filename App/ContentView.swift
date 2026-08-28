@@ -95,7 +95,10 @@ struct ContentView: View {
 
     @ViewBuilder
     private var content: some View {
-        if model.showSettings {
+        if model.downloadName != nil || model.downloading
+            || model.loadError != nil {
+            onboarding
+        } else if model.showSettings {
             SettingsView(model: model,
                          onClose: { model.showSettings = false })
         } else if model.showDebug {
