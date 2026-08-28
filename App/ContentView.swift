@@ -301,15 +301,27 @@ struct ContentView: View {
         ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName")
             as? String) ?? "Gadeon"
 
+    private var pickable: [String] {
+        Models.offered(unlocked: model.statusLine && optionDown)
+    }
+
+    private func pick(_ name: String) {
+        if model.isDownloaded(name) {
+            model.switchModel(name)
+        } else {
+            model.requestDownload(name)
+        }
+    }
+
     private var modelPicker: some View {
         Group {
-            if Models.all.count < 2 {
+            if pickable.count < 2 {
                 Button { showModelInvite = true } label: { modelPickerLabel }
                     .buttonStyle(.plain)
             } else {
                 Menu {
-                    ForEach(Models.all, id: \.self) { name in
-                        Button(Models.display(name)) { model.switchModel(name) }
+                    ForEach(pickable, id: \.self) { name in
+                        Button(Models.display(name)) { pick(name) }
                     }
                 } label: { modelPickerLabel }
                 .menuIndicator(.hidden)
@@ -332,7 +344,7 @@ struct ContentView: View {
                 .appFont(.subheadline)
                 .fontWeight(.semibold)
                 .lineLimit(1)
-            if Models.all.count >= 2 {
+            if pickable.count >= 2 {
                 Image(systemName: "chevron.down").appFont(.caption2)
             }
         }

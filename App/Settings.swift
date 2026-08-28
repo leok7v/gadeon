@@ -284,6 +284,8 @@ struct SettingsView: View {
         }
     }
 
+    private var unlocked: Bool { model.statusLine && optionDown }
+
     private var modelsPane: some View {
         VStack(alignment: .leading, spacing: 10) {
             title("Models")
@@ -291,8 +293,15 @@ struct SettingsView: View {
                 + "model downloads once and is stored on this device; deleting "
                 + "frees its disk space and it can be downloaded again. The "
                 + "active model cannot be deleted.")
-            ForEach(Models.all, id: \.self) { name in modelRow(name) }
-                .id(model.diskRevision)
+            ForEach(Models.offered(unlocked: unlocked), id: \.self) { name in
+                modelRow(name)
+            }
+            .id(model.diskRevision)
+            if unlocked {
+                explain("Every model this Mac can run, revealed while Option "
+                    + "is held with Debug on. Normally it is offered the one "
+                    + "its memory affords.")
+            }
         }
         .alert("Delete \(deleteName ?? "")?", isPresented: Binding(
             get: { deleteName != nil },

@@ -36,31 +36,63 @@ extension Bundle {
 
 enum Models {
 
+    private static func qwen38(_ gb: Int) -> String? {
+        let out: String?
+        switch gb {
+        case ..<9: out = nil
+        case ..<16: out = "Qwen3.8-27B-IQ1_S"
+        case ..<24: out = "Qwen3.8-27B-IQ2_XXS"
+        case ..<32: out = "Qwen3.8-27B-IQ3_XXS"
+        case 32: out = "Qwen3.8-27B-IQ4_XS"
+        default: out = "Qwen3.8-27B-Q4_K_S"
+        }
+        return out
+    }
+
+    static var every: [String] {
+        isOS
+            ? ["gemma-4-E2B", "gemma-4-E4B", "Ternary-Bonsai-1.7B"]
+            : ["Qwen3.5-4B", "Qwen3.5-9B",
+               "Qwen3.8-27B-IQ1_S", "Qwen3.8-27B-IQ2_XXS",
+               "Qwen3.8-27B-IQ3_XXS", "Qwen3.8-27B-IQ4_XS",
+               "Qwen3.8-27B-Q4_K_S",
+               "Ternary-Bonsai-27B", "Ternary-Bonsai-1.7B",
+               "gemma-4-E2B", "gemma-4-E4B", "gemma-4-12B"]
+    }
+
+    static var downloaded: Set<String> {
+        var out: Set<String> = []
+        for name in every {
+            if let dir = ModelCatalog.localSet(name, in: Bundle.modelStore()),
+               ModelCatalog.isComplete(dir) {
+                out.insert(name)
+            }
+        }
+        return out
+    }
+
     static var all: [String] {
         let gb = installedGB
-        var list: [String] = []
+        var band: Set<String> = []
         if isOS {
-            if gb >= 8 {
-                list.append("gemma-4-E4B")
-            } else {
-                list.append("gemma-4-E2B")
-            }
-            list.append("Ternary-Bonsai-1.7B")
+            band.insert(gb >= 8 ? "gemma-4-E4B" : "gemma-4-E2B")
+            band.insert("Ternary-Bonsai-1.7B")
         } else {
-            if gb >= 8 { list.append("Qwen3.5-4B") }
-            if gb >= 16 { list.append("Qwen3.5-9B") }
-            if gb >= 16 { list.append("Qwen3.8-27B-IQ1_S") }
-            if gb >= 16 { list.append("Qwen3.8-27B-IQ2_XXS") }
-            if gb >= 16 { list.append("Qwen3.8-27B-IQ3_XXS") }
-            if gb >= 24 { list.append("Qwen3.8-27B-IQ4_XS") }
-            if gb >= 24 { list.append("Qwen3.8-27B-Q4_K_S") }
-            if gb >= 24 { list.append("Ternary-Bonsai-27B") }
-            list.append("Ternary-Bonsai-1.7B")
-            list.append("gemma-4-E2B")
-            list.append("gemma-4-E4B")
-            if gb >= 16 { list.append("gemma-4-12B") }
+            if gb >= 8 { band.insert("Qwen3.5-4B") }
+            if gb >= 16 { band.insert("Qwen3.5-9B") }
+            if let one = qwen38(gb) { band.insert(one) }
+            band.insert("Ternary-Bonsai-27B")
+            band.insert("Ternary-Bonsai-1.7B")
+            band.insert("gemma-4-E2B")
+            band.insert("gemma-4-E4B")
+            if gb >= 16 { band.insert("gemma-4-12B") }
         }
-        return list
+        let keep = band.union(downloaded)
+        return every.filter { name in keep.contains(name) }
+    }
+
+    static func offered(unlocked: Bool) -> [String] {
+        unlocked ? every : all
     }
 
     static var supported: Bool { !all.isEmpty }
