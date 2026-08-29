@@ -83,7 +83,6 @@ enum Models {
             if let one = qwen38(gb) { band.insert(one) }
             band.insert("Ternary-Bonsai-27B")
             band.insert("Ternary-Bonsai-1.7B")
-            band.insert("gemma-4-E2B")
             band.insert("gemma-4-E4B")
             if gb >= 16 { band.insert("gemma-4-12B") }
         }
@@ -110,16 +109,33 @@ enum Models {
     private static let e2b = "gemma-4-E2B"
     private static let e4b = "gemma-4-E4B"
 
+    private static func family(_ name: String) -> String {
+        var out = name
+        if name.hasPrefix("Qwen3.8-27B") { out = "Qwen3.8-27B" }
+        return out
+    }
+
+    private static func quant(_ name: String) -> String? {
+        let out: String?
+        switch name {
+            case "Qwen3.8-27B-IQ1_S": out = "1-bit"
+            case "Qwen3.8-27B-IQ2_XXS": out = "2-bit"
+            case "Qwen3.8-27B-IQ3_XXS": out = "3-bit"
+            case "Qwen3.8-27B-IQ4_XS": out = "4-bit IQ"
+            case "Qwen3.8-27B-Q4_K_S": out = "4-bit K"
+            default: out = nil
+        }
+        return out
+    }
+
     static func display(_ name: String) -> String {
         var out = name
         switch name {
             case "Qwen3.5-4B": out = "Qwen3.5 4B"
             case "Qwen3.5-9B": out = "Qwen3.5 9B"
-            case "Qwen3.8-27B-IQ1_S": out = "Qwen3.8 27B 1-bit"
-            case "Qwen3.8-27B-IQ2_XXS": out = "Qwen3.8 27B 2-bit"
-            case "Qwen3.8-27B-IQ3_XXS": out = "Qwen3.8 27B 3-bit"
-            case "Qwen3.8-27B-IQ4_XS": out = "Qwen3.8 27B 4-bit IQ"
-            case "Qwen3.8-27B-Q4_K_S": out = "Qwen3.8 27B 4-bit K"
+            case "Qwen3.8-27B-IQ1_S", "Qwen3.8-27B-IQ2_XXS",
+                 "Qwen3.8-27B-IQ3_XXS", "Qwen3.8-27B-IQ4_XS",
+                 "Qwen3.8-27B-Q4_K_S": out = "Qwen3.8 27B"
             case "Ternary-Bonsai-27B": out = "Bonsai 27B"
             case "Ternary-Bonsai-1.7B": out = "Bonsai 1.7B"
             case "gemma-4-E2B": out = "Gemma E2B"
@@ -128,6 +144,19 @@ enum Models {
             default: out = name
         }
         return out
+    }
+
+    static func qualified(_ name: String) -> String {
+        var out = display(name)
+        if let bits = quant(name) { out += " " + bits }
+        return out
+    }
+
+    static func display(_ name: String, among visible: [String]) -> String {
+        let kin = visible.filter { other in
+            family(other) == family(name)
+        }
+        return kin.count > 1 ? qualified(name) : display(name)
     }
 
 }

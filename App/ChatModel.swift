@@ -450,6 +450,8 @@ import UniformTypeIdentifiers
     }
     var showSettings = false
     var showDebug = false
+    var settingsCategory: SettingsView.Category = .systemPrompt
+    var optionDown = false
     var traceEvents: [TraceEvent] = []
     private let traceFile: TraceFile? = debugBuild ? TraceFile() : nil
     private let instrument = Instrument.install()

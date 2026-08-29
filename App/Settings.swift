@@ -5,9 +5,7 @@ struct SettingsView: View {
 
     @Bindable var model: ChatModel
     let onClose: () -> Void
-    @State private var category: Category = .systemPrompt
     @State private var deleteName: String?
-    @State private var optionDown = false
     @State private var confirmReset = false
     @State private var confirmClear = false
     @ScaledMetric(relativeTo: .body) private var railWidth: CGFloat = 180
@@ -54,7 +52,7 @@ struct SettingsView: View {
                 regularBody
             }
         }
-        .modifier(OptionKeyMonitor(down: $optionDown))
+        .modifier(OptionKeyMonitor(down: $model.optionDown))
         .alert("Factory reset?", isPresented: $confirmReset) {
             Button("Proceed", role: .destructive) { model.factoryReset() }
             Button("Cancel", role: .cancel) { }
@@ -118,18 +116,20 @@ struct SettingsView: View {
     }
 
     private var rail: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(categories) { item in railRow(item) }
+        let current = category
+        return VStack(alignment: .leading, spacing: 4) {
+            ForEach(categories) { item in railRow(item, current) }
             Spacer()
         }
         .padding(12)
         .frame(width: min(railWidth, 300) * model.textScale)
     }
 
-    private func railRow(_ item: Category) -> some View {
-        let selected = category == item
+    private func railRow(_ item: Category,
+                         _ current: Category) -> some View {
+        let selected = current == item
         return Button {
-            category = item
+            model.settingsCategory = item
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: item.symbol).frame(width: railIcon)
@@ -284,7 +284,14 @@ struct SettingsView: View {
         }
     }
 
-    private var unlocked: Bool { model.statusLine && optionDown }
+    private var category: Category {
+        categories.contains(model.settingsCategory)
+            ? model.settingsCategory : .systemPrompt
+    }
+
+    private var unlocked: Bool { model.statusLine && model.optionDown }
+
+    private var listed: [String] { Models.offered(unlocked: unlocked) }
 
     private var modelsPane: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -293,7 +300,7 @@ struct SettingsView: View {
                 + "model downloads once and is stored on this device; deleting "
                 + "frees its disk space and it can be downloaded again. The "
                 + "active model cannot be deleted.")
-            ForEach(Models.offered(unlocked: unlocked), id: \.self) { name in
+            ForEach(listed, id: \.self) { name in
                 modelRow(name)
             }
             .id(model.diskRevision)
@@ -303,7 +310,8 @@ struct SettingsView: View {
                     + "its memory affords.")
             }
         }
-        .alert("Delete \(deleteName ?? "")?", isPresented: Binding(
+        .alert("Delete \(Models.qualified(deleteName ?? ""))?",
+               isPresented: Binding(
             get: { deleteName != nil },
             set: { shown in if !shown { deleteName = nil } }
         )) {
@@ -322,7 +330,7 @@ struct SettingsView: View {
         let active = name == model.modelName
         let bytes = ModelCatalog.source(name)?.bytes ?? 0
         return HStack(spacing: 8) {
-            Text(Models.display(name))
+            Text(Models.display(name, among: listed))
             if active {
                 Image(systemName: "checkmark.circle.fill")
                     .appFont(.caption)
@@ -545,7 +553,7 @@ struct SettingsView: View {
                 .disabled(model.busy)
                 explain("Move every saved conversation to the trash.")
             }
-            if optionDown {
+            if model.optionDown {
                 Divider().padding(.vertical, 4)
                 Button(role: .destructive) { confirmReset = true } label: {
                     Label("Factory Reset", systemImage: "trash")

@@ -42,7 +42,6 @@ struct ContentView: View {
     @State private var tailInset: CGFloat = 0
     @State private var tailCollapse: Task<Void, Never>?
     @ScaledMetric(relativeTo: .body) private var tailInsetSize: CGFloat = 64
-    @State private var optionDown = false
     @State private var showModelInvite = false
     @State private var dropActive = false
     @State private var pinchFrom: Int?
@@ -82,7 +81,7 @@ struct ContentView: View {
 
     var body: some View {
         content
-            .modifier(OptionKeyMonitor(down: $optionDown))
+            .modifier(OptionKeyMonitor(down: $model.optionDown))
             .preferredColorScheme(model.theme.scheme)
             .environment(\.appTextScale, model.textScale)
             .font(appTextFont(.body, model.textScale))
@@ -305,7 +304,7 @@ struct ContentView: View {
             as? String) ?? "Gadeon"
 
     private var pickable: [String] {
-        Models.offered(unlocked: model.statusLine && optionDown)
+        Models.offered(unlocked: model.statusLine && model.optionDown)
     }
 
     private func pick(_ name: String) {
@@ -324,7 +323,9 @@ struct ContentView: View {
             } else {
                 Menu {
                     ForEach(pickable, id: \.self) { name in
-                        Button(Models.display(name)) { pick(name) }
+                        Button(Models.display(name, among: pickable)) {
+                            pick(name)
+                        }
                     }
                 } label: { modelPickerLabel }
                 .menuIndicator(.hidden)
@@ -343,7 +344,7 @@ struct ContentView: View {
 
     private var modelPickerLabel: some View {
         HStack(spacing: 4) {
-            Text(Models.display(model.modelName))
+            Text(Models.display(model.modelName, among: pickable))
                 .appFont(.subheadline)
                 .fontWeight(.semibold)
                 .lineLimit(1)
@@ -399,7 +400,7 @@ struct ContentView: View {
         VStack(spacing: 16) {
             VStack(spacing: 4) {
                 Text("Download").appFont(.title2).bold()
-                Text(Models.display(name))
+                Text(Models.qualified(name))
                     .appFont(.title3)
                     .foregroundStyle(.secondary)
             }
@@ -630,7 +631,7 @@ struct ContentView: View {
                            action: model.runResearchSample)
             }
             if model.showSample("calc") {
-                if optionDown {
+                if model.optionDown {
                     sampleCard(symbol: "function",
                                title: "Euler's Formula",
                                subtitle: "Watch it do math with imaginary "
