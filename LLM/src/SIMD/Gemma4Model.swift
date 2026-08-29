@@ -294,6 +294,86 @@ struct Gemma4Layer {
     }
 }
 
+struct Gemma4AssistLayer {
+    let attnNorm: GGUFTensor
+    let postAttnNorm: GGUFTensor
+    let ffnNorm: GGUFTensor
+    let postFfnNorm: GGUFTensor
+    let qNorm: GGUFTensor
+    let layerScalar: Float
+    let wq: GGUFTensor
+    let wo: GGUFTensor
+    let ffnGate: GGUFTensor
+    let ffnUp: GGUFTensor
+    let ffnDown: GGUFTensor
+    let nFF: Int
+
+    init(_ g: GGUF, _ il: Int) {
+        func t(_ s: String) -> GGUFTensor { g.tensor("assist.blk.\(il).\(s)") }
+        attnNorm = t("attn_norm.weight")
+        postAttnNorm = t("post_attn_norm.weight")
+        ffnNorm = t("ffn_norm.weight")
+        postFfnNorm = t("post_ffn_norm.weight")
+        qNorm = t("attn_q_norm.weight")
+        layerScalar = Dense.floats(t("layer_scalar")).first ?? 1
+        wq = t("attn_q.weight")
+        wo = t("attn_output.weight")
+        ffnGate = t("ffn_gate.weight")
+        ffnUp = t("ffn_up.weight")
+        ffnDown = t("ffn_down.weight")
+        nFF = ffnGate.dims[1]
+    }
+}
+
+public struct Gemma4Assist {
+    let nLayer: Int
+    let nEmbd: Int
+    let backbone: Int
+    let layerFull: [Bool]
+    let layers: [Gemma4AssistLayer]
+    let preProj: GGUFTensor
+    let postProj: GGUFTensor
+    let outputNorm: GGUFTensor
+    let output: GGUFTensor
+
+    func isFull(_ il: Int) -> Bool { layerFull[il] }
+
+    static func read(_ g: GGUF, _ trunk: Gemma4Config) -> Gemma4Assist? {
+        var out: Gemma4Assist? = nil
+        let n = g.int("gemma4.assist.block_count") ?? 0
+        if n > 0, g.maybe("assist.pre_proj.weight") != nil {
+            out = Gemma4Assist(g, n, trunk)
+        }
+        return out
+    }
+
+    private init(_ g: GGUF, _ n: Int, _ trunk: Gemma4Config) {
+        nLayer = n
+        nEmbd = g.int("gemma4.assist.embedding_length")!
+        backbone = g.int("gemma4.assist.backbone_length")!
+        layerFull = g.ints("gemma4.assist.layer_types")!.map { t in t == 1 }
+        layers = (0..<n).map { il in Gemma4AssistLayer(g, il) }
+        preProj = g.tensor("assist.pre_proj.weight")
+        postProj = g.tensor("assist.post_proj.weight")
+        outputNorm = g.tensor("assist.output_norm.weight")
+        output = g.tensor("assist.token_embd.weight")
+        precondition(backbone == trunk.nEmbd,
+                     "assist head fits a \(backbone)-wide trunk, this one "
+                     + "is \(trunk.nEmbd)")
+        precondition(preProj.dims[0] == 2 * backbone,
+                     "assist pre_proj reads \(preProj.dims[0]), expected "
+                     + "\(2 * backbone)")
+        precondition(g.int("gemma4.assist.attention.head_count")
+                     == trunk.nHead,
+                     "assist head count must match the trunk's")
+        precondition(g.int("gemma4.assist.attention.key_length")
+                     == trunk.headDimSliding
+                     && g.int("gemma4.assist.attention.global_key_length")
+                     == trunk.headDimFull,
+                     "assist head widths must match the trunk's")
+    }
+}
+
 public final class Gemma4Model {
     let gguf: GGUF
     public let cfg: Gemma4Config
@@ -310,6 +390,7 @@ public final class Gemma4Model {
     let outputNorm: [Float]
     // lm_head, which a tied checkpoint spells as the embedding table itself.
     let output: GGUFTensor
+    let assist: Gemma4Assist?
 
     public init(path: String) throws {
         gguf = try GGUF(path: path)
@@ -323,6 +404,7 @@ public final class Gemma4Model {
         output = gguf.maybe("output.weight") ?? tokEmbd
         let g = gguf, c = cfg
         layers = (0..<c.nLayer).map { il in Gemma4Layer(g, il, c) }
+        assist = Gemma4Assist.read(g, c)
     }
 
     // Whether this file carries a tower for a modality, by the block count it

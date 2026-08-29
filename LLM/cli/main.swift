@@ -147,6 +147,13 @@ await probeNet()
 if rawArgs.contains("--meta") { runMeta(rawArgs) }
 if rawArgs.contains("--graft") { runGraft(rawArgs) }
 if rawArgs.contains("--drafter") { runDrafter(rawArgs) }
+if rawArgs.contains("--assist") { runAssist(rawArgs) }
+if arg1.hasSuffix(".gguf"), rawArgs.contains("--assist-probe") {
+    try runAssistProbe(arg1, rawArgs)
+}
+if arg1.hasSuffix(".gguf"), rawArgs.contains("--assist-bench") {
+    try runAssistBench(arg1, rawArgs)
+}
 if rawArgs.contains("--splice") { runSplice(rawArgs) }
 if arg1.hasSuffix(".gguf"), rawArgs.contains("--kld")
     || rawArgs.contains("--kld-dump") { try runDivergence(arg1, rawArgs) }

@@ -86,8 +86,8 @@ public enum ModelCatalog {
         // 48 layers at 3840 would suggest.
         "gemma-4-12B": Source(
             repo: "leok7v/gemma-4-12b-it-qat",
-            revision: "b22113f7912356882273609f1a7802bfc1292f04",
-            bytes: 6_822_641_664,
+            revision: "511db017019c71d7378a9ed03ef185641d5b7986",
+            bytes: 7_060_897_792,
             files: ["gemma-4-12b-it-qat.gguf"]),
     ]
 

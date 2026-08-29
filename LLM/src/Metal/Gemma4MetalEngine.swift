@@ -40,6 +40,17 @@ public final class Gemma4MetalEngine {
 
     // One pool per NON-shared layer; a shared layer reads its source's.
     private var kv: [Int: MetalKVPool] = [:]
+    private var assist: Gemma4MetalAssist?
+    private var bLogitsN: MTLBuffer?
+    private var specQueue: [Int32] = []
+    public private(set) var specCycles = 0
+    public private(set) var specCommitted = 0
+    public private(set) var specDrafted = 0
+    public private(set) var specAccepted = 0
+    public static let specN: Int = {
+        let raw = ProcessInfo.processInfo.environment["LLM_GEMMA_SPEC_N"]
+        return max(1, raw.flatMap { v in Int(v) } ?? 3)
+    }()
 
     private let bx, bNormed, bContrib: MTLBuffer
     private let bQ, bK, bV, bAttnOut, bGateNull: MTLBuffer
@@ -285,11 +296,86 @@ public final class Gemma4MetalEngine {
                 perLayerPost: normOffIfPresent(
                     "blk.\(il).per_layer_post_norm.weight")))
         }
+        if let head = model.assist {
+            assist = Gemma4MetalAssist(model, head, ctx: ctx)
+        }
+    }
+
+    public var hasAssist: Bool { assist != nil }
+
+    public func verifyChunk(_ ids: [Int32]) -> [Int32] {
+        let c = cfg
+        let n = ids.count
+        let lp = chunkLogits(ids)
+        var out: [Int32] = []
+        for j in 0..<n {
+            out.append(Int32(argmaxRow(lp + j * c.nVocab)))
+        }
+        return out
+    }
+
+    private func chunkLogits(_ ids: [Int32])
+        -> UnsafeMutablePointer<Float> {
+        let c = cfg
+        let n = ids.count
+        forwardChunk(ids, [:],
+                     [(Int, Int)](repeating: (0, 0), count: n))
+        pos += n
+        if bLogitsN == nil
+            || bLogitsN!.length < n * c.nVocab * MemoryLayout<Float>.stride {
+            bLogitsN = ctx.makeF32(n * c.nVocab)
+        }
+        let cb = ctx.queue.makeCommandBuffer()!
+        let e = cb.makeComputeCommandEncoder()!
+        let f = MetalEnc(ctx: ctx, e: e)
+        f.linear(model.output, X: bNormedN, out: bLogitsN!,
+                 off: off(model.output), N: n, srq: srq(model.output),
+                 scratch: bClampN)
+        if c.logitSoftcap > 0 {
+            f.softcap(x: bLogitsN!, n: n * c.nVocab, cap: c.logitSoftcap)
+        }
+        e.endEncoding()
+        commit(cb, "verify lm_head")
+        return bLogitsN!.contents().assumingMemoryBound(to: Float.self)
+    }
+
+    public func acceptPartial(_ mark: Bookmark, keep: Int) {
+        pos = mark.pos + keep
+        for (il, n) in mark.lens { kv[il]!.truncate(to: n + keep) }
+    }
+
+    public func selectRow(_ j: Int, of n: Int) {
+        let c = cfg
+        let rows = bNormedN.f32(n * c.nEmbd)
+        let dst = bNormed.f32(c.nEmbd)
+        for i in 0..<c.nEmbd { dst[i] = rows[j * c.nEmbd + i] }
+    }
+
+    public func assistDraft(_ token: Int32, count: Int) -> [Int32] {
+        var out: [Int32] = []
+        if let head = assist {
+            var last = token
+            var back = hidden()
+            let at = max(0, pos - 1)
+            for _ in 0..<count {
+                back.withUnsafeBufferPointer { h in
+                    head.seed(Int(last), hidden: h.baseAddress!)
+                }
+                encode("assist draft") { f in
+                    head.encodeStep(f, pos: at, pools: kv)
+                }
+                last = Int32(argmax(head.logits()))
+                back = head.backbone()
+                out.append(last)
+            }
+        }
+        return out
     }
 
     public func reset() {
         pos = 0
         stopSignal.clear()
+        specFlush()
         for (_, pool) in kv { pool.truncate(to: 0) }
     }
 
@@ -357,9 +443,79 @@ public final class Gemma4MetalEngine {
     }
 
     public func decode(_ token: Int32) -> Int32 {
+        let ready = assist != nil && Gemma4MetalEngine.specN > 1
+            && sampler?.logitMask == nil
+        var out: Int32
+        if !specQueue.isEmpty {
+            out = specQueue.removeFirst()
+        } else if ready {
+            specQueue = specCycle(token)
+            out = specQueue.removeFirst()
+        } else {
+            out = decodePlain(token)
+        }
+        return out
+    }
+
+    public func decodePlain(_ token: Int32) -> Int32 {
         forward(token: Int(token), pos: pos)
         pos += 1
         return pick(logits())
+    }
+
+    private func specFlush() { specQueue.removeAll() }
+
+    private func pickRow(_ row: UnsafePointer<Float>, gpu: Int32) -> Int32 {
+        var out = gpu
+        if sampler != nil {
+            out = pick(Array(UnsafeBufferPointer(start: row,
+                                                 count: cfg.nVocab)))
+        }
+        return out
+    }
+
+    private func specCycle(_ token: Int32) -> [Int32] {
+        let c = cfg
+        let p0 = pos
+        let drafts = assistDraft(token, count: Gemma4MetalEngine.specN - 1)
+        var fed: [Int32] = [token]
+        fed.append(contentsOf: drafts)
+        let width = fed.count
+        let lp = chunkLogits(fed)
+        var accepted = 0
+        var bonus: Int32 = 0
+        var scanning = true
+        while scanning {
+            let row = lp + accepted * c.nVocab
+            let r = pickRow(row, gpu: Int32(argmaxRow(row)))
+            if accepted < drafts.count && r == drafts[accepted] {
+                accepted += 1
+            } else {
+                bonus = r
+                scanning = false
+            }
+        }
+        let m = accepted + 1
+        if m < width { for (_, pool) in kv { pool.truncate(to: p0 + m) } }
+        pos = p0 + m
+        selectRow(m - 1, of: width)
+        specCycles += 1
+        specCommitted += m
+        specDrafted += drafts.count
+        specAccepted += accepted
+        var out = Array(drafts.prefix(accepted))
+        out.append(bonus)
+        return out
+    }
+
+    private func argmaxRow(_ row: UnsafePointer<Float>) -> Int {
+        var bi = 0
+        var bv = -Float.greatestFiniteMagnitude
+        for i in 0..<cfg.nVocab where row[i] > bv {
+            bv = row[i]
+            bi = i
+        }
+        return bi
     }
 
     func pick(_ values: [Float]) -> Int32 {
@@ -980,6 +1136,7 @@ public final class Gemma4MetalEngine {
 
     public func restore(_ b: Bookmark) {
         pos = b.pos
+        specFlush()
         for (il, n) in b.lens { kv[il]!.truncate(to: n) }
     }
 
