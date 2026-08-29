@@ -39,13 +39,14 @@ final class Gemma4MetalAssist {
         fullSource = lastFull
         let maxHd = max(cfg.headDimSliding, cfg.headDimFull)
         let maxFF = head.layers.map { L in L.nFF }.max() ?? 0
+        let nH = head.nHead
         bCat = ctx.makeF32(2 * head.backbone)
         bx = ctx.makeF32(head.nEmbd)
         bNormed = ctx.makeF32(head.nEmbd)
         bContrib = ctx.makeF32(head.nEmbd)
-        bQ = ctx.makeF32(maxHd * cfg.nHead)
-        bAttnOut = ctx.makeF32(maxHd * cfg.nHead)
-        bGateNull = ctx.makeF32(maxHd * cfg.nHead)
+        bQ = ctx.makeF32(maxHd * nH)
+        bAttnOut = ctx.makeF32(maxHd * nH)
+        bGateNull = ctx.makeF32(maxHd * nH)
         bFfnGate = ctx.makeF32(maxFF)
         bFfnUp = ctx.makeF32(maxFF)
         bClamp = ctx.makeF32(max(maxFF, head.nEmbd))
@@ -117,14 +118,14 @@ final class Gemma4MetalAssist {
                       n: w.nEmbd, eps: cfg.eps)
         f.linear(L.wq, x: bNormed, out: bQ, off: off(L.wq), srq: srq(L.wq),
                  scratch: bClamp)
-        f.rmsnormRowsBF16(x: bQ, xoff: 0, d: hd, rows: cfg.nHead,
+        f.rmsnormRowsBF16(x: bQ, xoff: 0, d: hd, rows: w.nHead,
                           weightOff: norms[il].qNorm, eps: cfg.eps)
-        f.ropeGemma(x: bQ, headDim: hd, nHead: cfg.nHead, rotated: rot,
+        f.ropeGemma(x: bQ, headDim: hd, nHead: w.nHead, rotated: rot,
                     base: base, pos: pos)
         let lo = isFull ? 0 : max(0, pos - cfg.slidingWindow + 1)
         f.attnPaged(q: bQ, kAddr: pool.kAddr, vAddr: pool.vAddr,
                     pages: pool.residentPages, gate: bGateNull,
-                    out: bAttnOut, hd: hd, nH: cfg.nHead, nKV: nKV,
+                    out: bAttnOut, hd: hd, nH: w.nHead, nKV: nKV,
                     T: pos + 1, kvDim: hd * nKV, P: pool.P, scale: 1,
                     gated: 0, lo: lo)
         f.linear(L.wo, x: bAttnOut, out: bContrib, off: off(L.wo),

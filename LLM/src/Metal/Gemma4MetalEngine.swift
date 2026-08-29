@@ -444,6 +444,7 @@ public final class Gemma4MetalEngine {
 
     public func decode(_ token: Int32) -> Int32 {
         let ready = assist != nil && Gemma4MetalEngine.specN > 1
+            && capacity >= Gemma4MetalEngine.specN
             && sampler?.logitMask == nil
         var out: Int32
         if !specQueue.isEmpty {

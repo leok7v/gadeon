@@ -329,6 +329,7 @@ public struct Gemma4Assist {
     let nLayer: Int
     let nEmbd: Int
     let backbone: Int
+    let nHead: Int
     let layerFull: [Bool]
     let layers: [Gemma4AssistLayer]
     let preProj: GGUFTensor
@@ -351,6 +352,7 @@ public struct Gemma4Assist {
         nLayer = n
         nEmbd = g.int("gemma4.assist.embedding_length")!
         backbone = g.int("gemma4.assist.backbone_length")!
+        nHead = g.int("gemma4.assist.attention.head_count")!
         layerFull = g.ints("gemma4.assist.layer_types")!.map { t in t == 1 }
         layers = (0..<n).map { il in Gemma4AssistLayer(g, il) }
         preProj = g.tensor("assist.pre_proj.weight")
@@ -363,9 +365,12 @@ public struct Gemma4Assist {
         precondition(preProj.dims[0] == 2 * backbone,
                      "assist pre_proj reads \(preProj.dims[0]), expected "
                      + "\(2 * backbone)")
-        precondition(g.int("gemma4.assist.attention.head_count")
-                     == trunk.nHead,
-                     "assist head count must match the trunk's")
+        precondition(g.int("gemma4.assist.attention.head_count_kv")
+                     == trunk.nHeadKV
+                     && g.int("gemma4.assist.attention.global_head_count_kv")
+                     == trunk.nHeadKVFull,
+                     "assist kv-head counts must match the trunk's: it "
+                     + "reads the trunk's pools")
         precondition(g.int("gemma4.assist.attention.key_length")
                      == trunk.headDimSliding
                      && g.int("gemma4.assist.attention.global_key_length")
