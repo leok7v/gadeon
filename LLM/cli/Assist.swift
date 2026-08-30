@@ -14,6 +14,16 @@ private func asked(_ args: [String]) -> String {
         + "is moving, and why it falls over when it stops."
 }
 
+private func sampling(_ chat: GemmaChat, _ args: [String]) -> Sampler? {
+    var out: Sampler? = nil
+    if args.contains("--sampler") {
+        out = Sampler(vocabSize: chat.vocabCount,
+                      config: chat.samplingPresets.select(thinking: false,
+                                                          vision: false))
+    }
+    return out
+}
+
 private func templated(_ chat: GemmaChat, _ question: String) -> [Int32] {
     var prompt = question
     if !chat.chatTemplate.isEmpty {
@@ -37,10 +47,12 @@ func runAssistBench(_ path: String, _ args: [String]) throws {
     } else {
         let ids = templated(chat, asked(args))
         engine.reset()
+        engine.sampler = sampling(chat, args)
         var warm = engine.extend(ids)
         for _ in 0..<8 { warm = engine.decode(warm) }
 
         engine.reset()
+        engine.sampler = sampling(chat, args)
         var plain: [Int32] = []
         var next = engine.extend(ids)
         let g0 = Date()
@@ -51,6 +63,7 @@ func runAssistBench(_ path: String, _ args: [String]) throws {
         let plainSec = Date().timeIntervalSince(g0)
 
         engine.reset()
+        engine.sampler = sampling(chat, args)
         var spec: [Int32] = []
         var cur = engine.extend(ids)
         let s0 = Date()

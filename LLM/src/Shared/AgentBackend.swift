@@ -129,6 +129,7 @@ public protocol AgentBackend: Sendable {
     // are pending -- it would land after tokens the transcript never saw.
     // Default 0 for non-speculative backends.
     func queuedCount() async -> Int
+    func drainSpecTurn() -> SpecTurn?
     // Fresh vision prefill: reset, then prefill `ids` (with each image's
     // <|image_pad|> already expanded to the tower's merged-token count) while
     // splicing the tower feats over each image span, returning the next-token
@@ -208,6 +209,7 @@ public extension AgentBackend {
     func requestStop() {}
     func shouldStop() -> Bool { false }
     func queuedCount() async -> Int { 0 }
+    func drainSpecTurn() -> SpecTurn? { nil }
     func supportsVision() async -> Bool { false }
     func supportsSoftTokens() async -> Bool { false }
     var bosToken: String { "" }

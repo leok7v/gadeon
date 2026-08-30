@@ -12,3 +12,7 @@ timestamp: 2026-08-29T02:30:00Z
 token; `--assist-bench` runs draft/verify/rollback and reports t/s against
 plain decode. Both render the chat template, because an untemplated -it
 prompt measures degenerate text.
+
+`--assist-bench --sampler` installs the file's own preset, one fresh sampler
+per arm so both draw the same RNG stream. Without it the bench measures a
+path the app never runs (`spec-decode-is-exact-under-sampling`).

@@ -27,7 +27,7 @@ public final class Gemma4MetalEngine {
     let pageP: Int
 
     public private(set) var pos = 0
-    var sampler: Sampler?
+    public var sampler: Sampler?
     // Lock-backed stop flag, the same lever MetalEngine carries for the
     // ternary models. The forward is synchronous and passes no suspension
     // point, so Task cancellation does not reach it -- without this a Stop
@@ -302,6 +302,19 @@ public final class Gemma4MetalEngine {
     }
 
     public var hasAssist: Bool { assist != nil }
+
+    public func drainSpecTurn() -> SpecTurn? {
+        var out: SpecTurn? = nil
+        if specCycles > 0 {
+            out = SpecTurn(cycles: specCycles, committed: specCommitted,
+                           drafted: specDrafted, accepted: specAccepted)
+        }
+        specCycles = 0
+        specCommitted = 0
+        specDrafted = 0
+        specAccepted = 0
+        return out
+    }
 
     public func verifyChunk(_ ids: [Int32]) -> [Int32] {
         let c = cfg
@@ -1331,6 +1344,8 @@ public final class Gemma4MetalBackend: AgentBackend, @unchecked Sendable {
 
     public func requestStop() { engine.requestStop() }
     public func shouldStop() -> Bool { engine.shouldStop() }
+
+    public func drainSpecTurn() -> SpecTurn? { engine.drainSpecTurn() }
 
     // BOTH towers -- vision and audio -- reach the GPU through MetalEnc.gemm,
     // which encodes simdgroup-matrix kernels. On a GPU without matrix units

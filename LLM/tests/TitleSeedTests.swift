@@ -111,4 +111,59 @@ struct TitleSeedTests {
         let q = "How did you get 0.05 from the equation?"
         #expect(ChatSession.cleanFollowup(q) == q)
     }
+
+    static let narratedTitle = "The\nThe user wants a short title for the "
+        + "conversation.\nConstraints:\n1.  "
+
+    static let narratedOneLine = "präzise: The user wants a short title for "
+        + "the conversation, summarizing its topic."
+
+    @Test func deliberationNeverBecomesATitle() {
+        #expect(ChatSession.cleanTitle(TitleSeedTests.narratedTitle) == "")
+        #expect(ChatSession.cleanTitle(TitleSeedTests.narratedOneLine) == "")
+        #expect(ChatSession.cleanTitle("prä") == "")
+    }
+
+    @Test func aOneWordTitleIsRejected() {
+        #expect(ChatSession.cleanTitle("Animals") == "")
+        #expect(ChatSession.cleanTitle("The") == "")
+    }
+
+    @Test func realTitlesFromTheStoreSurvive() {
+        for title in ["Savings Account Interest Calculation",
+                      "Compound Interest Calculation",
+                      "Dark Matter Dark Energy",
+                      "Weather forecast Los Angeles",
+                      "Bat and Ball Cost Puzzle",
+                      "Harvest Report Analysis",
+                      "Riddle Solution"] {
+            #expect(ChatSession.cleanTitle(title) == title)
+        }
+    }
+
+    @Test func topicTitleRanksByFrequencyAndReadsInOrder() {
+        let texts = ["Tell me about dark matter and dark energy.",
+                     "Dark matter is matter that does not emit light. "
+                     + "Dark energy drives expansion."]
+        #expect(TopicTitle.from(texts) == "Dark Matter Energy")
+    }
+
+    @Test func topicTitleKeepsASingleSubject() {
+        #expect(TopicTitle.from(["Tell me about animals",
+                                 "Animals are wonderful"]) == "Animals")
+    }
+
+    @Test func topicTitleIsEmptyWithoutSubstance() {
+        #expect(TopicTitle.from([]) == "")
+        #expect(TopicTitle.from(["Hi", "Hello", "How are you?"]) == "")
+    }
+
+    @Test func topicTitleDropsStopWordsAndShortTokens() {
+        #expect(TopicTitle.from(["The the the savings savings"])
+                == "Savings")
+    }
+
+    @Test func topicTitleIgnoresWordsSeenOnce() {
+        #expect(TopicTitle.from(["a unique unrepeated sentence"]) == "")
+    }
 }

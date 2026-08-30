@@ -119,12 +119,28 @@ struct ContentView: View {
                 .disabled(sidebarOpen)
                 .modifier(ChatChrome(
                     leading: foldersButton,
-                    center: centerBar.disabled(sidebarOpen),
-                    trailing: trailingButtons.disabled(sidebarOpen)))
+                    center: dismissing(centerBar),
+                    trailing: dismissing(trailingButtons)))
             drawer
             renameOverlay
         }
         .background { newChatShortcut }
+        .modifier(TitleBarClickMonitor {
+            if sidebarOpen { closeSidebar() }
+        })
+    }
+
+    private func dismissing<V: View>(_ bar: V) -> some View {
+        bar
+            .opacity(sidebarOpen ? 0.4 : 1)
+            .allowsHitTesting(!sidebarOpen)
+            .overlay {
+                if sidebarOpen {
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: closeSidebar)
+                }
+            }
     }
 
     private var newChatShortcut: some View {

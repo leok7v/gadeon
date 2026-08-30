@@ -137,28 +137,17 @@ extension ChatModel {
     func conversationTitle() -> String {
         var title = generatedTitle ?? ""
         if title.isEmpty {
-            let spoke = messages.first { m in
-                m.fromUser && !m.placeholder && !trimmed(m.text).isEmpty
-            }
-            let answered = messages.first { m in
-                !m.fromUser && !trimmed(m.text).isEmpty
-            }
-            let line = trimmed((spoke ?? answered)?.text ?? "")
-            title = line.count > 40
-                ? String(line.prefix(40)) + "\u{2026}" : line
+            title = TopicTitle.from(messages.map { m in m.text })
         }
         if title.isEmpty { title = ChatModel.timestampTitle() }
         return title
     }
 
-    private func trimmed(_ s: String) -> String {
-        s.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     private static func timestampTitle() -> String {
         let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "MMM d, HH:mm"
+        f.locale = Locale.current
+        f.dateStyle = .none
+        f.timeStyle = .short
         return f.string(from: Date())
     }
 

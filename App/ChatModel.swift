@@ -2253,10 +2253,7 @@ import UniformTypeIdentifiers
     }
 
     private func specDigest() async -> String {
-        var turn: SpecTurn? = nil
-        if let gpu = ggufBackend as? MetalBackend {
-            turn = gpu.drainSpecTurn()
-        }
+        let turn = ggufBackend?.drainSpecTurn()
         var out = ""
         if let turn {
             out = String(

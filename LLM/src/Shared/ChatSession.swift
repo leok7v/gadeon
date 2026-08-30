@@ -959,8 +959,17 @@ public actor ChatSession {
         let prose = words.contains { word in
             word.contains(where: { c in c.isLetter })
         }
-        return prose ? words.joined(separator: " ") : ""
+        let deliberating = ChatSession.deliberation.contains { phrase in
+            body.lowercased().contains(phrase)
+        }
+        let usable = prose && words.count > 1 && !deliberating
+        return usable ? words.joined(separator: " ") : ""
     }
+
+    static let deliberation = [
+        "the user wants", "the user is asking", "the user would",
+        "the conversation is about", "short title for", "thinking process",
+    ]
 
     static let followUpInstruction =
         ProcessInfo.processInfo.environment["GADEON_FOLLOWUP"]
