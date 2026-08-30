@@ -30,6 +30,10 @@ private func gemma(_ path: String) throws -> (GemmaChat, Gemma4MetalEngine) {
     return (chat, try Gemma4MetalEngine(chat.model))
 }
 
+private func pin(_ engine: Gemma4MetalEngine, _ args: [String]) {
+    if let n = count(args, "--replay-batch") { engine.batch = n }
+}
+
 func runReplayMake(_ path: String, _ args: [String]) throws {
     let src = arg(args, "--replay-make", 1) ?? ""
     let out = arg(args, "--replay-make", 2) ?? ""
@@ -94,6 +98,7 @@ func runReplayScore(_ path: String, _ args: [String]) throws {
     }
     let replay = try JSONDecoder().decode(Replay.self, from: blob!)
     let (chat, engine) = try gemma(path)
+    pin(engine, args)
     let vocab = chat.vocabCount
     var teacher = Data()
     if let against {
