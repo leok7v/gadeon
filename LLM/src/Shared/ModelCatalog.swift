@@ -19,52 +19,52 @@ public enum ModelCatalog {
     public static let sources: [String: Source] = [
         "Qwen3.5-4B": Source(
             repo: "leok7v/Qwen3.5-4B",
-            revision: "096bba7e86720c5d455b5182127776df70488461",
+            revision: "70ec6653daabea753fe9ca3466cfd618bb70cdfb",
             bytes: 3_584_533_984,
             files: ["Qwen3.5-4B-UD-Q4_K_XL.ggxf"]),
         "Qwen3.5-9B": Source(
             repo: "leok7v/Qwen3.5-9B",
-            revision: "b6ca56fb2ef86272a5128aa001d27f1cf7d2b170",
+            revision: "5c9b8db474384f238c88745492401fea0a3813be",
             bytes: 6_884_262_304,
             files: ["Qwen3.5-9B-UD-Q4_K_XL.ggxf"]),
         "Qwen3.8-27B-IQ1_S": Source(
             repo: "leok7v/Qwen3.8-27B",
-            revision: "e302479f430439cd606f7e749c22177059361106",
+            revision: "a047f6e4e0454c4218635f546d749a6041647e6d",
             bytes: 7_119_830_240,
             files: ["Qwen3.8-27B-IQ1_S.ggxf"]),
         "Qwen3.8-27B-IQ2_XXS": Source(
             repo: "leok7v/Qwen3.8-27B",
-            revision: "e302479f430439cd606f7e749c22177059361106",
+            revision: "a047f6e4e0454c4218635f546d749a6041647e6d",
             bytes: 8_459_696_256,
             files: ["Qwen3.8-27B-IQ2_XXS.ggxf"]),
         "Qwen3.8-27B-IQ3_XXS": Source(
             repo: "leok7v/Qwen3.8-27B",
-            revision: "e302479f430439cd606f7e749c22177059361106",
+            revision: "a047f6e4e0454c4218635f546d749a6041647e6d",
             bytes: 11_862_468_736,
             files: ["Qwen3.8-27B-IQ3_XXS.ggxf"]),
         "Qwen3.8-27B-IQ4_XS": Source(
             repo: "leok7v/Qwen3.8-27B",
-            revision: "e302479f430439cd606f7e749c22177059361106",
+            revision: "a047f6e4e0454c4218635f546d749a6041647e6d",
             bytes: 15_180_454_016,
             files: ["Qwen3.8-27B-IQ4_XS.ggxf"]),
         "Qwen3.8-27B-Q4_K_S": Source(
             repo: "leok7v/Qwen3.8-27B",
-            revision: "e302479f430439cd606f7e749c22177059361106",
+            revision: "a047f6e4e0454c4218635f546d749a6041647e6d",
             bytes: 16_285_821_056,
             files: ["Qwen3.8-27B-Q4_K_S.ggxf"]),
         "Ternary-Bonsai-27B": Source(
             repo: "leok7v/Ternary-Bonsai-27B-gguf",
-            revision: "3e433dd5f5b7a7204229ad552ba98c1df55423db",
+            revision: "0e9bbf1b159573dcca23f59c82b365ac58422e00",
             bytes: 7_794_369_344,
             files: ["Ternary-Bonsai-27B-Q2_0.ggxf"]),
         "Ternary-Bonsai-1.7B": Source(
             repo: "leok7v/Ternary-Bonsai-1.7B-gguf",
-            revision: "94b344a4477f8552dd12a52cb1ef18dd5b9d60cf",
+            revision: "9363219fb1ca4b27524b53e0b782cad8b2b34867",
             bytes: 463_292_000,
             files: ["Ternary-Bonsai-1.7B-Q2_0.ggxf"]),
         "gemma-4-E2B": Source(
             repo: "leok7v/gemma-4-e2b-it-qat",
-            revision: "9d6e8cd89b480e1c8d7c5317f92f29d4f0852415",
+            revision: "20bad044a76eac59e0a897d2607541229c48efae",
             bytes: 2_665_414_656,
             files: ["gemma-4-e2b-it-qat.ggxf"]),
         // The same architecture one size up: 42 layers at 2560 wide against
@@ -74,7 +74,7 @@ public enum ModelCatalog {
         // tower and the two projections into it grow.
         "gemma-4-E4B": Source(
             repo: "leok7v/gemma-4-e4b-it-qat",
-            revision: "ba9591717f2e7f51bee67273d10981be52a0a664",
+            revision: "25bca6860fab6acc3988e494f8c7e58baf2441c4",
             bytes: 3_794_550_784,
             files: ["gemma-4-e4b-it-qat.ggxf"]),
         // gemma-4-12B, the UNIFIED architecture rather than a larger E4B: no
@@ -86,7 +86,7 @@ public enum ModelCatalog {
         // 48 layers at 3840 would suggest.
         "gemma-4-12B": Source(
             repo: "leok7v/gemma-4-12b-it-qat",
-            revision: "3ac4afc0f39e8fa14ea752649b702b0bb246879a",
+            revision: "2a39ef64662cd82129ea2421193d9b7712464ad9",
             bytes: 7_060_897_792,
             files: ["gemma-4-12b-it-qat.ggxf"]),
     ]
