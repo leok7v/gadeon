@@ -4,6 +4,10 @@ import Foundation
 
 func err(_ s: String) { FileHandle.standardError.write(Data(s.utf8)) }
 
+func isModelFile(_ path: String) -> Bool {
+    path.hasSuffix(".ggxf") || path.hasSuffix(".gguf")
+}
+
 // One in-place download progress line: the leading '\r' returns to column 0
 // so each report overwrites the last instead of scrolling. The path keeps its
 // directory (a set holds dozens of identically-named model.mil / weight.bin)

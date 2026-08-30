@@ -253,7 +253,8 @@ public struct MetalChat {
         let names = (try? FileManager.default
             .contentsOfDirectory(atPath: dir)) ?? []
         return names
-            .first { n in n.contains("mmproj") && n.hasSuffix(".gguf") }
+            .first { n in n.contains("mmproj")
+                && (n.hasSuffix(".ggxf") || n.hasSuffix(".gguf")) }
             .map { n in dir + "/" + n }
     }
 

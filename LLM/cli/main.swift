@@ -148,24 +148,24 @@ if rawArgs.contains("--meta") { runMeta(rawArgs) }
 if rawArgs.contains("--graft") { runGraft(rawArgs) }
 if rawArgs.contains("--drafter") { runDrafter(rawArgs) }
 if rawArgs.contains("--assist") { runAssist(rawArgs) }
-if arg1.hasSuffix(".gguf"), rawArgs.contains("--assist-probe") {
+if isModelFile(arg1), rawArgs.contains("--assist-probe") {
     try runAssistProbe(arg1, rawArgs)
 }
-if arg1.hasSuffix(".gguf"), rawArgs.contains("--assist-bench") {
+if isModelFile(arg1), rawArgs.contains("--assist-bench") {
     try runAssistBench(arg1, rawArgs)
 }
 if rawArgs.contains("--splice") { runSplice(rawArgs) }
-if arg1.hasSuffix(".gguf"), rawArgs.contains("--replay-make") {
+if isModelFile(arg1), rawArgs.contains("--replay-make") {
     try runReplayMake(arg1, rawArgs)
 }
-if arg1.hasSuffix(".gguf"), rawArgs.contains("--replay") {
+if isModelFile(arg1), rawArgs.contains("--replay") {
     try runReplayScore(arg1, rawArgs)
 }
-if arg1.hasSuffix(".gguf"), rawArgs.contains("--kld")
+if isModelFile(arg1), rawArgs.contains("--kld")
     || rawArgs.contains("--kld-dump") { try runDivergence(arg1, rawArgs) }
 if rawArgs.contains("--puzzle-rescore") { runPuzzleRescore(rawArgs) }
 if rawArgs.contains("--puzzle-gate") { await runPuzzleGate(rawArgs) }
-if arg1.hasSuffix(".gguf") { try await runGgufMain() }
+if isModelFile(arg1) { try await runGgufMain() }
 
-err("\(arg1): not a .gguf -- this build runs GGUF models only\n")
+err("\(arg1): not a .ggxf -- this build runs GGUF models only\n")
 exit(2)

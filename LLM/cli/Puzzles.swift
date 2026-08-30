@@ -29,7 +29,7 @@ func runPuzzleGate(_ args: [String]) async {
     }
     let cap = capVal ?? 4096
     var status: Int32 = 0
-    if !model.hasSuffix(".gguf") {
+    if !isModelFile(model) {
         err("usage: gadeon-cli <model.gguf> --puzzle-gate [label] "
             + "[--json out.json], -n caps the turn\n")
         status = 2
