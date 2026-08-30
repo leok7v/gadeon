@@ -19,52 +19,52 @@ public enum ModelCatalog {
     public static let sources: [String: Source] = [
         "Qwen3.5-4B": Source(
             repo: "leok7v/Qwen3.5-4B",
-            revision: "70ec6653daabea753fe9ca3466cfd618bb70cdfb",
+            revision: "9b5937927636b99e3fc0b9b115d6df520cba260d",
             bytes: 3_584_533_984,
             files: ["Qwen3.5-4B-UD-Q4_K_XL.ggxf"]),
         "Qwen3.5-9B": Source(
             repo: "leok7v/Qwen3.5-9B",
-            revision: "5c9b8db474384f238c88745492401fea0a3813be",
+            revision: "2bb6530cee7044ed90f3bb5d5d4a349d405024f4",
             bytes: 6_884_262_304,
             files: ["Qwen3.5-9B-UD-Q4_K_XL.ggxf"]),
         "Qwen3.8-27B-IQ1_S": Source(
             repo: "leok7v/Qwen3.8-27B",
-            revision: "a047f6e4e0454c4218635f546d749a6041647e6d",
+            revision: "8562611e196c867b4603ada2742e2e1e83a29dc7",
             bytes: 7_119_830_240,
             files: ["Qwen3.8-27B-IQ1_S.ggxf"]),
         "Qwen3.8-27B-IQ2_XXS": Source(
             repo: "leok7v/Qwen3.8-27B",
-            revision: "a047f6e4e0454c4218635f546d749a6041647e6d",
+            revision: "8562611e196c867b4603ada2742e2e1e83a29dc7",
             bytes: 8_459_696_256,
             files: ["Qwen3.8-27B-IQ2_XXS.ggxf"]),
         "Qwen3.8-27B-IQ3_XXS": Source(
             repo: "leok7v/Qwen3.8-27B",
-            revision: "a047f6e4e0454c4218635f546d749a6041647e6d",
+            revision: "8562611e196c867b4603ada2742e2e1e83a29dc7",
             bytes: 11_862_468_736,
             files: ["Qwen3.8-27B-IQ3_XXS.ggxf"]),
         "Qwen3.8-27B-IQ4_XS": Source(
             repo: "leok7v/Qwen3.8-27B",
-            revision: "a047f6e4e0454c4218635f546d749a6041647e6d",
+            revision: "8562611e196c867b4603ada2742e2e1e83a29dc7",
             bytes: 15_180_454_016,
             files: ["Qwen3.8-27B-IQ4_XS.ggxf"]),
         "Qwen3.8-27B-Q4_K_S": Source(
             repo: "leok7v/Qwen3.8-27B",
-            revision: "a047f6e4e0454c4218635f546d749a6041647e6d",
+            revision: "8562611e196c867b4603ada2742e2e1e83a29dc7",
             bytes: 16_285_821_056,
             files: ["Qwen3.8-27B-Q4_K_S.ggxf"]),
         "Ternary-Bonsai-27B": Source(
             repo: "leok7v/Ternary-Bonsai-27B-gguf",
-            revision: "0e9bbf1b159573dcca23f59c82b365ac58422e00",
+            revision: "369aa33df3d8a8255a35a160305b6632eeb3f1a1",
             bytes: 7_794_369_344,
             files: ["Ternary-Bonsai-27B-Q2_0.ggxf"]),
         "Ternary-Bonsai-1.7B": Source(
             repo: "leok7v/Ternary-Bonsai-1.7B-gguf",
-            revision: "9363219fb1ca4b27524b53e0b782cad8b2b34867",
+            revision: "0fb751628b00550b9656984c5870e4cfdea392a7",
             bytes: 463_292_000,
             files: ["Ternary-Bonsai-1.7B-Q2_0.ggxf"]),
         "gemma-4-E2B": Source(
             repo: "leok7v/gemma-4-e2b-it-qat",
-            revision: "20bad044a76eac59e0a897d2607541229c48efae",
+            revision: "a98d8daed9141ec98f68f54fafa7a08efa8ca580",
             bytes: 2_665_414_656,
             files: ["gemma-4-e2b-it-qat.ggxf"]),
         // The same architecture one size up: 42 layers at 2560 wide against
@@ -74,7 +74,7 @@ public enum ModelCatalog {
         // tower and the two projections into it grow.
         "gemma-4-E4B": Source(
             repo: "leok7v/gemma-4-e4b-it-qat",
-            revision: "25bca6860fab6acc3988e494f8c7e58baf2441c4",
+            revision: "712cfb35aad315ed3f8fc3f92c0c04b83ee2023f",
             bytes: 3_794_550_784,
             files: ["gemma-4-e4b-it-qat.ggxf"]),
         // gemma-4-12B, the UNIFIED architecture rather than a larger E4B: no
@@ -86,7 +86,7 @@ public enum ModelCatalog {
         // 48 layers at 3840 would suggest.
         "gemma-4-12B": Source(
             repo: "leok7v/gemma-4-12b-it-qat",
-            revision: "2a39ef64662cd82129ea2421193d9b7712464ad9",
+            revision: "63c8311ff0d884228a7e3c415f4516d40daf755c",
             bytes: 7_060_897_792,
             files: ["gemma-4-12b-it-qat.ggxf"]),
     ]
@@ -119,19 +119,22 @@ public enum ModelCatalog {
     public static func ggufPath(_ name: String, in dest: URL) -> String? {
         var result: String? = nil
         if let file = ggufFiles[name], let set = localSet(name, in: dest) {
-            let url = set.appendingPathComponent(file)
-            adoptLegacy(url)
-            result = url.path
+            dropStale(name, in: dest)
+            result = set.appendingPathComponent(file).path
         }
         return result
     }
 
-    private static func adoptLegacy(_ url: URL) {
+    public static func dropStale(_ name: String, in dest: URL) {
         let fm = FileManager.default
-        let was = url.deletingPathExtension().appendingPathExtension("gguf")
-        if !fm.fileExists(atPath: url.path),
-           fm.fileExists(atPath: was.path) {
-            try? fm.moveItem(at: was, to: url)
+        if let set = localSet(name, in: dest) {
+            let home = dest.appendingPathComponent(name, isDirectory: true)
+            let kids = (try? fm.contentsOfDirectory(
+                at: home, includingPropertiesForKeys: nil)) ?? []
+            for kid in kids
+            where kid.lastPathComponent != set.lastPathComponent {
+                try? fm.removeItem(at: kid)
+            }
         }
     }
 
