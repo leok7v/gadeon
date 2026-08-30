@@ -13,33 +13,55 @@ func runPerplexity(_ path: String, _ args: [String]) throws {
             + "[--ppl-ctx 512] [--ppl-chunks N]\n")
         exit(2)
     }
-    let chat = try MetalChat(ggufPath: path)
-    let ids = chat.tokenizer.encode(text, addSpecial: true)
+    let gemma = Gemma4Model.isGemma4(path: path)
+    var ids: [Int32] = []
+    var vocab = 0
+    var score: ([Int32], Int,
+                (Int, Int32, UnsafePointer<Float>) -> Void) -> Void
+    var stepper: ((Int32) -> [Float])? = nil
+    var rewind: () -> Void = { }
+    if gemma {
+        let chat = try GemmaChat(ggufPath: path)
+        let engine = try Gemma4MetalEngine(chat.model)
+        if args.contains("--ppl-serial") { engine.batch = 1 }
+        ids = chat.encode(text)
+        vocab = chat.vocabCount
+        score = { rows, from, sink in
+            engine.chunkCost(rows, from: from, want: sink)
+        }
+    } else {
+        let chat = try MetalChat(ggufPath: path)
+        ids = chat.tokenizer.encode(text, addSpecial: true)
+        vocab = chat.tokenizer.vocabCount
+        score = { rows, from, sink in
+            chat.engine.chunkCost(rows, from: from, want: sink)
+        }
+        stepper = { t in chat.engine.step(t) }
+        rewind = { chat.engine.reset() }
+    }
     let chunks = min(ids.count / ctx, cap)
     if chunks == 0 {
         err("[ppl] corpus is \(ids.count) tokens, need \(ctx)\n")
         exit(2)
     }
     let first = ctx / 2
-    let serial = args.contains("--ppl-serial")
-    let vocab = chat.tokenizer.vocabCount
+    let serial = args.contains("--ppl-serial") && stepper != nil
     var total = 0.0
     var scored = 0
     let t0 = Date()
     for c in 0..<chunks {
         let base = c * ctx
         if serial {
-            chat.engine.reset()
+            rewind()
             for i in 0..<(ctx - 1) {
-                let logits = chat.engine.step(ids[base + i])
+                let logits = stepper!(ids[base + i])
                 if i + 1 >= first {
                     total += cost(logits, logits.count, ids[base + i + 1])
                     scored += 1
                 }
             }
         } else {
-            chat.engine.chunkCost(Array(ids[base..<(base + ctx)]),
-                                  from: first) { _, want, lp in
+            score(Array(ids[base..<(base + ctx)]), first) { _, want, lp in
                 total += cost(lp, vocab, want)
                 scored += 1
             }

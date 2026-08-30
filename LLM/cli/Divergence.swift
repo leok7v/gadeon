@@ -155,7 +155,7 @@ struct Divergence {
     }
 }
 
-private func rank(_ lp: UnsafePointer<Float>, _ vocab: Int) -> [Int32] {
+func rank(_ lp: UnsafePointer<Float>, _ vocab: Int) -> [Int32] {
     var ids = [Int32](repeating: 0, count: TopK.k)
     var vals = [Float](repeating: -Float.infinity, count: TopK.k)
     var floor = -Float.infinity
@@ -173,7 +173,7 @@ private func rank(_ lp: UnsafePointer<Float>, _ vocab: Int) -> [Int32] {
     return ids
 }
 
-private func append(_ sink: inout Data, _ want: Int32,
+func append(_ sink: inout Data, _ want: Int32,
                     _ lp: UnsafePointer<Float>, _ top: [Int32],
                     _ vocab: Int) {
     var lse = logSumExp(lp, vocab)

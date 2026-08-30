@@ -155,6 +155,12 @@ if arg1.hasSuffix(".gguf"), rawArgs.contains("--assist-bench") {
     try runAssistBench(arg1, rawArgs)
 }
 if rawArgs.contains("--splice") { runSplice(rawArgs) }
+if arg1.hasSuffix(".gguf"), rawArgs.contains("--replay-make") {
+    try runReplayMake(arg1, rawArgs)
+}
+if arg1.hasSuffix(".gguf"), rawArgs.contains("--replay") {
+    try runReplayScore(arg1, rawArgs)
+}
 if arg1.hasSuffix(".gguf"), rawArgs.contains("--kld")
     || rawArgs.contains("--kld-dump") { try runDivergence(arg1, rawArgs) }
 if rawArgs.contains("--puzzle-rescore") { runPuzzleRescore(rawArgs) }

@@ -344,6 +344,34 @@ public final class Gemma4MetalEngine {
         for (il, n) in mark.lens { kv[il]!.truncate(to: n + keep) }
     }
 
+    public func chunkCost(_ ids: [Int32], from first: Int,
+                          want: (Int, Int32, UnsafePointer<Float>) -> Void) {
+        let n = ids.count
+        let lo = max(first - 1, 0)
+        reset()
+        var i = 0
+        while i < n {
+            let take = min(batch, n - i)
+            let rows = Array(ids[i..<(i + take)])
+            if take == 1 {
+                forward(token: Int(rows[0]), pos: pos)
+                pos += 1
+            } else {
+                forwardChunk(rows, [:],
+                             [(Int, Int)](repeating: (0, 0), count: take))
+                pos += take
+            }
+            for j in 0..<take where i + j >= lo && i + j < n - 1 {
+                if take > 1 { selectRow(j, of: take) }
+                let lg = logits()
+                lg.withUnsafeBufferPointer { p in
+                    want(i + j, ids[i + j + 1], p.baseAddress!)
+                }
+            }
+            i += take
+        }
+    }
+
     public func selectRow(_ j: Int, of n: Int) {
         let c = cfg
         let rows = bNormedN.f32(n * c.nEmbd)

@@ -130,12 +130,12 @@ func segment(_ user: String, first: Bool) -> String {
     }
     // gemma-4 is a different architecture behind the same .gguf extension, so
     // route on the FILE's own general.architecture, never on its name.
+    if rawArgs.contains("--ppl") { try runPerplexity(arg1, rawArgs) }
     if Gemma4Model.isGemma4(path: arg1) {
         try await runGemmaMain(arg1, rawArgs, turnArgs, capVal)
     }
     // Metal backend bring-up: diff each GPU kernel against the SIMD reference
     // on the loaded model, then exit. No chat -- correctness only.
-    if rawArgs.contains("--ppl") { try runPerplexity(arg1, rawArgs) }
     if rawArgs.contains("--kernel-bench") {
         print(try MetalKernelBench.run(ggufPath: arg1))
         exit(0)
