@@ -392,7 +392,7 @@ public final class Gemma4MetalEngine {
                 encode("assist draft") { f in
                     head.encodeStep(f, pos: at, pools: kv)
                 }
-                last = Int32(argmax(head.logits()))
+                last = head.picked()
                 back = head.backbone()
                 out.append(last)
             }

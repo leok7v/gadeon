@@ -20,6 +20,7 @@ final class Gemma4MetalAssist {
     private let bFfnGate, bFfnUp, bClamp: MTLBuffer
     let bLogits: MTLBuffer
     let bBack: MTLBuffer
+    private let bPick: MTLBuffer
 
     let slidingSource: Int
     let fullSource: Int
@@ -52,6 +53,7 @@ final class Gemma4MetalAssist {
         bClamp = ctx.makeF32(max(maxFF, head.nEmbd))
         bLogits = ctx.makeF32(cfg.nVocab)
         bBack = ctx.makeF32(head.backbone)
+        bPick = ctx.makeU32(1)
         let g = model.gguf
         for L in head.layers {
             for t in [L.wq, L.wo, L.ffnGate, L.ffnUp, L.ffnDown] {
@@ -101,6 +103,7 @@ final class Gemma4MetalAssist {
                       n: w.nEmbd, eps: cfg.eps)
         f.linear(w.output, x: bNormed, out: bLogits, off: off(w.output),
                  srq: srq(w.output), scratch: bClamp)
+        f.argmaxRows(x: bLogits, out: bPick, n: cfg.nVocab, rows: 1)
         f.linear(w.postProj, x: bNormed, out: bBack, off: off(w.postProj),
                  srq: srq(w.postProj), scratch: bClamp)
     }
@@ -149,6 +152,10 @@ final class Gemma4MetalAssist {
     }
 
     func logits() -> [Float] { Array(bLogits.f32(cfg.nVocab)) }
+
+    func picked() -> Int32 {
+        bPick.contents().assumingMemoryBound(to: Int32.self)[0]
+    }
 
     func backbone() -> [Float] { Array(bBack.f32(w.backbone)) }
 }
