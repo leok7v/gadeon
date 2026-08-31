@@ -349,6 +349,7 @@ GEMM_MM_KERNEL(q8_0_gemm_mm_h, block_q8_0, half,  2,  32, dq_q8_0_h)
 // BELOW simd_mm_slice and store_mm_tile because the IQ tile shares them.
 #include "IQTables.metal"
 #include "IQKernels.metal"
+#include "AssistKernels.metal"
 
 static inline void dq_iq4_nl_h(device const block_iq4_nl * xb, short il,
                                thread half4x4 & reg) {

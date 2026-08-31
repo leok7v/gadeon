@@ -336,6 +336,10 @@ public struct Gemma4Assist {
     let postProj: GGUFTensor
     let outputNorm: GGUFTensor
     let output: GGUFTensor
+    let centroids: GGUFTensor?
+    let tokenOrdering: GGUFTensor?
+
+    var clustered: Bool { centroids != nil && tokenOrdering != nil }
 
     func isFull(_ il: Int) -> Bool { layerFull[il] }
 
@@ -359,6 +363,8 @@ public struct Gemma4Assist {
         postProj = g.tensor("assist.post_proj.weight")
         outputNorm = g.tensor("assist.output_norm.weight")
         output = g.tensor("assist.token_embd.weight")
+        centroids = g.maybe("assist.centroids.weight")
+        tokenOrdering = g.maybe("assist.token_ordering")
         precondition(backbone == trunk.nEmbd,
                      "assist head fits a \(backbone)-wide trunk, this one "
                      + "is \(trunk.nEmbd)")

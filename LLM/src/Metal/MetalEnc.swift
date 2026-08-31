@@ -377,6 +377,35 @@ struct MetalEnc {
         }
     }
 
+    func assistTopClusters(x: MTLBuffer, out: MTLBuffer, n: Int, k: Int) {
+        var a = AssistTopArgs(n: UInt32(n), k: UInt32(k))
+        groups("assist_top_clusters", 1, tpg: 256) { e in
+            e.setBuffer(x, offset: 0, index: 0)
+            e.setBuffer(out, offset: 0, index: 1)
+            e.setBytes(&a, length: MemoryLayout<AssistTopArgs>.stride,
+                       index: 2)
+        }
+    }
+
+    func assistClusterArgmax(_ w: GGUFTensor, h: MTLBuffer,
+                             ordering: WeightRef, clusters: MTLBuffer,
+                             out: MTLBuffer, off: WeightRef, dim: Int,
+                             per: Int, k: Int) {
+        var a = AssistPickArgs(
+            woff: off.local, ooff: ordering.local, dim: UInt32(dim),
+            per: UInt32(per), clusters: UInt32(k),
+            rowBytes: UInt32(GGUF.rowByteCount(w.type, dim)))
+        groups("assist_cluster_argmax", 1, tpg: 256) { e in
+            e.setBuffer(off.buf, offset: 0, index: 0)
+            e.setBuffer(h, offset: 0, index: 1)
+            e.setBuffer(ordering.buf, offset: 0, index: 2)
+            e.setBuffer(clusters, offset: 0, index: 3)
+            e.setBuffer(out, offset: 0, index: 4)
+            e.setBytes(&a, length: MemoryLayout<AssistPickArgs>.stride,
+                       index: 5)
+        }
+    }
+
     func argmaxRows(x: MTLBuffer, out: MTLBuffer, n: Int, rows: Int) {
         var nn = UInt32(n)
         groups("argmax_rows", rows, tpg: 256, tgmem: 0) { e in
@@ -1300,6 +1329,12 @@ struct GVRopeArgs {
 struct RopeGemmaArgs {
     var headDim: UInt32; var nHead: UInt32; var rotated: UInt32
     var base: Float; var pos: UInt32
+}
+struct AssistTopArgs { var n: UInt32; var k: UInt32 }
+struct AssistPickArgs {
+    var woff: UInt64; var ooff: UInt64
+    var dim: UInt32; var per: UInt32; var clusters: UInt32
+    var rowBytes: UInt32
 }
 struct FmaArgs { var n: UInt32; var s: Float }
 struct SrqArgs { var n: UInt32; var s: Float }

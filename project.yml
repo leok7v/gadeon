@@ -56,6 +56,7 @@ targets:
         excludes:
           - IQTables.metal
           - IQKernels.metal
+          - AssistKernels.metal
       # The pronunciation data carries no file extension, which leaves
       # xcodegen unable to infer a build phase for it: both files land in the
       # navigator and in NO copy phase, so the framework ships without them

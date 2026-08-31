@@ -21,6 +21,23 @@ final class Gemma4MetalAssist {
     let bLogits: MTLBuffer
     let bBack: MTLBuffer
     private let bPick: MTLBuffer
+    private let bScores: MTLBuffer
+    private let bClusters: MTLBuffer
+    private let orderingOff: WeightRef?
+    private let clusterCount: Int
+    private let perCluster: Int
+
+    static let centroids =
+        ProcessInfo.processInfo.environment["LLM_GEMMA_CENTROIDS"] == "1"
+    static let topClusters: Int = {
+        let raw = ProcessInfo.processInfo
+            .environment["LLM_GEMMA_TOP_CLUSTERS"]
+        return max(1, raw.flatMap { v in Int(v) } ?? 32)
+    }()
+
+    private var usesCentroids: Bool {
+        Gemma4MetalAssist.centroids && w.clustered && perCluster > 0
+    }
 
     let slidingSource: Int
     let fullSource: Int
@@ -54,7 +71,14 @@ final class Gemma4MetalAssist {
         bLogits = ctx.makeF32(cfg.nVocab)
         bBack = ctx.makeF32(head.backbone)
         bPick = ctx.makeU32(1)
+        clusterCount = head.centroids?.dims[1] ?? 0
+        perCluster = clusterCount > 0 ? cfg.nVocab / clusterCount : 0
+        bScores = ctx.makeF32(max(1, clusterCount))
+        bClusters = ctx.makeU32(max(1, Gemma4MetalAssist.topClusters))
         let g = model.gguf
+        orderingOff = head.tokenOrdering.map { t in
+            ctx.window(UInt64(t.base - g.map))
+        }
         for L in head.layers {
             for t in [L.wq, L.wo, L.ffnGate, L.ffnUp, L.ffnDown] {
                 scales[t.name] = SRQ(g, t.name)
@@ -101,9 +125,22 @@ final class Gemma4MetalAssist {
         for il in 0..<w.nLayer { layer(f, il, pos: pos, pools: pools) }
         f.rmsnormBF16(x: bx, weightOff: outNormOff, out: bNormed,
                       n: w.nEmbd, eps: cfg.eps)
-        f.linear(w.output, x: bNormed, out: bLogits, off: off(w.output),
-                 srq: srq(w.output), scratch: bClamp)
-        f.argmaxRows(x: bLogits, out: bPick, n: cfg.nVocab, rows: 1)
+        if usesCentroids {
+            f.gemv(w.centroids!, x: bNormed, out: bScores,
+                   off: off(w.centroids!))
+            f.assistTopClusters(x: bScores, out: bClusters, n: clusterCount,
+                                k: Gemma4MetalAssist.topClusters)
+            f.assistClusterArgmax(w.output, h: bNormed,
+                                  ordering: orderingOff!,
+                                  clusters: bClusters, out: bPick,
+                                  off: off(w.output), dim: w.nEmbd,
+                                  per: perCluster,
+                                  k: Gemma4MetalAssist.topClusters)
+        } else {
+            f.linear(w.output, x: bNormed, out: bLogits, off: off(w.output),
+                     srq: srq(w.output), scratch: bClamp)
+            f.argmaxRows(x: bLogits, out: bPick, n: cfg.nVocab, rows: 1)
+        }
         f.linear(w.postProj, x: bNormed, out: bBack, off: off(w.postProj),
                  srq: srq(w.postProj), scratch: bClamp)
     }

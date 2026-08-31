@@ -15,7 +15,8 @@ struct MetalBuild: BuildToolPlugin {
         let src = dir.appendingPathComponent("metal/Kernels.metal")
         // The two included files are inputs, not translation units: an edit
         // to either has to re-run this command.
-        let inc = ["metal/IQTables.metal", "metal/IQKernels.metal"]
+        let inc = ["metal/IQTables.metal", "metal/IQKernels.metal",
+                   "metal/AssistKernels.metal"]
             .map { dir.appendingPathComponent($0) }
         let out = context.pluginWorkDirectoryURL
             .appendingPathComponent("default.metallib")
