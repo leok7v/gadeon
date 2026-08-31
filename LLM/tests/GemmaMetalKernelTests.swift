@@ -99,20 +99,23 @@ struct GemmaMetalKernelTests {
         let path = try #require(gemmaGgufPath)
         let h = try MetalHarness(path)
         let w = h.model.layers[h.model.cfg.nLayer - 1].ffnDown
-        #expect(w.type == .q2_0)
-        let K = w.dims[0], M = w.dims[1]
-        let x = activations(K)
-        var want = [Float](repeating: 0, count: M)
-        GQ.matvec(w, x: x, out: &want)
+        #expect([GGUFType.q2_0, .q4_0].contains(w.type),
+                "unknown MLP bit plan \(w.type)")
+        if w.type == .q2_0 {
+            let K = w.dims[0], M = w.dims[1]
+            let x = activations(K)
+            var want = [Float](repeating: 0, count: M)
+            GQ.matvec(w, x: x, out: &want)
 
-        let xb = h.ctx.makeF32(x)
-        let ob = h.ctx.makeF32(M)
-        _ = h.run(M) { f in
-            f.gemv(w, x: xb, out: ob, off: h.off(w))
+            let xb = h.ctx.makeF32(x)
+            let ob = h.ctx.makeF32(M)
+            _ = h.run(M) { f in
+                f.gemv(w, x: xb, out: ob, off: h.off(w))
+            }
+            let got = Array(ob.f32(M))
+            let cos = cosine(want, got)
+            #expect(cos >= 0.99999, "q2_0_gemv cosine \(cos)")
         }
-        let got = Array(ob.f32(M))
-        let cos = cosine(want, got)
-        #expect(cos >= 0.99999, "q2_0_gemv cosine \(cos)")
     }
 
     // The embedding gathers. The two tables do NOT share a type -- the QAT
@@ -126,7 +129,8 @@ struct GemmaMetalKernelTests {
         // Only a checkpoint that HAS a per-layer table can be asked about its
         // split, so the fixture's own is required rather than assumed.
         let ple = try #require(h.model.perLayerEmbd)
-        #expect(h.model.tokEmbd.type == .q2_0)
+        #expect([GGUFType.q2_0, .q4_0].contains(h.model.tokEmbd.type),
+                "unknown token_embd bit plan \(h.model.tokEmbd.type)")
         #expect(ple.type == .q4_0)
         let cases = [(h.model.tokEmbd, c.nEmbd, "token_embd"),
                      (ple, c.nLayer * c.perLayerDim,
@@ -380,16 +384,18 @@ struct GemmaMetalKernelTests {
         let path = try #require(gemmaGgufPath)
         let h = try MetalHarness(path)
         let g = h.model.gguf
-        let scales = [g.double("gemma4.srq.a.blk.0.attn_q.in") ?? 0,
-                      g.double("gemma4.srq.a.blk.0.lconv_end.out") ?? 0,
-                      g.double("gemma4.srq.blk.0.attn_q.in") ?? 0]
-        #expect(scales.allSatisfy { v in v != 0 })
+        let sides = ["a.blk.0.attn_q.weight", "a.blk.0.lconv_end.weight",
+                     "v.blk.0.attn_q.weight"]
+            .map { name in SRQ(g, name) }
+            .flatMap { s in [s.input, s.output] }
+            .filter { s in s.active }
+        #expect(!sides.isEmpty,
+                "this file carries neither gemma4.srq.* nor gemma4.clamp.*")
         let n = 4096
-        for scale in scales {
-            let s = Float(scale)
-            // Spread the input across the clamp's range so both the
-            // rounding and the saturation at +/-128 are exercised.
-            let x = activations(n).map { v in v * s * 200 }
+        for s in sides {
+            let span = s.scale != 0 ? s.scale * 200
+                                    : max(abs(s.lo), abs(s.hi)) * 2
+            let x = activations(n).map { v in v * span }
             var want = x
             SRQ.apply(&want, s)
 
@@ -403,11 +409,14 @@ struct GemmaMetalKernelTests {
             let gotIn = Array(bIn.f32(n))
             let gotTo = Array(bDst.f32(n))
             #expect(maxAbsDiff(want, gotIn) == 0,
-                    "srq_inplace s=\(s) maxAbs \(maxAbsDiff(want, gotIn))")
+                    "srq_inplace \(s) maxAbs \(maxAbsDiff(want, gotIn))")
             #expect(maxAbsDiff(want, gotTo) == 0,
-                    "srq_to s=\(s) maxAbs \(maxAbsDiff(want, gotTo))")
-            let saturated = want.filter { v in abs(v) >= 127 * s }.count
-            #expect(saturated > 0, "the clamp range was never reached")
+                    "srq_to \(s) maxAbs \(maxAbsDiff(want, gotTo))")
+            let bound = want.filter { v in
+                s.scale != 0 ? abs(v) >= 127 * s.scale
+                             : (v == s.lo || v == s.hi)
+            }.count
+            #expect(bound > 0, "the clamp range was never reached")
         }
     }
 

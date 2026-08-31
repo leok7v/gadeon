@@ -405,21 +405,24 @@ enum GQ {
     }
 }
 
-// Static range quantization: the QAT trained with every quantized linear's
-// input and output ROUNDED to a per-linear scale, and the audio tower does
-// not work without it -- the same weights unclamped answer "the content is
-// unclear" where the clamped ones transcribe.
-//
-// A missing scale marks an uncalibrated linear (the checkpoint stores 0 and
-// the repack omits it), where the clamp is the identity.
-
 struct SRQ {
-    let input: Float
-    let output: Float
 
-    static let none = SRQ(input: 0, output: 0)
+    struct Side {
+        let scale: Float
+        let lo: Float
+        let hi: Float
 
-    init(input: Float, output: Float) {
+        static let none = Side(scale: 0, lo: 0, hi: 0)
+
+        var active: Bool { scale != 0 || lo < hi }
+    }
+
+    let input: Side
+    let output: Side
+
+    static let none = SRQ(input: .none, output: .none)
+
+    init(input: Side, output: Side) {
         self.input = input
         self.output = output
     }
@@ -441,23 +444,39 @@ struct SRQ {
         ProcessInfo.processInfo.environment["LLM_SRQ"] != "0"
 
     init(_ g: GGUF, _ weight: String) {
-        let base = "gemma4.srq." + weight.replacingOccurrences(
-            of: ".weight", with: "")
-        // A scale of 0 is already the identity everywhere it is consumed
-        // (SRQ.apply, srq_inplace, srq_to and MetalEnc.linear all skip it), so
-        // zeroing here disables the clamp without a second code path.
-        input = SRQ.enabled ? Float(g.double(base + ".in") ?? 0) : 0
-        output = SRQ.enabled ? Float(g.double(base + ".out") ?? 0) : 0
+        let site = weight.replacingOccurrences(of: ".weight", with: "")
+        input = SRQ.side(g, site, "in")
+        output = SRQ.side(g, site, "out")
+    }
+
+    private static func side(_ g: GGUF, _ site: String,
+                             _ slot: String) -> Side {
+        var out = Side.none
+        if SRQ.enabled {
+            let scale = Float(g.double("gemma4.srq.\(site).\(slot)") ?? 0)
+            let lo = g.double("gemma4.clamp.\(site).\(slot)_lo")
+            let hi = g.double("gemma4.clamp.\(site).\(slot)_hi")
+            if let lo, let hi {
+                out = Side(scale: 0, lo: Float(lo), hi: Float(hi))
+            } else if scale != 0 {
+                out = Side(scale: scale, lo: 0, hi: 0)
+            }
+        }
+        return out
     }
 
     // clamp(round(x / s), -128, 127) * s. torch.round is round-half-to-EVEN,
     // so anything else drifts on exact .5 -- which the trained scales hit.
-    static func apply(_ x: inout [Float], _ s: Float) {
-        if s != 0 {
-            let inv = 1 / s
+    static func apply(_ x: inout [Float], _ s: Side) {
+        if s.scale != 0 {
+            let inv = 1 / s.scale
             for i in 0..<x.count {
                 let q = (x[i] * inv).rounded(.toNearestOrEven)
-                x[i] = min(max(q, -128), 127) * s
+                x[i] = min(max(q, -128), 127) * s.scale
+            }
+        } else if s.lo < s.hi {
+            for i in 0..<x.count {
+                x[i] = min(max(x[i], s.lo), s.hi)
             }
         }
     }

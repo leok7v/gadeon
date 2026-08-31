@@ -634,9 +634,9 @@ struct MetalEnc {
     // A scale of 0 marks an uncalibrated linear, where the clamp is the
     // identity -- so it is SKIPPED rather than dispatched, and no pass over
     // the buffer happens at all.
-    func srqInPlace(x: MTLBuffer, n: Int, s: Float) {
-        if s != 0 {
-            var a = SrqArgs(n: UInt32(n), s: s)
+    func srqInPlace(x: MTLBuffer, n: Int, s: SRQ.Side) {
+        if s.active {
+            var a = SrqArgs(n: UInt32(n), s: s.scale, lo: s.lo, hi: s.hi)
             grid1D("srq_inplace", n) { e in
                 e.setBuffer(x, offset: 0, index: 0)
                 e.setBytes(&a, length: MemoryLayout<SrqArgs>.stride, index: 1)
@@ -644,8 +644,8 @@ struct MetalEnc {
         }
     }
 
-    func srqTo(src: MTLBuffer, dst: MTLBuffer, n: Int, s: Float) {
-        var a = SrqArgs(n: UInt32(n), s: s)
+    func srqTo(src: MTLBuffer, dst: MTLBuffer, n: Int, s: SRQ.Side) {
+        var a = SrqArgs(n: UInt32(n), s: s.scale, lo: s.lo, hi: s.hi)
         grid1D("srq_to", n) { e in
             e.setBuffer(src, offset: 0, index: 0)
             e.setBuffer(dst, offset: 0, index: 1)
@@ -660,7 +660,7 @@ struct MetalEnc {
     func linear(_ w: GGUFTensor, X: MTLBuffer, out: MTLBuffer, off: WeightRef,
                 N: Int, srq: SRQ, scratch: MTLBuffer) {
         var input = X
-        if srq.input != 0 {
+        if srq.input.active {
             srqTo(src: X, dst: scratch, n: N * w.dims[0], s: srq.input)
             input = scratch
         }
@@ -671,7 +671,7 @@ struct MetalEnc {
     func linear(_ w: GGUFTensor, x: MTLBuffer, out: MTLBuffer, off: WeightRef,
                 srq: SRQ, scratch: MTLBuffer) {
         var input = x
-        if srq.input != 0 {
+        if srq.input.active {
             srqTo(src: x, dst: scratch, n: w.dims[0], s: srq.input)
             input = scratch
         }
@@ -1337,7 +1337,7 @@ struct AssistPickArgs {
     var rowBytes: UInt32
 }
 struct FmaArgs { var n: UInt32; var s: Float }
-struct SrqArgs { var n: UInt32; var s: Float }
+struct SrqArgs { var n: UInt32; var s: Float; var lo: Float; var hi: Float }
 struct GluArgs { var n: UInt32; var e: UInt32 }
 struct DwArgs { var n: UInt32; var e: UInt32; var k: UInt32 }
 struct HeadScaleArgs { var n: UInt32; var e: UInt32; var hd: UInt32 }

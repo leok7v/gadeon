@@ -2700,13 +2700,20 @@ kernel void gemma_audio_attn(
 // anything else drifts on the exact .5 the trained scales hit. Two entry
 // points because an input buffer is usually shared and an output is not.
 // [srq-clamp]
-struct SrqArgs { uint n; float s; };
+struct SrqArgs { uint n; float s; float lo; float hi; };
+
+// A nonzero scale is the mobile lineage's fake-quant; otherwise the export's
+// literal two-sided bound, which does NOT round. [srq-clamp]
+inline float srq_bound(float v, constant SrqArgs & a) {
+    return a.s != 0.0f ? clamp(rint(v / a.s), -128.0f, 127.0f) * a.s
+                       : clamp(v, a.lo, a.hi);
+}
 
 kernel void srq_inplace(device float * x [[buffer(0)]],
                         constant SrqArgs & a [[buffer(1)]],
                         uint gid [[thread_position_in_grid]]) {
     if (gid < a.n) {
-        x[gid] = clamp(rint(x[gid] / a.s), -128.0f, 127.0f) * a.s;
+        x[gid] = srq_bound(x[gid], a);
     }
 }
 
@@ -2715,7 +2722,7 @@ kernel void srq_to(device const float * src [[buffer(0)]],
                    constant SrqArgs   & a   [[buffer(2)]],
                    uint gid [[thread_position_in_grid]]) {
     if (gid < a.n) {
-        dst[gid] = clamp(rint(src[gid] / a.s), -128.0f, 127.0f) * a.s;
+        dst[gid] = srq_bound(src[gid], a);
     }
 }
 
