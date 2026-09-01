@@ -355,6 +355,37 @@ final class ChatSessionTests: XCTestCase {
                       "text after the stray marker was dropped: '\(out)'")
     }
 
+    func testStrayToolMarkupDoesNotReachTheAnswer() async throws {
+        let text = "Here goes <tool_call>7. Tool Call Generation"
+            + "</tool_call> and the answer is 4."
+        let backend = MockBackend(scripts: [[1]], vocab: vocab([(1, text)]))
+        let runner = RecordingRunner(reply: "4")
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256, runner: runner)
+        let out = await drain(session.reply("what is 2 + 2?"))
+        XCTAssertEqual(runner.calls, [], "junk markup must not dispatch")
+        XCTAssertFalse(out.contains("<tool_call>"),
+                       "stray open marker reached the answer: '\(out)'")
+        XCTAssertFalse(out.contains("</tool_call>"),
+                       "stray close marker reached the answer: '\(out)'")
+        XCTAssertTrue(out.contains("Here goes"),
+                      "text before the stray markup was dropped: '\(out)'")
+    }
+
+    func testStrayToolMarkupIsStrippedWithoutTools() async throws {
+        let text = "<tool_call>7. Tool Call Generation: two calls needed."
+        let backend = MockBackend(scripts: [[1]], vocab: vocab([(1, text)]))
+        let session = ChatSession(
+            backend: backend, template: template, system: "You are a bot.",
+            vocabSize: 256)
+        let out = await drain(session.reply("research this"))
+        XCTAssertFalse(out.contains("<tool_call>"),
+                       "marker reached the answer with tools off: '\(out)'")
+        XCTAssertTrue(out.contains("Tool Call Generation"),
+                      "the prose was dropped: '\(out)'")
+    }
+
     // The ASCII-split variant of the same case: the model emits the block as
     // BYTE-level tokens (< / t / h / i / n / k / > / ...), not one atomic
     // <think> token. leadingThink must still settle to .isThink across the

@@ -1877,7 +1877,12 @@ public actor ChatSession {
                     // A close with no opener ANYWHERE this round closes
                     // nothing; a quoted pair keeps its close, one preceded it.
                     var marks = [thinkClose, thinkOpen]
-                    if toolsActive, !sawToolOpen { marks.append(closeTag) }
+                    if toolsActive {
+                        if !sawToolOpen { marks.append(closeTag) }
+                    } else {
+                        marks.append(openTag)
+                        marks.append(closeTag)
+                    }
                     for pat in marks where !pat.isEmpty {
                         hold = max(hold,
                                    ChatSession.partialSuffix(bytes, pat, n))
@@ -2041,6 +2046,17 @@ public actor ChatSession {
                 }
             }
         }
+        let whole = Tokenizer.completeUTF8Count(bytes)
+        if !toolsActive, emitted < whole, thinkDecided,
+           closeAt != nil || !inThinkRegion {
+            let tail = String(decoding: bytes[emitted ..< whole],
+                              as: UTF8.self)
+            if !tail.isEmpty {
+                yield(tail)
+                emitted = whole
+            }
+        }
+
         // An EOS-cut call whose BODY completed: the model emitted
         // </function> and died before </tool_call> (observed twice on the
         // 4B, both sessions ending answerless with a recoverable call on
@@ -2100,6 +2116,14 @@ public actor ChatSession {
             // delta. Markup quoted INSIDE prose keeps the prose.
             if strippedOfToolBlocks(answer).isEmpty {
                 answer = ""
+            } else {
+                for pat in [wire.toolCallOpen, wire.toolCallClose]
+                where !pat.isEmpty && answer.contains(pat) {
+                    chatLog.error("stripped stray tool markup from an answer")
+                    answer = answer.replacingOccurrences(of: pat, with: "")
+                }
+                answer = answer.trimmingCharacters(
+                    in: .whitespacesAndNewlines)
             }
             history.append(AgentMessage(role: "assistant", content: answer))
             committedAnswer = answer
