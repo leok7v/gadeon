@@ -845,8 +845,12 @@ public actor ChatSession {
             let savedOutcome = turnOutcome
             let savedSink = traceSink
             let savedSuppress = suppressReasoning
+            let savedHard = maxReasoning
+            let savedSoft = softReasoningCap
             enableThinking = false
-            suppressReasoning = true
+            suppressReasoning = false
+            maxReasoning = 0
+            softReasoningCap = 0
             runner = nil
             traceSink = nil
             metaTurn = true
@@ -858,6 +862,8 @@ public actor ChatSession {
             let spent = lastMetrics
             enableThinking = savedThinking
             suppressReasoning = savedSuppress
+            maxReasoning = savedHard
+            softReasoningCap = savedSoft
             runner = savedRunner
             traceSink = savedSink
             history = savedHistory
@@ -913,6 +919,10 @@ public actor ChatSession {
     // conversation and so tells the user nothing when they come back to a
     // list of them.
     static let titleInstruction =
+        ProcessInfo.processInfo.environment["GADEON_TITLE"]
+            ?? defaultTitleInstruction
+
+    static let defaultTitleInstruction =
         "In a few words, give a short title for this conversation, naming "
         + "what it is ABOUT. Never mention audio, pictures, recordings, "
         + "attachments or their labels, and never say that anything was "
@@ -2046,17 +2056,6 @@ public actor ChatSession {
                 }
             }
         }
-        let whole = Tokenizer.completeUTF8Count(bytes)
-        if !toolsActive, emitted < whole, thinkDecided,
-           closeAt != nil || !inThinkRegion {
-            let tail = String(decoding: bytes[emitted ..< whole],
-                              as: UTF8.self)
-            if !tail.isEmpty {
-                yield(tail)
-                emitted = whole
-            }
-        }
-
         // An EOS-cut call whose BODY completed: the model emitted
         // </function> and died before </tool_call> (observed twice on the
         // 4B, both sessions ending answerless with a recoverable call on
@@ -2074,6 +2073,18 @@ public actor ChatSession {
                 toolLog("eos-cut call rescued (body complete)")
             }
         }
+        let whole = Tokenizer.completeUTF8Count(bytes)
+        let readable = min(toolAt ?? whole, whole)
+        if pending == nil, emitted < readable, thinkDecided,
+           closeAt != nil || !inThinkRegion {
+            let tail = String(decoding: bytes[emitted ..< readable],
+                              as: UTF8.self)
+            if !strippedOfToolBlocks(tail).isEmpty {
+                yield(tail)
+                emitted = readable
+            }
+        }
+
         // WHY the decode ended, surfaced to the log: "no final answer" turns
         // are undiagnosable without knowing eos vs loop-breaker vs a cap.
         let reason: String

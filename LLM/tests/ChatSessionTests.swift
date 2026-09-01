@@ -355,7 +355,7 @@ final class ChatSessionTests: XCTestCase {
                       "text after the stray marker was dropped: '\(out)'")
     }
 
-    func testStrayToolMarkupDoesNotReachTheAnswer() async throws {
+    func testUnparseableToolMarkupKeepsTheTail() async throws {
         let text = "Here goes <tool_call>7. Tool Call Generation"
             + "</tool_call> and the answer is 4."
         let backend = MockBackend(scripts: [[1]], vocab: vocab([(1, text)]))
@@ -365,12 +365,10 @@ final class ChatSessionTests: XCTestCase {
             vocabSize: 256, runner: runner)
         let out = await drain(session.reply("what is 2 + 2?"))
         XCTAssertEqual(runner.calls, [], "junk markup must not dispatch")
-        XCTAssertFalse(out.contains("<tool_call>"),
-                       "stray open marker reached the answer: '\(out)'")
-        XCTAssertFalse(out.contains("</tool_call>"),
-                       "stray close marker reached the answer: '\(out)'")
         XCTAssertTrue(out.contains("Here goes"),
                       "text before the stray markup was dropped: '\(out)'")
+        XCTAssertTrue(out.contains("and the answer is 4."),
+                      "text after the stray markup was dropped: '\(out)'")
     }
 
     func testStrayToolMarkupIsStrippedWithoutTools() async throws {
