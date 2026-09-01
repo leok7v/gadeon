@@ -10,9 +10,9 @@ public struct Tokenizer: Sendable {
 
     private let vocab: [String: Int32]
     private let idToBytes: [Int32: [UInt8]]
-    private let ranks: [String: Int]
+    private let table: MergeTable
     private let byteToUni: [UInt8: Character]
-    private let specials: [(text: String, id: Int32)]
+    private let specials: SpecialIndex
     private let splitRegex: RegexBox
     public let eosId: Int32
     public private(set) var eosIds: Set<Int32>
@@ -28,16 +28,16 @@ public struct Tokenizer: Sendable {
         for (piece, id) in model["vocab"] as! [String: Int] {
             v[piece] = Int32(id)
         }
-        var r = [String: Int](minimumCapacity: 250_000)
+        var joined: [String] = []
         // merges is either one space-joined string per pair (older export) or
         // a 2-element [a, b] array (transformers 5.x); normalize to the
         // space-joined key bpe() reads.
-        for (i, m) in (model["merges"] as! [Any]).enumerated() {
+        for m in model["merges"] as! [Any] {
             var key = m as? String
             if key == nil, let pair = m as? [String], pair.count == 2 {
                 key = pair[0] + " " + pair[1]
             }
-            if let key { r[key] = i }
+            if let key { joined.append(key) }
         }
 
         let b2u = Tokenizer.bytesToUnicode()
@@ -75,9 +75,9 @@ public struct Tokenizer: Sendable {
 
         self.vocab = v
         self.idToBytes = i2b
-        self.ranks = r
+        self.table = MergeTable(joined)
         self.byteToUni = b2u
-        self.specials = special
+        self.specials = SpecialIndex(special)
         // Native Regex covers our pretokenizers (\p{L}/\p{N}, lookahead, \b)
         // with none of C++ std::regex's Unicode-class gaps. Open risk:
         // semantic parity with Python `regex` (which trained the vocab). If a
@@ -141,8 +141,6 @@ public struct Tokenizer: Sendable {
 
         var v = [String: Int32](minimumCapacity: tokens.count)
         for (i, piece) in tokens.enumerated() { v[piece] = Int32(i) }
-        var r = [String: Int](minimumCapacity: merges.count)
-        for (i, m) in merges.enumerated() { r[m] = i }   // already space-joined
 
         let b2u = Tokenizer.bytesToUnicode()
         var u2b = [Character: UInt8](minimumCapacity: 256)
@@ -171,9 +169,9 @@ public struct Tokenizer: Sendable {
 
         self.vocab = v
         self.idToBytes = i2b
-        self.ranks = r
+        self.table = MergeTable(merges)
         self.byteToUni = b2u
-        self.specials = special
+        self.specials = SpecialIndex(special)
         self.splitRegex = RegexBox(regex: try Regex(Tokenizer.qwenPretokenizer))
         let stops = g.ints("tokenizer.ggml.eos_token_id")
         self.eosId = Int32(stops?.first
@@ -216,7 +214,7 @@ public struct Tokenizer: Sendable {
         if addSpecial {
             var rest = Substring(text)
             while !rest.isEmpty {
-                if let hit = firstSpecial(in: rest) {
+                if let hit = specials.first(in: rest) {
                     let head = rest[rest.startIndex ..< hit.range.lowerBound]
                     out.append(contentsOf: encodePlain(String(head)))
                     out.append(hit.id)
@@ -232,19 +230,6 @@ public struct Tokenizer: Sendable {
         return out
     }
 
-    private func firstSpecial(
-        in s: Substring
-    ) -> (range: Range<Substring.Index>, id: Int32)? {
-        var best: (Range<Substring.Index>, Int32)? = nil
-        for (tok, id) in specials {
-            if let rng = s.range(of: tok),
-               best == nil || rng.lowerBound < best!.0.lowerBound {
-                best = (rng, id)
-            }
-        }
-        return best.map { (range: $0.0, id: $0.1) }
-    }
-
     private func encodePlain(_ text: String) -> [Int32] {
         var out: [Int32] = []
         if !text.isEmpty {
@@ -253,7 +238,7 @@ public struct Tokenizer: Sendable {
                 for byte in String(text[match.range]).utf8 {
                     mapped.append(byteToUni[byte]!)
                 }
-                for sym in bpe(mapped) where vocab[sym] != nil {
+                for sym in table.symbols(mapped) where vocab[sym] != nil {
                     out.append(vocab[sym]!)
                 }
             }
@@ -261,42 +246,6 @@ public struct Tokenizer: Sendable {
         return out
     }
 
-    private func bpe(_ token: String) -> [String] {
-        var word = token.map { String($0) }
-        var merging = word.count >= 2
-        while merging {
-            var minRank = Int.max
-            var minPair = ""
-            for i in 0 ..< (word.count - 1) {
-                let pair = word[i] + " " + word[i + 1]
-                if let rank = ranks[pair], rank < minRank {
-                    minRank = rank
-                    minPair = pair
-                }
-            }
-            if minRank == Int.max {
-                merging = false
-            } else {
-                let parts = minPair.split(separator: " ", maxSplits: 1)
-                let a = String(parts[0]), b = String(parts[1])
-                var merged: [String] = []
-                var i = 0
-                while i < word.count {
-                    if i < word.count - 1
-                        && word[i] == a && word[i + 1] == b {
-                        merged.append(a + b)
-                        i += 2
-                    } else {
-                        merged.append(word[i])
-                        i += 1
-                    }
-                }
-                word = merged
-                merging = word.count >= 2
-            }
-        }
-        return word
-    }
 
     public func decode(_ ids: [Int32]) -> String {
         String(decoding: decodeBytes(ids), as: UTF8.self)

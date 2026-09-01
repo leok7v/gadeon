@@ -15,12 +15,12 @@ public struct GemmaTokenizer: Sendable {
     private let vocab: [String: Int32]
     private let pieces: [String]
     private let types: [Int]
-    private let ranks: [String: Int]
+    private let table: MergeTable
     private let byteId: [Int32]          // 0..255 -> the <0xNN> token id
     private let metaspace: String
     private let byteFallback: Bool
     private let ignoreMerges: Bool
-    private let specials: [(text: String, id: Int32)]
+    private let specials: SpecialIndex
 
     public let eosId: Int32
     // The authoritative stop set. A runtime that compares against the scalar
@@ -41,18 +41,14 @@ public struct GemmaTokenizer: Sendable {
         pieces = toks
         types = g.ints("tokenizer.ggml.token_type") ?? []
         metaspace = g.string("tokenizer.ggml.metaspace") ?? "\u{2581}"
-        byteFallback = (g.int("tokenizer.ggml.byte_fallback") ?? 0) != 0
-        ignoreMerges = (g.int("tokenizer.ggml.ignore_merges") ?? 0) != 0
+        byteFallback = g.bool("tokenizer.ggml.byte_fallback") ?? false
+        ignoreMerges = g.bool("tokenizer.ggml.ignore_merges") ?? false
 
         var v = [String: Int32](minimumCapacity: toks.count)
         for (i, p) in toks.enumerated() { v[p] = Int32(i) }
         vocab = v
 
-        var r = [String: Int](minimumCapacity: 520_000)
-        for (i, m) in (g.strings("tokenizer.ggml.merges") ?? []).enumerated() {
-            r[m] = i                       // already space-joined "a b"
-        }
-        ranks = r
+        table = MergeTable(g.strings("tokenizer.ggml.merges") ?? [])
 
         // The 256 <0xNN> tokens, located by their declared BYTE type rather
         // than by scanning for a spelling.
@@ -70,7 +66,7 @@ public struct GemmaTokenizer: Sendable {
             sp.append((p, Int32(i)))
         }
         sp.sort { a, b in a.0.count > b.0.count }
-        specials = sp
+        specials = SpecialIndex(sp)
 
         let ids = g.ints("tokenizer.ggml.eos_token_ids")?
             .map { id in Int32(id) }
@@ -99,7 +95,7 @@ public struct GemmaTokenizer: Sendable {
         var out: [Int32] = []
         var rest = Substring(text)
         while !rest.isEmpty {
-            let hit = addSpecial ? firstSpecial(in: rest) : nil
+            let hit = addSpecial ? specials.first(in: rest) : nil
             if let hit {
                 let head = rest[rest.startIndex ..< hit.range.lowerBound]
                 out.append(contentsOf: encodePlain(String(head)))
@@ -113,19 +109,6 @@ public struct GemmaTokenizer: Sendable {
         return out
     }
 
-    private func firstSpecial(
-        in s: Substring
-    ) -> (range: Range<Substring.Index>, id: Int32)? {
-        var best: (Range<Substring.Index>, Int32)? = nil
-        for (tok, id) in specials {
-            if let rng = s.range(of: tok),
-               best == nil || rng.lowerBound < best!.0.lowerBound {
-                best = (rng, id)
-            }
-        }
-        return best.map { hit in (range: hit.0, id: hit.1) }
-    }
-
     private func encodePlain(_ text: String) -> [Int32] {
         var out: [Int32] = []
         if !text.isEmpty {
@@ -136,7 +119,7 @@ public struct GemmaTokenizer: Sendable {
             if ignoreMerges, let id = vocab[normalized] {
                 out = [id]
             } else {
-                for sym in bpe(normalized) {
+                for sym in table.symbols(normalized) {
                     if let id = vocab[sym] {
                         out.append(id)
                     } else {
@@ -166,41 +149,6 @@ public struct GemmaTokenizer: Sendable {
     // Merge-rank BPE over characters, lowest rank first -- the same loop
     // Tokenizer.bpe runs, over metaspace-normalized text instead of the
     // gpt2 byte alphabet.
-    private func bpe(_ token: String) -> [String] {
-        var word = token.map { ch in String(ch) }
-        var merging = word.count >= 2
-        while merging {
-            var minRank = Int.max
-            var minPair = ""
-            for i in 0 ..< (word.count - 1) {
-                let pair = word[i] + " " + word[i + 1]
-                if let rank = ranks[pair], rank < minRank {
-                    minRank = rank
-                    minPair = pair
-                }
-            }
-            if minRank == Int.max {
-                merging = false
-            } else {
-                let parts = minPair.split(separator: " ", maxSplits: 1)
-                let a = String(parts[0]), b = String(parts[1])
-                var merged: [String] = []
-                var i = 0
-                while i < word.count {
-                    if i < word.count - 1 && word[i] == a && word[i + 1] == b {
-                        merged.append(a + b)
-                        i += 2
-                    } else {
-                        merged.append(word[i])
-                        i += 1
-                    }
-                }
-                word = merged
-                merging = word.count >= 2
-            }
-        }
-        return word
-    }
 
     // ---- decode ---------------------------------------------------------
 
