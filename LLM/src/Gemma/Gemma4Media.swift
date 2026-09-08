@@ -1,0 +1,313 @@
+import CoreGraphics
+import Foundation
+
+// An attachment into the SoftSpan a turn carries for it: patchify or
+// log-mel it, run the tower, and bracket the rows in the markers the file
+// itself names.
+//
+// ONE definition on purpose. The markup, the per-frame budget and the tower
+// choice have to agree between the CLI probes and the app, and every constant
+// in them is a `gemma4.*` metadata read -- so a re-emit that moves a marker or
+// changes a budget moves both callers at once.
+//
+// Decoding is the CALLER's: this takes encoded image bytes, PCM samples, and
+// already-sampled frames, so it stays synchronous and free of AVFoundation.
+// A CLASS, and the towers are cached: building one reads its config and, on
+// the GPU arm, a CPU twin for the shared pooling -- which a conversation that
+// attaches on several turns would otherwise pay every time.
+// @unchecked Sendable on the same argument the backends make: the app builds
+// one per loaded model and every send is serialized behind `busy`, so the
+// cached towers are never touched concurrently.
+public final class Gemma4Media: MediaEncoder, @unchecked Sendable {
+    let model: Gemma4Model
+    let tokenizer: GemmaTokenizer
+    // The GPU towers are each other's oracle with the CPU ones, so which arm
+    // runs is a caller's choice rather than a property of the attachment. A
+    // context IS that choice: the GPU arm needs one and cannot make its own
+    // (the text engine owns the model's single mapping), so nil is the CPU arm
+    // and there is no second flag to disagree with it.
+    let ctx: MetalContext?
+    private var vision: VisionTower?
+    private var audio: AudioTower?
+
+    // Where each modality sits relative to the question. Gemma's own guidance
+    // is that image and video content comes BEFORE the text and audio AFTER
+    // it, and it is not cosmetic: audio placed first answers a different
+    // question than the one asked.
+    public static func ordered(_ parts: [ContentPart],
+                               around text: ContentPart) -> [ContentPart] {
+        var lead: [ContentPart] = []
+        var trail: [ContentPart] = []
+        for part in parts {
+            if case .audio = part { trail.append(part) } else {
+                lead.append(part)
+            }
+        }
+        return lead + [text] + trail
+    }
+
+    public init(_ chat: GemmaChat, ctx: MetalContext? = nil) {
+        model = chat.model
+        tokenizer = chat.tokenizer
+        self.ctx = ctx
+    }
+
+    public var modalities: Modalities {
+        Modalities(images: true, audio: true, video: true)
+    }
+
+    public func image(_ data: Data, budget: Int) throws -> Attached {
+        Attached(parts: [.image], spans: [try image(data, softTokens: budget)])
+    }
+
+    // A still image. The soft-token count comes from the TOWER, never a
+    // constant: this tower is native-resolution, so the count follows the
+    // aspect ratio.
+    // `softTokens` overrides the file's per-image ceiling. A smaller budget
+    // is what a MULTI-image turn wants: this model windows 28 of its 35
+    // layers at 512, so two images at the full ceiling push the first one out
+    // of view exactly as the second arrives.
+    public func image(_ data: Data,
+                      softTokens: Int? = nil) throws -> SoftSpan {
+        let wire = try Gemma4VisionWire(model.gguf)
+        let patch = try Gemma4Patchify(model)
+        var out: SoftSpan? = nil
+        let budget = softTokens.map { n in patch.patchBudget(n) }
+            ?? patch.maxPatches
+        if !model.hasVisionTower {
+            // Encoder-free: the 48-pixel block IS the token, so there is no
+            // tower to run and no pooling to recover a count from -- the grid
+            // the image resized to decides it.
+            let media = try Gemma4UnifiedMedia(model)
+            let want = softTokens ?? patch.maxSoftTokens
+            if let img = VisionPreprocess.decodeCapped(data),
+               let cut = patch.merged(img, softTokens: want) {
+                let rows = media.image(pixels: cut.pixels, pos: cut.pos)
+                out = SoftSpan.bracketed(
+                    begin: wire.boi, placeholder: wire.token, end: wire.eoi,
+                    count: rows.count, features: rows.flatMap { r in r })
+            }
+        } else if let img = VisionPreprocess.decodeCapped(data),
+                  let cut = patch.patches(img, budget: budget) {
+            let got = try tower(cut.pixels, cut.pos)
+            out = SoftSpan.bracketed(begin: wire.boi, placeholder: wire.token,
+                                     end: wire.eoi, count: got.count,
+                                     features: got.proj)
+        }
+        if out == nil {
+            throw MediaError("That picture could not be read.")
+        }
+        return out!
+    }
+
+    // A clip, as mono samples at the frontend's own rate (Gemma4MelConfig
+    // names it, and AudioFile resamples to it).
+    //
+    // SEVERAL spans, because the tower hears `maxSeconds` at a time and a
+    // recording is not obliged to be that short. The clip is cut at its own
+    // pauses (AudioChunks) and each piece becomes a span; the turn then emits
+    // one <|audio|> per piece and the template decides where they sit.
+    //
+    // MEASURED before it was built, since two IMAGES in one turn degrade
+    // badly and same-kind multi-span could not be assumed: a 40 s recording
+    // cut into 29.7 s + 10.3 s returns all ten of its sentences in order,
+    // across the seam, and matches what the two pieces transcribe separately.
+    public func audio(_ pcm: [Float]) throws -> [SoftSpan] {
+        let wire = try Gemma4AudioWire(model.gguf)
+        if !model.hasAudioTower {
+            // Encoder-free: no mel, no conformer. A token is the next frame
+            // of raw samples, so the only frontend is the framing itself.
+            let media = try Gemma4UnifiedMedia(model)
+            let rate = Double(model.gguf.int("gemma4.audio.sample_rate")
+                              ?? 16000)
+            return AudioChunks.split(pcm, rate: rate,
+                                     maxSeconds: wire.maxSeconds)
+                .map { chunk in
+                    let rows = media.audio(Array(pcm[chunk.range]))
+                    return SoftSpan.bracketed(
+                        begin: wire.boa, placeholder: wire.token,
+                        end: wire.eoa, count: rows.count,
+                        features: rows.flatMap { r in r })
+                }
+        }
+        let mel = Gemma4Mel(Gemma4MelConfig(model.gguf) ?? .processorDefault)
+        let tower = try audioTower()
+        return AudioChunks.split(pcm, rate: Double(mel.cfg.sampleRate),
+                                 maxSeconds: wire.maxSeconds)
+            .map { chunk in
+                let feats = mel.features(Array(pcm[chunk.range]))
+                let got = tower.run(feats.values, feats.frames, mel.cfg.bins)
+                return SoftSpan.bracketed(
+                    begin: wire.boa, placeholder: wire.token, end: wire.eoa,
+                    count: got.count, features: got.proj)
+            }
+    }
+
+    // A video: the vision tower per frame, since there are no video weights.
+    // What differs from a still is the BUDGET (a frame gets
+    // video.max_soft_tokens, far under an image's) and the markup -- each
+    // frame carries its own mm:ss stamp and its own begin/end pair, which is
+    // how the model is told when it happened.
+    public func video(frames: [CGImage], seconds: [Double]) throws -> SoftSpan {
+        let film = try Gemma4VideoWire(model.gguf)
+        let encode = try frameEncoder(film)
+        var strip = try videoStrip(film)
+        var i = 0
+        while i < frames.count, let got = encode(frames[i]) {
+            strip.add(stamp: stamp(seconds[i]), rows: got.proj,
+                      count: got.count)
+            i += 1
+        }
+        if i < frames.count {
+            throw MediaError("Frame \(i) of that video could not be read.")
+        }
+        return try strip.span(bracket: .template)
+    }
+
+    // One frame to its soft rows, with the tower built ONCE: a construction
+    // prewarms a Metal context and a CPU twin, which per frame would dominate
+    // the encode. An encoder-free checkpoint embeds the merged 48-pixel block
+    // itself, so it has no tower to build and cuts at the frame's own budget.
+    private func frameEncoder(_ film: Gemma4VideoWire)
+        throws -> (CGImage) -> (proj: [Float], count: Int)? {
+        let patch = try Gemma4Patchify(model)
+        let budget = patch.patchBudget(film.softTokensPerFrame)
+        let encode: (CGImage) -> (proj: [Float], count: Int)?
+        if model.hasVisionTower {
+            let vit = try visionTower()
+            encode = { frame in
+                patch.patches(frame, budget: budget).map { cut in
+                    let got = vit.run(cut.pixels, cut.pos)
+                    return (got.proj, got.count)
+                }
+            }
+        } else {
+            let media = try Gemma4UnifiedMedia(model)
+            encode = { frame in
+                patch.merged(frame, softTokens: film.softTokensPerFrame)
+                    .map { cut in
+                        let rows = media.image(pixels: cut.pixels,
+                                               pos: cut.pos)
+                        return (rows.flatMap { r in r }, rows.count)
+                    }
+            }
+        }
+        return encode
+    }
+
+    private func videoStrip(_ film: Gemma4VideoWire) throws -> VideoStrip {
+        let iw = try Gemma4VisionWire(model.gguf)
+        return VideoStrip(placeholder: film.token, begin: iw.boi, end: iw.eoi)
+    }
+
+    private func stamp(_ seconds: Double) -> [Int32] {
+        tokenizer.encode(VideoFrames.stamp(seconds) + " ", addSpecial: false)
+    }
+
+    // ---- from a file ----------------------------------------------------
+    // The URL forms own the two numbers a caller would otherwise have to know
+    // and could get wrong silently: the frontend's sample rate, and how many
+    // frames this processor samples from a clip. Both are file metadata.
+
+    public func audio(url: URL) async throws -> [SoftSpan] {
+        let rate = Double((Gemma4MelConfig(model.gguf)
+            ?? .processorDefault).sampleRate)
+        return try audio(await AudioFile.samples(url: url, sampleRate: rate))
+    }
+
+    // The audio track of a video is NOT included here: a caller that wants
+    // both attaches both, which is also what lets it put them in its own
+    // order.
+    // STREAMED, one frame at a time: a frame is decoded at the source
+    // resolution, so a 4K clip is ~33 MB each and holding all 32 is a
+    // gigabyte -- beside a resident 12B on a phone. Encoding as they arrive
+    // keeps ONE alive, and only the soft rows survive the loop.
+    //
+    // `onFrame` sees each frame at the moment it is handed to the model, so a
+    // caller can show what is being looked at. It is called on whatever
+    // context this runs on, never the main actor, and the frame it is given
+    // is released as soon as it returns -- a caller that wants to keep one
+    // takes its own scaled copy.
+    public func video(url: URL, budget: Int,
+                      onFrame: ((CGImage, Double) -> Void)?)
+        async throws -> Attached {
+        let film = try Gemma4VideoWire(model.gguf)
+        let encode = try frameEncoder(film)
+        var strip = try videoStrip(film)
+        var read = 0
+        try await VideoFrames.stream(url: url, count: film.frames) { img, at in
+            if let got = encode(img) {
+                onFrame?(img, at)
+                strip.add(stamp: stamp(at), rows: got.proj, count: got.count)
+                read += 1
+            } else {
+                throw MediaError("Frame \(read) of that video could not be read.")
+            }
+        }
+        return Attached(parts: [.video], spans: [try strip.span(bracket: .template)])
+    }
+
+    // What a microphone must capture at for this model's frontend, so a
+    // caller never has to know which metadata key names it.
+    public var audioSampleRate: Double {
+        Double((Gemma4MelConfig(model.gguf) ?? .processorDefault).sampleRate)
+    }
+
+    // How long a clip may be, so a picker can refuse before the decode.
+    public var maxAudioSeconds: Double {
+        ((try? Gemma4AudioWire(model.gguf))?.maxSeconds) ?? 0
+    }
+
+    // ---- towers ---------------------------------------------------------
+
+    // Either vision tower behind one call, so the frame loop above is written
+    // once. Both expose the identical contract.
+    struct VisionTower {
+        let run: ([Float], [(Int, Int)]) -> (tower: [Float], proj: [Float],
+                                             count: Int)
+    }
+
+    func visionTower() throws -> VisionTower {
+        if vision == nil {
+            if let ctx {
+                let gpu = try Gemma4MetalViT(model, ctx: ctx)
+                vision = VisionTower { pixels, pos in
+                    gpu.forward(pixels: pixels, pos: pos)
+                }
+            } else {
+                let cpu = try Gemma4ViT(model)
+                vision = VisionTower { pixels, pos in
+                    cpu.forward(pixels: pixels, pos: pos)
+                }
+            }
+        }
+        return vision!
+    }
+
+    private func tower(_ pixels: [Float], _ pos: [(Int, Int)])
+        throws -> (tower: [Float], proj: [Float], count: Int) {
+        try visionTower().run(pixels, pos)
+    }
+
+    struct AudioTower {
+        let run: ([Float], Int, Int) -> (tower: [Float], proj: [Float],
+                                         count: Int)
+    }
+
+    func audioTower() throws -> AudioTower {
+        if audio == nil {
+            if let ctx {
+                let gpu = try Gemma4MetalAudio(model, ctx: ctx)
+                audio = AudioTower { mel, frames, bins in
+                    gpu.forward(mel: mel, frames: frames, bins: bins)
+                }
+            } else {
+                let cpu = try Gemma4Audio(model)
+                audio = AudioTower { mel, frames, bins in
+                    cpu.forward(mel: mel, frames: frames, bins: bins)
+                }
+            }
+        }
+        return audio!
+    }
+}

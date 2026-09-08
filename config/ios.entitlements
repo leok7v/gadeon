@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Raise the jetsam limit so the on-device model (and, for a vision turn,
+	     the tower + KV) fits on 4-6GB phones before the OS kills the app. A
+	     freely available entitlement since iOS 15; automatic signing adds the
+	     capability to the profile. -->
+	<key>com.apple.developer.kernel.increased-memory-limit</key>
+	<true/>
+	<!-- Allow a >4GB virtual address space so the mmapped weight blobs + KV +
+	     the transient vision tower can all be mapped at once on the larger
+	     models without hitting the 32-bit-style VA ceiling. Pairs with the
+	     increased-memory-limit above. -->
+	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
+	<true/>
+	<!-- GPU continued-processing capability, declared for a future on-device
+	     GPU (Metal) model (a small Ternary-Bonsai GGUF on iOS). It is NOT yet
+	     used for background computation: iOS aborts a Metal submit made while
+	     backgrounded, so the Metal engine simply PARKS its command-buffer
+	     commits until the app is active again (BackgroundGate). The ANE path
+	     needs none of this and runs unmodified in the background. Restricted
+	     entitlement: the App ID must have the capability enabled for signing to
+	     succeed. -->
+	<key>com.apple.developer.background-tasks.continued-processing.gpu</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,352 @@
+name: Gadeon
+options:
+  bundleIdPrefix: io.github.leok7v
+  # Pin LastUpgradeCheck to the running Xcode (encoded major/minor/patch, e.g.
+  # 26.6.0 -> "2660"). Xcode only runs its "update to recommended settings"
+  # diff when this stamp is older than the IDE, so matching it silences that
+  # prompt at the root -- no need to pre-apply each individual recommended
+  # setting. Bump on an Xcode major upgrade.
+  xcodeVersion: "2660"
+  deploymentTarget:
+    macOS: "15.0"
+    iOS: "18.0"
+# Show config/ (entitlements + xcconfig) in the Xcode navigator; not compiled.
+fileGroups:
+  - config
+settings:
+  base:
+    DEVELOPMENT_TEAM: 692R843P25
+    DEAD_CODE_STRIPPING: YES
+    # Apple Silicon only: Float16 (used throughout the engine) does not
+    # exist on Intel, so any x86_64 compile fails. LLM, MD and Chat are
+    # native static-library targets, NOT external SwiftPM packages, precisely
+    # so they inherit these and every build (Debug/Release/"Any Mac"/archive)
+    # is arm64-only -- an external package ignored them and failed on Float16
+    # in Release. The Mac App Store accepts an Apple-Silicon-only app; the
+    # Metal kernels are written for Apple GPUs and Intel was never a target.
+    EXCLUDED_ARCHS[sdk=macosx*]: x86_64
+    EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
+    # No "Apple Vision (Designed for iPad)" destination -- nothing is
+    # validated on visionOS. Declared project-wide AND on
+    # each target below: declaring iOS support makes xcodegen write YES at the
+    # TARGET level, and a target setting beats a project one, so the
+    # project-wide value alone was silently overridden and Xcode kept showing
+    # the destination (with a warning triangle) after every regenerate.
+    SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
+targets:
+  # The pure-Swift engine (tokenizer + chat template + sampler + the
+  # backend-agnostic ChatSession seam) with per-backend compute under
+  # src/{Base,Qwen,Gemma,Quantize,Slugs,TTS}. A native static-library target
+  # so it inherits every project arch setting -- EXCLUDED_ARCHS reaches it, so
+  # Release and "Any Mac" builds are arm64-only like the app.
+  #
+  # metal/Kernels.metal does NOT live here: a library.static that owns a
+  # .metal file compiles it to a metallib no product links against, so the
+  # kernel builds silently and every dispatch fails at runtime. Kernels.metal
+  # rides with whichever product needs it instead -- see Gadeon and gadeon
+  # below. The five TTS/Slugs data blobs are excluded the same way: a static
+  # library has no bundle, so their resources phase would be just as
+  # orphaned; the app copies them in directly (see the Res seam,
+  # LLM/src/Base/Res.swift).
+  LLM:
+    type: library.static
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - path: LLM/src
+        excludes:
+          - Slugs/minilm.gguf
+          - TTS/kitten_full.gguf
+          - TTS/voices.safetensors
+          - TTS/en_rules
+          - TTS/en_list
+    # Compiler settings set directly, NOT via platform.xcconfig -- that xcconfig
+    # carries app-only settings (the *-iOS/-macOS source split) this library
+    # must not inherit. Versions come from version.xcconfig (YY.MM.DD /
+    # YYMMDD.HHMM date stamps, shared with the app).
+    configFiles:
+      Debug: config/version.xcconfig
+      Release: config/version.xcconfig
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        # Binds cblas_sgemm$NEWLAPACK. Without it Swift binds the LEGACY
+        # cblas_sgemm -- a DIFFERENT entry point, with nothing guaranteeing
+        # the two agree in the last bits at every shape. The reference C the
+        # speech engine is compared against is built with it, so every build
+        # of this library has to carry it too or the two diverge.
+        OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
+      configs:
+        # OPTIMIZED EVEN IN DEBUG. Everything that computes lives here -- the
+        # tensor kernels, both engines, the speech synthesizer -- and -Onone
+        # costs it ~100x: measured 14.55s to synthesize 0.575s of audio in a
+        # Debug app against 0.198s through the Release CLI, and main-thread
+        # stalls of 33-86s that read exactly like real bugs. Swift has no
+        # per-file pragma, so the optimization level is set where the compute
+        # is: LLM at -O, the App target left -Onone and debuggable.
+        #
+        # The cost is that stepping into LLM is unreliable in Debug. That is
+        # the right trade: this override applies whichever scheme config
+        # pulls LLM in, so LLMTests and the gadeon tool measure the real perf
+        # even when run at Debug.
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+  # Markdown transcript rendering: no arch-sensitive code (no Float16), but a
+  # native static-library target like LLM and Chat all the same, so the whole
+  # app builds from one project description instead of three.
+  MD:
+    type: library.static
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - path: MD/src
+        excludes:
+          - Resources/highlights.ini
+          - Resources/STIXTwoMath.otf
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+  # The session driver: model load/switch, the ChatSession lifecycle, one
+  # turn's run, and conversation persistence. No SwiftUI -- the app's
+  # ChatModel is the view model that owns the transcript and drives this.
+  Chat:
+    type: library.static
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - Chat
+    configFiles:
+      Debug: config/platform.xcconfig
+      Release: config/platform.xcconfig
+    dependencies:
+      - target: LLM
+      - target: MD
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+      configs:
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+  # The single app target: Hub-download-only. The bundled-model and
+  # device-CPU bring-up targets are gone -- the gadeon tool and a HF
+  # round-trip cover local emit work -- so the app ships no weights.
+  Gadeon:
+    type: application
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - path: App
+        excludes:
+          - tests
+      # IQTables/IQKernels are #included by Kernels.metal; compiled on their
+      # own they see no codebook and fail. Kernels.metal lives on the APP
+      # target (not LLM) so it lands in a product Metal actually loads from
+      # -- see the LLM target comment above.
+      - path: LLM/metal
+        excludes:
+          - IQTables.metal
+          - IQKernels.metal
+          - AssistKernels.metal
+      # LLM's data blobs, excluded from the LLM target itself, copied in here
+      # instead so they end up inside Gadeon.app. The pronunciation data
+      # carries no file extension, which leaves xcodegen unable to infer a
+      # build phase for it: naming the phase is what puts it in the bundle.
+      - path: LLM/src/Slugs/minilm.gguf
+        buildPhase: resources
+      - path: LLM/src/TTS/kitten_full.gguf
+        buildPhase: resources
+      - path: LLM/src/TTS/voices.safetensors
+        buildPhase: resources
+      - path: LLM/src/TTS/en_rules
+        buildPhase: resources
+      - path: LLM/src/TTS/en_list
+        buildPhase: resources
+      - path: MD/src/Resources/highlights.ini
+        buildPhase: resources
+      - path: MD/src/Resources/STIXTwoMath.otf
+        buildPhase: resources
+    dependencies:
+      - target: Chat
+      - target: LLM
+      - target: MD
+    configFiles:
+      Debug: config/platform.xcconfig
+      Release: config/platform.xcconfig
+    settings:
+      base:
+        # The bundle id is the container identity: model store, defaults,
+        # precook cache all hang off it, so changing it factory-resets
+        # every install (macOS models move by hand between containers).
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.leok7v.gadeon
+        INFOPLIST_KEY_CFBundleDisplayName: Gadeon
+        GENERATE_INFOPLIST_FILE: YES
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        # A clone builds and runs on any Mac without the team.
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
+        # Entitlements set at the TARGET level (not the xcconfig) so Xcode's
+        # Signing & Capabilities tab actually shows them. Split by SDK: macOS
+        # gets the App Sandbox set (network client + user-selected files); iOS
+        # gets the memory entitlements (increased-memory-limit +
+        # extended-virtual-addressing). iOS needs no sandbox keys -- it is not
+        # App-Sandboxed: network is open and the document/photo pickers grant
+        # file access out-of-process.
+        CODE_SIGN_ENTITLEMENTS[sdk=macosx*]: config/macos.entitlements
+        CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]: config/ios.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Mac App Store validation rejects an archive without a category.
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        # Export compliance, declared once here so App Store Connect stops
+        # asking on every upload. The only cryptography in the app is hashing
+        # (CryptoKit SHA256 / SHA1 verifying downloads and stamping the
+        # precook cache) over HTTPS that URLSession provides, all exempt --
+        # nothing encrypts, so the answer is a standing NO.
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        # Dictation. macOS kills a process that touches the microphone with
+        # no usage string rather than prompting for it, so this is what makes
+        # the mic button work at all rather than a nicety.
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: Gadeon listens only after you tap the microphone button, until you pause, and what you say is heard on this device.
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        # iPhone stays portrait-only (a chat composer on a narrow landscape
+        # strip is useless, and the per-idiom restriction remains supported).
+        # iPad allows every orientation: iPadOS's windowing makes the app a
+        # resizable window, ignores UIRequiresFullScreen, and requires all
+        # orientations -- the adaptive layout handles any shape anyway.
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+  # macOS command-line harness for driving and testing LLM without the UI
+  # (chat replay, divergence/perplexity probes, TTS, puzzles). Carries its
+  # own copy of the metal kernels for the same reason Gadeon does -- a
+  # library.static target cannot own a .metal file and ship a metallib
+  # anyone loads.
+  gadeon:
+    type: tool
+    supportedDestinations: [macOS]
+    sources:
+      - path: LLM/cli
+        excludes:
+          - Info.plist
+      - path: LLM/metal
+        excludes:
+          - IQTables.metal
+          - IQKernels.metal
+          - AssistKernels.metal
+    dependencies:
+      - target: LLM
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        OTHER_SWIFT_FLAGS: -Xcc -DACCELERATE_NEW_LAPACK
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY[sdk=macosx*]: "-"
+        # Embeds an Info.plist so NSBundle.mainBundle.bundleIdentifier is set
+        # (else it falls back to the executable name). Gives the tool its own
+        # cache dir at ~/Library/Caches/io.github.leok7v.gadeon.cli/ for the
+        # diag log and the precook files.
+        INFOPLIST_FILE: LLM/cli/Info.plist
+      configs:
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+# Explicit scheme so `xcodebuild -scheme Gadeon` works and survives regenerate.
+# Run on Release too (not just archive) -- the target-level EXCLUDED_ARCHS
+# reaches Release / "Any Mac" the same as Debug, and it is the config we run
+# on device.
+  GadeonTests:
+    type: bundle.unit-test
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - App/tests
+    dependencies:
+      - target: Gadeon
+      - target: Chat
+      - target: LLM
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST[sdk=macosx*]: $(BUILT_PRODUCTS_DIR)/Gadeon.app/Contents/MacOS/Gadeon
+        TEST_HOST[sdk=iphoneos*]: $(BUILT_PRODUCTS_DIR)/Gadeon.app/Gadeon
+        TEST_HOST[sdk=iphonesimulator*]: $(BUILT_PRODUCTS_DIR)/Gadeon.app/Gadeon
+        BUNDLE_LOADER: $(TEST_HOST)
+  # UNHOSTED (no TEST_HOST): hosting inside Gadeon.app inherits its App
+  # Sandbox (config/macos.entitlements), which cannot read ~/Models or
+  # ~/huggingface.co -- every weight-gated test would then SKIP SILENTLY
+  # and the run would look green. See [[one-build-description]].
+  LLMTests:
+    type: bundle.unit-test
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - LLM/tests
+      # The Metal kernel tests need a default.metallib of their own -- see
+      # the LLM target comment; the same trap applies to a test bundle.
+      - path: LLM/metal
+        excludes:
+          - IQTables.metal
+          - IQKernels.metal
+          - AssistKernels.metal
+    dependencies:
+      - target: LLM
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GENERATE_INFOPLIST_FILE: YES
+  # UNHOSTED for the same reason as LLMTests.
+  MDTests:
+    type: bundle.unit-test
+    supportedDestinations: [macOS, iOS]
+    sources:
+      - MD/tests
+    dependencies:
+      - target: MD
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Gadeon:
+    build:
+      targets:
+        Gadeon: all
+        GadeonTests: [test]
+        LLMTests: [test]
+        MDTests: [test]
+    test:
+      config: Debug
+      targets:
+        - GadeonTests
+        - LLMTests
+        - MDTests
+    run:
+      config: Release
+      # All DECLARED but UNCHECKED (isEnabled/value: false), so they survive a
+      # regenerate as ready toggles without firing. OS_ACTIVITY_MODE=disable
+      # silences the Xcode/ViewBridge log firehose but ALSO suppresses our own
+      # os_log entirely (only the report() stderr line survives) -- leave it
+      # off so os_log reaches Console.app; re-check it if the firehose is too
+      # noisy.
+      #
+      # The three flags below are the diagnostic channels (App/DiagGates.swift,
+      # LLM/src/Base/Flags.swift). [mem] watch and [beat] are 91% of a
+      # captured log's lines, so they are off unless asked for; [hang] is on
+      # and this box SILENCES it. Every one points the same way: checking it
+      # does what its name says.
+      environmentVariables:
+        - variable: OS_ACTIVITY_MODE
+          value: disable
+          isEnabled: false
+      commandLineArguments:
+        "--log-memory": false
+        "--log-beat": false
+        "--no-log-hang": false
+    archive:
+      config: Release

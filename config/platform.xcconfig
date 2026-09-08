@@ -1,0 +1,22 @@
+// Date-stamp versions (YY.MM.DD marketing, YYMMDD.HHMM build), refreshed by
+// the Stamp Version build phase.
+#include "version.xcconfig"
+
+// No `#if os()` in Swift source: compile each platform's file only for its own SDK,
+// with parallel files declaring identical symbol names (Platform-iOS.swift /
+// Platform-macOS.swift, App-iOS.swift / App-macOS.swift). The Xcode app target
+// includes this xcconfig.
+EXCLUDED_SOURCE_FILE_NAMES[sdk=iphoneos*]        = *-macOS.swift
+EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*] = *-macOS.swift
+EXCLUDED_SOURCE_FILE_NAMES[sdk=macosx*]          = *-iOS.swift
+
+IPHONEOS_DEPLOYMENT_TARGET = 18.0
+MACOSX_DEPLOYMENT_TARGET = 15.0
+SWIFT_VERSION = 6.0
+SWIFT_STRICT_CONCURRENCY = complete
+SWIFT_TREAT_WARNINGS_AS_ERRORS = YES
+
+// CODE_SIGN_ENTITLEMENTS moved to the target settings in project.yml so Xcode's
+// Signing & Capabilities tab shows the entitlements (an xcconfig-set value is
+// applied at build but invisible in that UI). macOS = App Sandbox set; iOS =
+// the memory entitlements.
