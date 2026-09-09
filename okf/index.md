@@ -20,9 +20,10 @@ path was taken and the invariants behind them are not here.
 |---|---|
 | `File` | what one source file is for, and where it stops |
 
-Cross-references between entries are bracketed. A bare backticked name is a
-concept that stayed in the working repo and did not travel. Fork this and go
-your own way; nothing here asks you to reproduce our reasoning.
+Cross-references between entries are bracketed. A pointer at a concept that
+stayed in the working repo is removed rather than left dangling, along with
+the clause carrying it, so nothing here names a document you cannot open.
+Fork this and go your own way; nothing asks you to reproduce our reasoning.
 
 ## Directories
 

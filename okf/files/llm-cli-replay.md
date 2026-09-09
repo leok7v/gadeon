@@ -9,8 +9,8 @@ tags: [orientation]
 timestamp: 2026-08-29T20:30:00Z
 ---
 
-`--replay-make` renders prompts through the chat template, generates greedily
-and freezes prompt+reply token ids with the index where the reply starts.
-`--replay` teacher-forces any model over those exact ids, scoring only from
-that index, and reuses the top-64 dump format so KL, top1/top5 and tau come
-out unchanged. See `wikitext-cannot-score-an-rl-tuned-gemma`.
+`--replay-make` renders prompts through the chat template, generates
+greedily and freezes prompt+reply token ids with the index where the reply
+starts. `--replay` teacher-forces any model over those exact ids, scoring
+only from that index, and reuses the top-64 dump format so KL, top1/top5 and
+tau come out unchanged.

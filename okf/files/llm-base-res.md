@@ -8,5 +8,4 @@ tags: [orientation]
 timestamp: 2026-09-03T00:10:24Z
 ---
 
-See `one-build-description` for why this exists (a static library has
-no `Bundle.module`) and the three-step resolution order.
+module`) and the three-step resolution order.

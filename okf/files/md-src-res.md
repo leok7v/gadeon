@@ -9,5 +9,4 @@ tags: [orientation]
 timestamp: 2026-09-03T00:10:24Z
 ---
 
-See `one-build-description` for why this exists and the three-step
-resolution order.
+

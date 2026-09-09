@@ -16,4 +16,4 @@ the delta and a selection outside the edit survives.
 
 The prefix comparison is ATTRIBUTE aware on purpose: closing a markdown span
 changes attributes on characters already emitted, so a string-only diff
-leaves them stale. See `md-single-surface-transcript`.
+leaves them stale.

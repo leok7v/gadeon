@@ -15,5 +15,3 @@ declares, drives the tool rounds, and parks and restores state.
 
 It stops at the backend protocol. No model, no KV layout and no Metal call
 is visible here.
-See `continuation-append-render`, `agentic-tool-loop-landed` and
-`never-reprefill`.

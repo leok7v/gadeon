@@ -21,4 +21,4 @@ that the tuning never touched -- 21 minutes at 4B, 40 at 9B, 2.4 hours at
 call with the nextn block's prefixes: tensors `blk.` (which the `!present`
 guard narrows to the block the base lacks) and keys `qwen35.block_count` +
 `qwen35.nextn_predict_layers`, which must move TOGETHER. It adds MTP to a
-third-party file that shipped without it. See `drafter-graft-from-one-shard`.
+third-party file that shipped without it.

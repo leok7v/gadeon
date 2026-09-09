@@ -14,10 +14,10 @@ encoded onto a caller's command buffer. It folds a token embedding onto the
 base hidden that predicted it and leaves h_nextn for the tied lm_head, so a
 draft costs one layer rather than the whole stack. The block is blk.<nLayer>
 of the SAME weight file, which is why self-speculation here needs no second
-model. See `mtp-on-metal`.
+model.
 
 The pool has an `origin`, the absolute position of its row 0, and `end` is
-the next position it lacks; the engine cycles only when `end` equals its
-own position. `encodeSeed` writes a prefill chunk's rows and `encodeRow` one
+the next position it lacks; the engine cycles only when `end` equals its own
+position. `encodeSeed` writes a prefill chunk's rows and `encodeRow` one
 token's, both K and V only, since this single layer's K and V depend on
-nothing but the row's input. See `the-drafter-reads-the-prompt`.
+nothing but the row's input.

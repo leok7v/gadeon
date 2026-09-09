@@ -12,4 +12,3 @@ The same energy and adaptive-floor detector AudioChunks uses on a finished
 file, turned around: there it marks pauses to cut at and keeps everything,
 here it marks speech to keep and the silence never reaches the tower. The
 margin is asymmetric because a symmetric one eats word-final consonants.
-See `audio-chunking-and-vad`.

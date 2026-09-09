@@ -18,4 +18,4 @@ tower. `supportsVision` is the tower gate itself, which the Qwen adapter
 also answers `supportsSoftTokens` with.
 
 Its serializeState default is a silent no-op and a backend that inherits it
-re-prefills forever. See `never-reprefill`.
+re-prefills forever.

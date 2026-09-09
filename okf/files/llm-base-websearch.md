@@ -14,4 +14,3 @@ list is gated on. `WebSearch` normalizes either provider into `SearchHit`
 and renders one format, so the wire the model learns never depends on which
 answered. `ParallelSearch` is a small MCP client over their HTTP endpoint,
 holding the handshake and the advertised tool schema for the process.
-See `web-search-has-two-providers`.

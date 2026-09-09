@@ -11,7 +11,6 @@ timestamp: 2026-08-10T00:10:24Z
 The same layer stack as the CPU engine, token by token, threading per-layer
 state in resident buffers. All kernels for one token ride one command buffer
 and only the logits are read back. The CPU engine is the oracle.
-See `metal-perf-ceilings` and `metal-longcontext-attention`.
 
 A `Bookmark` copies the GDN recurrence whole, which cannot be paged, and
 shares the attention KV as append-only page snapshots, so only a partial

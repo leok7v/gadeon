@@ -14,9 +14,8 @@ Non-overlapping chunks, scoring only the second half of each so every scored
 token has context, which is llama.cpp's protocol and makes the numbers
 comparable to published ones.
 
-The chunk runs through `QwenMetalEngine.chunkCost` -- one batched forward with the
-head suppressed, then the lm_head swept over the scored half. `--ppl-serial`
-takes the token-by-token `QwenMetalEngine.step` instead, which is the reference the
-batched path is gated against. The corpus must be HELD OUT: scoring on the
-Hessian calibration text measures nothing.
-See `perplexity-is-the-missing-instrument`.
+The chunk runs through `QwenMetalEngine.chunkCost` -- one batched forward
+with the head suppressed, then the lm_head swept over the scored half.
+`--ppl-serial` takes the token-by-token `QwenMetalEngine.step` instead,
+which is the reference the batched path is gated against. The corpus must be
+HELD OUT: scoring on the Hessian calibration text measures nothing.

@@ -9,4 +9,4 @@ timestamp: 2026-08-10T00:10:24Z
 ---
 
 It predates Find living in the transcript's own bubbles and is no longer
-reached from the chat. See `md-single-surface-transcript`.
+reached from the chat.

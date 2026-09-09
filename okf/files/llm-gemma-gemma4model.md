@@ -11,7 +11,7 @@ timestamp: 2026-08-10T00:10:24Z
 Every scalar comes from a metadata key and every width from a tensor shape,
 so a re-emit with different dimensions loads unchanged. It is its own type
 rather than a variant of the ternary config, because the key set genuinely
-differs. See `gemma4-port`.
+differs.
 
 `GemmaChat` is the public door: engine, tokenizer and chat template out of
 the one file, the counterpart of `QwenChat` and `QwenMetalChat`.

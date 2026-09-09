@@ -10,7 +10,7 @@ timestamp: 2026-08-25T12:10:00Z
 ---
 
 Both are read-only decoders into f32, used by `Safetensors.tensor`. They
-lived in `Q2E8.swift` until the Q2_E8 removal
-(`aneq-archive`) and were the only part of that file with a
-live caller: the drafter graft reads safetensors, and an origin checkpoint
-is bf16 or fp8. FP8's 256-entry e4m3 table is built once and shared.
+lived in `Q2E8.swift` until the Q2_E8 removal and were the only part of that
+file with a live caller: the drafter graft reads safetensors, and an origin
+checkpoint is bf16 or fp8. FP8's 256-entry e4m3 table is built once and
+shared.

@@ -13,4 +13,3 @@ It sits on the composer's bottom edge at a fixed height, so the card growing
 as someone types never resizes it. A new frame flips one state value and the
 cross-fade is an opacity, which is about 32 state changes for the whole show
 rather than a redraw every display refresh.
-See `voice-turn-and-render-stalls` for why that distinction is load bearing.

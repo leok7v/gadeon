@@ -19,9 +19,9 @@ validated byte-for-byte against a full re-convert of the same weights, 1.7 s
 against 21 minutes. It stops at reading raw KV bytes and copying tensor
 payloads; it never inspects or rewrites a tensor.
 
-The two prefix lists are PARAMETERS defaulting to the tower's
-(`["v.", "mm."]` / `["clip."]`), so the same body grafts the nextn drafter
-(`drafter-graft-from-one-shard`). Tensors are add-only -- a name the base
-already has is never taken, which is what stops a donor's `output.weight`
-from landing twice -- while a listed KEY the base already has is REPLACED by
-the donor's, because the donor is the authority on the subsystem it supplies.
+The two prefix lists are PARAMETERS defaulting to the tower's (`["v.",
+"mm."]` / `["clip."]`), so the same body grafts the nextn drafter. Tensors
+are add-only -- a name the base already has is never taken, which is what
+stops a donor's `output.weight` from landing twice -- while a listed KEY the
+base already has is REPLACED by the donor's, because the donor is the
+authority on the subsystem it supplies.

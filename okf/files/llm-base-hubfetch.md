@@ -16,10 +16,10 @@ byte, because pulling file by file from a branch can straddle a push and mix
 two commits into a set that loads cleanly and generates garbage.
 
 Files download IN PLACE at their final `{sha}/` paths: each blob streams to
-a part file in ranged lanes, is digest-checked against the tree's oid (sha256
-for LFS, the git blob sha1 otherwise), and only then moves atomically to its
-destination, so a landed file is always whole and verified. An interrupted
-download resumes: survivors that re-verify are kept and only the rest
-re-download. Completeness is the `.complete` sentinel, never file presence;
-`ModelCatalog.isComplete` gates on it, so a partial tree is never a set.
-See `hf-xet-breaks-hubfetch`.
+a part file in ranged lanes, is digest-checked against the tree's oid
+(sha256 for LFS, the git blob sha1 otherwise), and only then moves
+atomically to its destination, so a landed file is always whole and
+verified. An interrupted download resumes: survivors that re-verify are kept
+and only the rest re-download. Completeness is the `.complete` sentinel,
+never file presence; `ModelCatalog.isComplete` gates on it, so a partial
+tree is never a set.

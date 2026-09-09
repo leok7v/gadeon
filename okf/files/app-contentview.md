@@ -17,5 +17,3 @@ The drawer is 300 pt scaled by the text zoom, except on an iPad in the
 regular width class, where it takes half the window if that is more.
 
 It stops at state. Everything it reads and writes belongs to ChatModel.
-See `feedback-host-views-in-content`, `toolcall-strip-landed` and
-`thinking-ticker-static-tail`.

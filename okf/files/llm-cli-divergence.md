@@ -21,5 +21,4 @@ vocabulary at every scored position is 36G comparisons per run. And the
 divergence is read on the TEACHER's top-64, so the student is never asked
 which tokens it would have ranked instead -- the tail is one lumped bucket
 and the covered mass is reported beside the number so the approximation
-stays visible. See
-`perplexity-is-deterministic-and-corpus-bound`.
+stays visible.

@@ -16,6 +16,4 @@ order come from the base.
 
 Its reason to exist is attribution: with one Q2_E8 emit and one BF16 emit in
 hand, "what does quantizing ffn_down alone cost" is a 30-second splice
-rather than another convert. See
-`perplexity-is-deterministic-and-corpus-bound` for why one scoring run per
-arm is enough.
+rather than another convert.

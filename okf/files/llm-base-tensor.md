@@ -11,7 +11,7 @@ timestamp: 2026-08-10T00:10:24Z
 Transliterated from the C the speech model was ported from: same declaration
 order, same names, same arithmetic in the same sequence, and strides in
 BYTES as in the C. Only the float data comes from the arena, so an arena
-reset still invalidates it. See `tts-in-llm`.
+reset still invalidates it.
 
 Several ops here have hand-rolled counterparts elsewhere: `tensorIm2col`
 against `QwenViT`'s patch layout, the permute/reshape pair against

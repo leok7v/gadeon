@@ -22,5 +22,4 @@ soft-token budget an `img:PATH` turn spends on its picture. The offline modes (`
 `--assist*`, `--splice`, `--replay*`, `--kld`, `--puzzle-*`) run first
 and exit.
 
-Fixture defaults resolve from the REPO ROOT, not from the package
-directory. See `cli-runs-from-repo-root`.
+Fixture defaults resolve from the REPO ROOT, not from the package directory.

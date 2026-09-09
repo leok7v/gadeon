@@ -17,7 +17,5 @@ exists so the GPU kernel has a CPU oracle rather than only itself.
 
 `QB` dispatches on the tensor's type and `GQ` covers the gemma block types.
 A type missing from `QB` falls through to `GQ.gather`, which decodes an
-unknown type AS BF16 rather than refusing -- so a new type must be added here,
-not left to the default.
-See `aneq-archive` for what this costs on the other engine,
-and `aneq-archive` for the codebook itself.
+unknown type AS BF16 rather than refusing -- so a new type must be added
+here, not left to the default.

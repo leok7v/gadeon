@@ -12,10 +12,9 @@ timestamp: 2026-09-05T07:00:00Z
 extend, decode, bookmark and restore, the parked-bytes codec, and the
 optional stop, queue and spec counters, defaulted for a plain engine) and
 `Tokenizing` what a tokenizer must. `EngineBackend<E, T>` is every seam
-method the four lineage adapters used to spell by hand: the stop-to-throw
-on extend, mark and rewind, the state, checkpoint and turn structs, the
-bytes codec. A lineage subclass keeps only what differs: soft tokens,
-vision, the matrix-units gate. `loadState` takes either the adapter's own
-`State` or the engine's parked type, which for an engine without a
-separate parked form is its bookmark.
-See `llm-src-is-base-qwen-gemma`.
+method the four lineage adapters used to spell by hand: the stop-to-throw on
+extend, mark and rewind, the state, checkpoint and turn structs, the bytes
+codec. A lineage subclass keeps only what differs: soft tokens, vision, the
+matrix-units gate. `loadState` takes either the adapter's own `State` or the
+engine's parked type, which for an engine without a separate parked form is
+its bookmark.

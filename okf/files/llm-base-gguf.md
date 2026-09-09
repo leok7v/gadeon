@@ -12,5 +12,4 @@ Header, KV metadata and the tensor directory, exposing each tensor's dims,
 ggml type and base pointer into the mapped region. It reads and never writes.
 
 The descriptor and the pages are a separate object on purpose, so that a
-parse which throws still frees them. See `a-throwing-init-runs-no-deinit`
-and `bonsai-gguf-arch`.
+parse which throws still frees them.

@@ -9,4 +9,4 @@ timestamp: 2026-09-05T12:00:00Z
 ---
 
 Soft span expansion and the runaway loop breaker, offline testable with no
-backend touched. See `continuation-append-render`.
+backend touched.

@@ -9,5 +9,5 @@ timestamp: 2026-08-10T00:10:24Z
 ---
 
 Code, table and image runs carry atomic attributes so selection snaps around
-them instead of cutting through. Table construction is per platform and lives
-in the twins beside it. See `md-single-surface-transcript`.
+them instead of cutting through. Table construction is per platform and
+lives in the twins beside it.

@@ -19,5 +19,3 @@ Pages are half precision. Decode cost is linear in cached positions, so past
 a few hundred tokens the KV read is most of what a token moves, and on the
 dense 1.7B the pages (~112 MB per 512 positions at f32) were what bounded
 context on a 3 GB phone; llama.cpp defaults to f16 KV as well.
-See `metal-longcontext-attention` for why windowing this storage is a
-regression rather than a saving.

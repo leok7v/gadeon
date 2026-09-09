@@ -22,9 +22,7 @@ that forgot.
 
 Lives in the library rather than in `LLM/cli/` only because that is what
 makes it testable, the same reason `PuzzleGate` is here.
-See `six-parsers-over-one-argv`.
 
-A name the `Flags` registry also owns (`--spec-n`, `--seed`) is never
-parsed here twice: `consume(_:hasValue:)` only reserves the token so it
-does not leak into `turns`, and the value itself comes from `Flags`. See
-`a-knob-is-a-flag-not-a-variable`.
+A name the `Flags` registry also owns (`--spec-n`, `--seed`) is never parsed
+here twice: `consume(_:hasValue:)` only reserves the token so it does not
+leak into `turns`, and the value itself comes from `Flags`.

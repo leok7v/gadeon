@@ -15,4 +15,3 @@ winners are then ordered by first appearance so the result reads as a phrase
 rather than a ranking, and title-cased.
 
 Falls to a locale-short timestamp, never to a truncated prompt.
-See `a-closed-empty-think-block-makes-gemma-narrate`.

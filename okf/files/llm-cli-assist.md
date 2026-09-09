@@ -15,4 +15,4 @@ prompt measures degenerate text.
 
 `--assist-bench --sampler` installs the file's own preset, one fresh sampler
 per arm so both draw the same RNG stream. Without it the bench measures a
-path the app never runs (`spec-decode-is-exact-under-sampling`).
+path the app never runs.

@@ -12,4 +12,3 @@ One entry point: a URL in, Markdown out, with an optional per-page progress
 callback. It fixes the converter's mode and hides every other knob.
 
 It stops at adaptation, because the vendored file must stay byte-identical.
-See `pdf-text-layer-before-ocr`.

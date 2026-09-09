@@ -12,4 +12,4 @@ A tower has a hard ceiling, so a long clip must be split whatever happens;
 splitting on a timer cuts words in half, and splitting on silences the
 speaker already left costs nothing. The floor is a low percentile of the
 clip's own frame energies, because a fixed dB threshold is wrong in both a
-quiet room and a noisy one. See `audio-chunking-and-vad`.
+quiet room and a noisy one.

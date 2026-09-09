@@ -16,6 +16,4 @@ where the bytes are later compared.
 Deliberately not used everywhere. A saved conversation
 (`App/ConversationStore.swift`) keeps the plain encoder: nothing compares
 those files, they are rewritten constantly, and key order is invisible to
-the only reader they have. See
-`a-parked-kv-was-copied-four-times-before-a-page-was-written` for the hour
-this cost.
+the only reader they have.

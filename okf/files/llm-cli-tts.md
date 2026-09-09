@@ -8,6 +8,5 @@ tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---
 
-It writes the same 24 kHz mono PCM WAV the reference binary does, because the
-acceptance test for the speech engine is a byte comparison against it.
-See `tts-in-llm`.
+It writes the same 24 kHz mono PCM WAV the reference binary does, because
+the acceptance test for the speech engine is a byte comparison against it.

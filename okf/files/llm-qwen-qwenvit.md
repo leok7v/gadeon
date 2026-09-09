@@ -14,7 +14,7 @@ an image resized to: the learned position table is resampled to the grid,
 and the merge order and rope tables are built per grid. Every geometry
 number comes from metadata or a tensor shape; the square path is gated byte
 for byte against a numpy reference and the GPU tower is gated against this
-one on a rectangle. See `one-media-seam-over-every-model`.
+one on a rectangle.
 
 The merge order, rope tables, im2col and position resampling are STATIC so
 `QwenMetalViT` builds its buffers from the same code; the two engines
