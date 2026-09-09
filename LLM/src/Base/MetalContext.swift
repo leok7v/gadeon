@@ -184,13 +184,9 @@ public final class MetalContext {
                          local: off - UInt64(windows[i].start))
     }
 
-    // The kernels written against simdgroup_float8x8 / simdgroup_half8x8.
-    // Listed here because it is a property of the MSL, not of any one caller.
-    static let matrixKernels: Set<String> = [
-        "q2_0_gemm_mm_h", "q4_0_gemm_mm_h", "q8_0_gemm_mm_h",
-        "iq4_nl_gemm_mm_h", "iq_gemm_mm_h",
-        "f16w_gemm_mm", "attn_batch_mm",
-    ]
+    static func needsMatrixUnits(_ name: String) -> Bool {
+        name.hasSuffix("_mm") || name.hasSuffix("_mm_h")
+    }
 
     // Build every pipeline this GPU can, before any encoding starts. After
     // this `pipeline` is a dictionary hit that cannot fail, which is what
@@ -203,10 +199,17 @@ public final class MetalContext {
     // building one does not return an error, it takes the compiler service
     // down with it.
     func prewarm() throws {
+        let t0 = Date()
+        let all = library.functionNames.count
+        var built = 0
         for name in library.functionNames
-        where matrixUnits || !MetalContext.matrixKernels.contains(name) {
+        where matrixUnits || !MetalContext.needsMatrixUnits(name) {
             _ = try pipeline(name)
+            built += 1
         }
+        Diag.shared.report(.perf, String(
+            format: "[metal] prewarm %d of %d pipelines in %.2fs",
+            built, all, Date().timeIntervalSince(t0)))
     }
 
     // A cached compute pipeline for a named kernel.
