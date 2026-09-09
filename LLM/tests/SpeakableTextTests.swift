@@ -89,6 +89,59 @@ private func spokenByCharacter(_ text: String) -> [String] {
                 == ["Starting with one thousand units."])
     }
 
+    @Test func aDecimalPointAtAChunkBoundaryIsNotASentenceEnd() {
+        let text = "So, you need 227.5 grams of butter.\n"
+        #expect(spokenByCharacter(text)
+                == ["So, you need two hundred twenty-seven point five "
+                    + "grams of butter."])
+        #expect(spokenByCharacter(text) == spoken(text))
+    }
+
+    @Test func aGroupedThousandSurvivesAChunkBoundary() {
+        let text = "The total is 1,558 tokens.\n"
+        #expect(spokenByCharacter(text)
+                == ["The total is one thousand five hundred fifty-eight "
+                    + "tokens."])
+        #expect(spokenByCharacter(text) == spoken(text))
+    }
+
+    @Test func aDecimalIsWholeHoweverItIsChunked() {
+        let text = "Pi is 3.14 exactly.\n"
+        #expect(spokenByCharacter(text) == spoken(text))
+    }
+
+    @Test func displayMathIsDescribedNotRead() {
+        let out = spoken("""
+        To find out how many grams of butter you need:
+
+        $$
+        \\text{Butter weight} = \\text{Flour weight} \\times 0.65
+        $$
+
+        So, you need 227.5 grams of butter.
+        """)
+        #expect(out == ["To find out how many grams of butter you need:",
+                        "An equation.",
+                        "So, you need two hundred twenty-seven point five "
+                            + "grams of butter."])
+    }
+
+    @Test func aOneLineDisplayIsDescribedToo() {
+        let out = spoken("Before.\n\n$$ x = 1 $$\n\nAfter.\n")
+        #expect(out == ["Before.", "An equation.", "After."])
+    }
+
+    @Test func anUnclosedDisplayIsStillDescribed() {
+        let out = spoken("Look:\n\n$$\n\\frac{a}{b}\n")
+        #expect(out == ["Look:", "An equation."])
+    }
+
+    @Test func displayMathSurvivesCharacterChunking() {
+        let text = "Given:\n\n$$\n\\text{a} \\times 2\n$$\n\nDone.\n"
+        #expect(spokenByCharacter(text) == spoken(text))
+        #expect(spoken(text) == ["Given:", "An equation.", "Done."])
+    }
+
     @Test func codeBlocksAreDescribedNotRead() {
         let out = spoken("""
         Here it is:

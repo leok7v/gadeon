@@ -605,6 +605,112 @@ Q40_NB_KERNEL(q4_0_gemm_nb_r3, 3, 4)
 Q40_NB_KERNEL(q4_0_gemm_nb_r4, 4, 4)
 Q40_NB_KERNEL(q4_0_gemm_nb_r5, 5, 4)
 
+// The ternary narrow batch. One weight read serves R1 columns, which is the
+// whole point: prefill without matrix units is otherwise one full stream of
+// the weights per token. A 2-bit code decodes to {-1, 0, 1, 2} through the
+// same lo + 2*hi - sy identity the gemv uses, and a column stages one quarter
+// of a block at a time so R1 columns never hold 128 activations in registers.
+template<ushort R1, ushort NR0>
+void q2_0_gemm_nb_impl(
+        device const uchar * weights,
+        device const float * X,
+        device       float * out,
+        constant GemvArgs  & a,
+        uint3  tgpig,
+        ushort tiisg) {
+    const ushort NX = 8;
+    const ushort NY = 32 / NX;
+    const ushort tx = tiisg % NX;
+    const ushort ty = tiisg / NX;
+    const uint row0 = (tgpig.x * NY + ty) * NR0;
+    const uint nblk = a.K / 128;
+    const ulong rowBytes = (ulong) nblk * 34;
+    device const uchar * W = weights + a.woff;
+    float acc[NR0 * R1];
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < NR0 * R1; i++) { acc[i] = 0.0f; }
+    for (uint ib = tx; ib < nblk; ib += NX) {
+        float dd[NR0];
+        device const uchar * qs[NR0];
+        // A row past M reads row M-1 with a zero scale, never out of bounds.
+        #pragma clang loop unroll(full)
+        for (ushort r = 0; r < NR0; r++) {
+            device const uchar * bp = W
+                + min(row0 + r, a.M - 1) * rowBytes + (ulong) ib * 34;
+            dd[r] = (row0 + r < a.M)
+                ? (float) (*(device const half *) bp) : 0.0f;
+            qs[r] = bp + 2;
+        }
+        float sy[R1];
+        #pragma clang loop unroll(full)
+        for (ushort c = 0; c < R1; c++) { sy[c] = 0.0f; }
+        for (ushort g = 0; g < 32; g++) {
+            float4 yv[R1];
+            #pragma clang loop unroll(full)
+            for (ushort c = 0; c < R1; c++) {
+                device const float4 * y = (device const float4 *)
+                    (X + (ulong) c * a.K + (ulong) ib * 128);
+                yv[c] = y[g];
+                sy[c] += yv[c].x + yv[c].y + yv[c].z + yv[c].w;
+            }
+            #pragma clang loop unroll(full)
+            for (ushort r = 0; r < NR0; r++) {
+                const uchar b = qs[r][g];
+                float4 lo, hi;
+                #pragma clang loop unroll(full)
+                for (ushort i = 0; i < 4; i++) {
+                    const uchar code = (b >> (i * 2)) & 3;
+                    lo[i] = (code & 1) ? 1.0f : 0.0f;
+                    hi[i] = (code & 2) ? 1.0f : 0.0f;
+                }
+                #pragma clang loop unroll(full)
+                for (ushort c = 0; c < R1; c++) {
+                    acc[r * R1 + c] += dd[r]
+                        * (dot(lo, yv[c]) + 2.0f * dot(hi, yv[c]));
+                }
+            }
+        }
+        #pragma clang loop unroll(full)
+        for (ushort r = 0; r < NR0; r++) {
+            #pragma clang loop unroll(full)
+            for (ushort c = 0; c < R1; c++) {
+                acc[r * R1 + c] -= dd[r] * sy[c];
+            }
+        }
+    }
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < NR0 * R1; i++) {
+        acc[i] += simd_shuffle_down(acc[i], 4);
+        acc[i] += simd_shuffle_down(acc[i], 2);
+        acc[i] += simd_shuffle_down(acc[i], 1);
+    }
+    if (tx == 0) {
+        for (ushort r = 0; r < NR0; r++) {
+            if (row0 + r < a.M) {
+                for (ushort c = 0; c < R1; c++) {
+                    out[(ulong) c * a.M + row0 + r] = acc[r * R1 + c];
+                }
+            }
+        }
+    }
+}
+
+#define Q20_NB_KERNEL(NAME, R1, NR0)                                   \
+kernel void NAME(                                                      \
+        device const uchar * weights [[buffer(0)]],                    \
+        device const float * X       [[buffer(1)]],                    \
+        device       float * out     [[buffer(2)]],                    \
+        constant GemvArgs  & a       [[buffer(3)]],                    \
+        uint3  tgpig [[threadgroup_position_in_grid]],                 \
+        ushort tiisg [[thread_index_in_simdgroup]]) {                  \
+    q2_0_gemm_nb_impl<R1, NR0>(weights, X, out, a, tgpig, tiisg);      \
+}
+
+Q20_NB_KERNEL(q2_0_gemm_nb_r2, 2, 4)
+Q20_NB_KERNEL(q2_0_gemm_nb_r3, 3, 4)
+Q20_NB_KERNEL(q2_0_gemm_nb_r4, 4, 4)
+Q20_NB_KERNEL(q2_0_gemm_nb_r5, 5, 4)
+
 
 kernel void q4_0_dequant_row(
         device const uchar * weights [[buffer(0)]],

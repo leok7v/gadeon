@@ -18,11 +18,12 @@ one exists (`kqTileName` for the four K-quants, `denseTileName` for F16
 and BF16 rows a multiple of 32 wide) and the generic `iq_gemm_mm_h` for
 the rest; F32 stays on `gemmRows`
 (`the-f16-gates-were-half-the-prefill`,
-`a-per-type-k-quant-tile-decodes-each-weight-once`). Q4_0 keeps
-its own narrow family; Q4_K, Q5_K, Q6_K, IQ4_XS and the two 32-weight
-block types in `spanTypes` (Q8_0, IQ4_NL) take `gemmNarrowIQ`, which also
-picks the kernel's SHAPE, one simdgroup or eight sharing the staged
-activations, by width and row length from a measured table
+`a-per-type-k-quant-tile-decodes-each-weight-once`). Q4_0 and Q2_0
+each keep their own narrow family; Q4_K, Q5_K, Q6_K, IQ4_XS and the
+two 32-weight block types in `spanTypes` (Q8_0, IQ4_NL) take
+`gemmNarrowIQ`, which also picks the kernel's SHAPE, one simdgroup or
+eight sharing the staged activations, by width and row length from a
+measured table
 (`a-k-quant-verify-now-reads-the-trunk-once`,
 `the-packed-blocks-ride-the-span-kernels`), and at width 3 on the
 four K-quants the device-read kernel

@@ -32,7 +32,7 @@ final class VoicePlayer: @unchecked Sendable {
     var onActivity: (@Sendable (Bool) -> Void)?
     var onSpeaking: (@Sendable (Int?) -> Void)?
 
-    static let speechFloorGB = 4
+    static let speechFloorGB = Flags.int("speech-floor") ?? 4
 
     init?() {
         let fmt = AVAudioFormat(commonFormat: .pcmFormatFloat32,

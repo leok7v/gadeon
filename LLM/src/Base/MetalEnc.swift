@@ -190,13 +190,23 @@ struct MetalEnc {
         let k = w.dims[0], m = w.dims[1]
         var a = GemvArgs(woff: off.local, K: UInt32(k), M: UInt32(m))
         let rows = MetalEnc.narrowRows()
-        let name = "q4_0_gemm_nb_r" + "\(N)"
+        let name = (MetalEnc.narrowPackedName(w.type) ?? "") + "\(N)"
         groups(name, (m + rows - 1) / rows, tpg: 32) { e in
             e.setBuffer(off.buf, offset: 0, index: 0)
             e.setBuffer(X, offset: 0, index: 1)
             e.setBuffer(out, offset: 0, index: 2)
             e.setBytes(&a, length: MemoryLayout<GemvArgs>.stride, index: 3)
         }
+    }
+
+    static func narrowPackedName(_ t: GGUFType) -> String? {
+        let out: String?
+        switch t {
+        case .q4_0: out = "q4_0_gemm_nb_r"
+        case .q2_0: out = "q2_0_gemm_nb_r"
+        default: out = nil
+        }
+        return out
     }
 
     static func narrowIQName(_ t: GGUFType) -> String? {
@@ -245,7 +255,8 @@ struct MetalEnc {
         let k = w.dims[0], m = w.dims[1]
         var a = GemvArgs(woff: off.local, K: UInt32(k), M: UInt32(m))
         var nn = UInt32(N)
-        let narrow = w.type == .q4_0 && N > 1 && N <= MetalEnc.narrowMax
+        let narrow = MetalEnc.narrowPackedName(w.type) != nil
+            && N > 1 && N <= MetalEnc.narrowMax
         let kqNarrow = MetalEnc.narrowIQName(w.type) != nil
             && N > 1 && N <= MetalEnc.narrowMax
         let iqNarrow = Blocks.superBlocked(w.type)
@@ -271,7 +282,9 @@ struct MetalEnc {
                          "MetalEnc.gemm: no kernel for \(w.type) (\(w.name))")
             name = MetalEnc.kqTileName(w.type) ?? "iq_gemm_mm_h"
         }
-        if narrow {
+        if N == 1 {
+            gemmRows(w, X: X, out: out, off: off, N: N)
+        } else if narrow {
             gemmNarrow(w, X: X, out: out, off: off, N: N)
         } else if kqNarrow {
             gemmNarrowIQ(w, X: X, out: out, off: off, N: N)

@@ -68,6 +68,9 @@ public enum Flags {
         Knob(name: "stall-probe", takesValue: false, help:
             "arm the transcript stall-detection shimmer", scope: .diagnostic,
             defaultValue: "0"),
+        Knob(name: "speech-floor", takesValue: true, help:
+            "gigabytes of RAM the reading voice requires", scope: .experiment,
+            defaultValue: "3"),
         Knob(name: "search-parallel", takesValue: false, help:
             "use the Parallel web search service", scope: .engine,
             defaultValue: "1"),

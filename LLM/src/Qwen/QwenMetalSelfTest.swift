@@ -68,12 +68,27 @@ public enum QwenMetalSelfTest {
     // token path must match the SIMD engine.
     private static func checkBatchedPrefill(_ model: QwenModel) throws
         -> String {
+        var lines: [String] = []
+        var failed = 0
+        for chunk in [4, 3] {
+            let r = try prefillCase(model, chunk: chunk)
+            lines.append("  " + r.0)
+            if !r.1 { failed += 1 }
+        }
+        return "batched prefill \(lines.count - failed)/\(lines.count)  "
+            + (failed == 0 ? "PASS" : "FAIL") + "\n"
+            + lines.joined(separator: "\n")
+    }
+
+    private static func prefillCase(_ model: QwenModel, chunk: Int) throws
+        -> (String, Bool) {
         let ids: [Int32] = [9707, 11, 264, 1879, 374, 13, 264, 2100, 1110, 320]
         let n = 8
+        let last = ids.count % chunk == 0 ? chunk : ids.count % chunk
         let mEng = try QwenMetalEngine(model)
         let sEng = QwenEngine(model)
         mEng.reset(); sEng.reset()
-        var mCur = mEng.prefillBatch(ids, chunk: 4)
+        var mCur = mEng.prefillBatch(ids, chunk: chunk)
         var sCur = sEng.extend(ids)
         var mSeq: [Int32] = [], sSeq: [Int32] = []
         for _ in 0..<n {
@@ -82,8 +97,9 @@ public enum QwenMetalSelfTest {
         }
         var match = 0
         for i in 0..<n where mSeq[i] == sSeq[i] { match += 1 }
-        return "batched prefill(chunk 4) \(match)/\(n) match  "
-            + (match == n ? "PASS" : "FAIL") + "\n  metal=\(mSeq)\n  simd =\(sSeq)"
+        return (String(format: "chunk %d, last %d  %d/%d match  %@", chunk,
+                       last, match, n, match == n ? "PASS" : "FAIL")
+                + "\n    metal=\(mSeq)\n    simd =\(sSeq)", match == n)
     }
 
     // Long-context parity: prefill 150 tokens (chunk 48) so the flash attention
@@ -515,7 +531,7 @@ public enum QwenMetalSelfTest {
         var lines: [String] = []
         var failed = 0
         var ran = 0
-        for ty in [GGUFType.q4_0] + gemvTypes {
+        for ty in [GGUFType.q4_0, .q2_0] + gemvTypes {
             if let w = widest(model, ty) {
                 let k = w.dims[0], m = w.dims[1]
                 let off = ctx.window(UInt64(w.base - model.gguf.map))

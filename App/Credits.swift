@@ -19,7 +19,7 @@ enum Credits {
         name: "Gadeon",
         author: "leok7v",
         terms: "GPL-3.0",
-        source: "https://github.com/leok7v/gadeon",
+        source: "https://leok7v.github.io/gadeon/",
         changed: "Runs every model below on this device. Nothing you type "
             + "leaves it except where a tool you switched on says otherwise.")
 

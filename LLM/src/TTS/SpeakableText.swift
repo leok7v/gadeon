@@ -6,11 +6,6 @@ import Foundation
 // that are COMPLETE, so speech starts on sentence one rather than at the end
 // of the turn. Generation outruns speech several times over, so the queue
 // behind this fills on its own; nothing here waits.
-//
-// Two block kinds are DESCRIBED rather than read. A fenced code block read
-// aloud is unbearable, and a table read cell by cell is worse -- the geometry
-// that made it a table is exactly what speech cannot carry. Lists keep their
-// items and lose their bullets, which is what a person reading aloud does.
 
 public struct Segment: Sendable, Equatable {
     public let spoken: String
@@ -22,6 +17,7 @@ public struct SpeakableText {
     private var pending = ""      // the trailing partial line
     private var prose = ""        // speakable text awaiting a sentence end
     private var inFence = false
+    private var inMath = false
     private var fenceLang = ""
     private var tableRows = 0
     // Whether `pending` still begins where its line does. A sentence taken
@@ -45,8 +41,9 @@ public struct SpeakableText {
         // A sentence can complete mid-line, and waiting for the newline would
         // hold a whole paragraph of speech back -- which is the usual case,
         // since a model streams a paragraph faster than it ends one.
-        if !inFence && tableRows == 0 {
-            let split = SpeakableText.splitOffSentences(pending)
+        if !inFence && !inMath && tableRows == 0 {
+            let split = SpeakableText.splitOffSentences(pending,
+                                                        streaming: true)
             if !split.spoken.isEmpty {
                 // Through the same shaping a whole line gets. Appending it
                 // raw is how emphasis, links and numerals reached the voice
@@ -83,6 +80,10 @@ public struct SpeakableText {
                 SpeakableText.codeSummary(fenceLang)))
             inFence = false
         }
+        if inMath {
+            out.append(SpeakableText.segment(SpeakableText.equation))
+            inMath = false
+        }
         flushProse(&out)
         return out
     }
@@ -106,6 +107,20 @@ public struct SpeakableText {
                 inFence = false
                 out.append(SpeakableText.segment(
                     SpeakableText.codeSummary(fenceLang)))
+            }
+        } else if inMath {
+            if trimmed.contains(SpeakableText.displayMark) {
+                inMath = false
+                out.append(SpeakableText.segment(SpeakableText.equation))
+            }
+        } else if trimmed.hasPrefix(SpeakableText.displayMark) {
+            closeTable(&out)
+            flushProse(&out)
+            let body = trimmed.dropFirst(SpeakableText.displayMark.count)
+            if body.contains(SpeakableText.displayMark) {
+                out.append(SpeakableText.segment(SpeakableText.equation))
+            } else {
+                inMath = true
             }
         } else if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
             closeTable(&out)
@@ -180,6 +195,10 @@ public struct SpeakableText {
     private static func segment(_ shown: String) -> Segment {
         Segment(spoken: SpokenNumbers.expand(shown), shown: shown)
     }
+
+    static let displayMark = "$$"
+
+    static let equation = "An equation."
 
     private static func codeSummary(_ lang: String) -> String {
         let named = lang.split(separator: " ").first.map(String.init) ?? ""
@@ -320,13 +339,16 @@ public struct SpeakableText {
 
     // The prefix of `s` that ends on a sentence boundary, and the remainder.
 
-    static func splitOffSentences(_ s: String)
+    static func splitOffSentences(_ s: String, streaming: Bool = false)
         -> (spoken: String, rest: String) {
         let c = Array(s)
         var cut = 0
         var i = 0
         while i < c.count {
-            if isSentenceEnd(c, i) { cut = i + 1 }
+            if isSentenceEnd(c, i)
+                && !(streaming && mayContinueAsDecimal(c, i)) {
+                cut = i + 1
+            }
             i += 1
         }
         var spoken = ""
@@ -355,6 +377,11 @@ public struct SpeakableText {
             if ends && c[i] == "." { ends = !opensListItem(c, i) }
         }
         return ends
+    }
+
+    private static func mayContinueAsDecimal(_ c: [Character],
+                                             _ i: Int) -> Bool {
+        i == c.count - 1 && c[i] == "." && i > 0 && c[i - 1].isNumber
     }
 
     private static func opensListItem(_ c: [Character], _ i: Int) -> Bool {

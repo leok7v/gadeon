@@ -131,7 +131,7 @@ public final class QwenMetalEngine {
         stopSignal.clear()
         specQueue.removeAll()
         var out: Int32 = 0
-        if ids.count > 1 && batched {
+        if ids.count > 1 {
             // Prompt prefill: the batched forward streams each weight once per
             // chunk instead of once per token.
             out = prefillBatch(ids)
@@ -271,7 +271,9 @@ public final class QwenMetalEngine {
     // token-by-token extend (validated against the SIMD engine). Returns the
     // next-token prediction after the last id.
     func prefillBatch(_ ids: [Int32], chunk c0: Int? = nil) -> Int32 {
-        let chunk = c0 ?? QwenMetalEngine.prefillChunk
+        let chunk = c0 ?? (ctx.matrixUnits
+            ? QwenMetalEngine.prefillChunk
+            : min(QwenMetalEngine.prefillChunk, MetalEnc.narrowMax))
         let c = cfg
         var out: Int32 = 0
         // One scratch set + ids buffer sized to the largest chunk, reused across
