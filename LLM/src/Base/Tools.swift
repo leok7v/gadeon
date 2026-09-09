@@ -173,8 +173,10 @@ public struct SafeToolRunner: ToolRunner {
     public var tools: [ToolSpec] {
         var t = [Tools.getCurrentTimeSpec, Tools.calculatorSpec]
         if network {
-            t.append(Tools.webSearchSpec(
-                wikiAdvertised: wikipedia && slugsPath != nil))
+            if SearchProvider.any {
+                t.append(Tools.webSearchSpec(
+                    wikiAdvertised: wikipedia && slugsPath != nil))
+            }
             t.append(Tools.fetchUrlSpec)
             t.append(Tools.getWeatherSpec)
         }
@@ -191,11 +193,15 @@ public struct SafeToolRunner: ToolRunner {
         // model was never offered; the local tools stay reachable.
         let webOff = !network && (name == "web_search"
             || name == "fetch_url" || name == "get_weather")
+        let searchOff = name == "web_search" && !SearchProvider.any
         let wikiOff = !wikipedia && (name == "wikipedia_query"
             || name == "get_news")
         let result: String
         if webOff {
             result = "error: \(name) is disabled; web access is off"
+        } else if searchOff {
+            result = "error: web_search is disabled; no search provider "
+                + "is switched on"
         } else if wikiOff {
             result = "error: \(name) is disabled; Wikipedia access is off"
         } else if name == "calculator" {
@@ -228,7 +234,7 @@ public enum Tools {
         diagSinkLock.unlock()
     }
 
-    private static func diag(_ s: String) {
+    static func diag(_ s: String) {
         Diag.shared.report(.tools, s)
         diagSinkLock.lock()
         let sink = diagSinkBox
@@ -1087,8 +1093,6 @@ public enum Tools {
         return cleaned.isEmpty ? query : cleaned
     }
 
-    // Mwmbl search: the title / extract fields come back as arrays of
-    // {value, is_bold} spans; the visible text is the value fields joined.
     public static func websearch(_ query: String,
                                  count: Int) async -> String {
         var result = "error: missing 'query' argument"
@@ -1102,74 +1106,9 @@ public enum Tools {
             var topk = count
             if topk < 1 { topk = 5 }
             if topk > 20 { topk = 20 }
-            var comps = URLComponents(
-                string: "https://api.mwmbl.org/api/v1/search/")
-            comps?.queryItems = [URLQueryItem(name: "s", value: query)]
-            result = "error: web search failed. Do not retry; answer the "
-                + "user from your own knowledge."
-            if let url = comps?.url {
-                do {
-                    let (data, resp) =
-                        try await URLSession.shared.data(from: url)
-                    let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                    if code == 200 {
-                        result = mwmblFormat(data, topk, query)
-                    } else {
-                        result = "error: web search failed (HTTP \(code)). "
-                            + "Do not retry; answer the user from your own "
-                            + "knowledge."
-                    }
-                    if code != 200 || result.hasPrefix("No web results") {
-                        diag("web_search \"\(query)\" -> HTTP \(code), "
-                            + "\(data.count) bytes: "
-                            + String(decoding: data.prefix(300),
-                                     as: UTF8.self))
-                    }
-                } catch {
-                    diag("web_search \"\(query)\" transport error: "
-                        + error.localizedDescription)
-                }
-            }
+            result = await WebSearch.run(query, count: topk)
         }
         return result
-    }
-
-    // An empty result set grounds the model explicitly (like wikipedia_query
-    // and get_news do): a bare "(no results)" leaves a small model with no
-    // next move -- observed re-searching with reworded queries, then stalling
-    // in <think> without ever answering.
-    private static func mwmblFormat(_ data: Data, _ topk: Int,
-                                    _ query: String) -> String {
-        var result = "No web results for \"\(query)\". Do not search again; "
-            + "answer the user from your own knowledge."
-        let obj = try? JSONSerialization.jsonObject(with: data)
-        if let arr = obj as? [[String: Any]] {
-            var lines: [String] = []
-            var rank = 0
-            for item in arr where rank < topk {
-                let url = item["url"] as? String
-                let title = spanText(item["title"])
-                let extract = spanText(item["extract"])
-                rank += 1
-                var block = "\(rank). "
-                    + (title.isEmpty ? "(no title)" : title) + "\n"
-                if let url { block += "   " + url + "\n" }
-                if !extract.isEmpty { block += "   " + extract + "\n" }
-                lines.append(block)
-            }
-            if rank > 0 { result = lines.joined() }
-        }
-        return result
-    }
-
-    private static func spanText(_ v: Any?) -> String {
-        var text = ""
-        if let spans = v as? [[String: Any]] {
-            for span in spans {
-                if let value = span["value"] as? String { text += value }
-            }
-        }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // URL-only here (the C dual local-file branch is dropped so the app
@@ -1773,6 +1712,7 @@ public enum Tools {
         }
         while s.count > limit, let r = s.range(of: ". ", options: .backwards) {
             s = String(s[..<r.upperBound])
+                .trimmingCharacters(in: .whitespaces)
         }
         while s.count > limit, let r = s.range(of: " ", options: .backwards) {
             s = String(s[..<r.lowerBound])

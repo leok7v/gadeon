@@ -313,6 +313,11 @@ import UniformTypeIdentifiers
         }
     }
 
+    func setSearchProvider(_ provider: SearchProvider, _ on: Bool) {
+        provider.set(on)
+        session.pushTools()
+    }
+
     func setAccess(wikipedia wiki: Bool, web: Bool) {
         wikipedia = wiki
         webAccess = web

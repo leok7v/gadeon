@@ -13,6 +13,7 @@ struct SettingsView: View {
     @ScaledMetric(relativeTo: .body) private var railIcon: CGFloat = 20
     @State private var draftZoom: Int?
     @State private var gateRevision = 0
+    @State private var searchRevision = 0
     @State private var path: [Category] = []
 
     private var notch: Int { draftZoom ?? model.textZoom }
@@ -29,6 +30,7 @@ struct SettingsView: View {
         case voice = "Voice"
         case view = "View"
         case intelligence = "Intelligence"
+        case privacy = "Privacy"
         case misc = "Misc"
         case diagnostics = "Diagnostics"
         case about = "About"
@@ -40,6 +42,7 @@ struct SettingsView: View {
             case .voice: return "waveform"
             case .view: return "paintbrush"
             case .intelligence: return "brain"
+            case .privacy: return "hand.raised"
             case .misc: return "slider.horizontal.3"
             case .diagnostics: return "stethoscope"
             case .about: return "info.circle"
@@ -174,6 +177,7 @@ struct SettingsView: View {
         case .voice: voicePane
         case .view: viewPane
         case .intelligence: intelligencePane
+        case .privacy: privacyPane
         case .misc: miscPane
         case .diagnostics: diagnosticsPane
         case .about: aboutPane
@@ -543,6 +547,77 @@ struct SettingsView: View {
             explain("How long to think before answering: about "
                 + "\(Int(model.thinkBudget.seconds)) seconds.")
             if model.modelSupportsReasoningEffort { reasoningEffortRow }
+        }
+    }
+
+    private var privacyPane: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            title("Privacy")
+            explain("What you type is answered on this device. These are "
+                + "the only places anything leaves it, and only while the "
+                + "tool that needs them is switched on.")
+            Text("Web search").bold()
+            ForEach(SearchProvider.allCases) { provider in
+                providerRow(provider)
+            }
+            .id(searchRevision)
+            explain("With both off, the assistant is not offered web "
+                + "search at all.")
+            Divider().padding(.vertical, 4)
+            Text("Also reached").bold()
+            destination("Wikipedia",
+                "The number of the article the model picked. Your question "
+                    + "is matched on this device and never sent.",
+                "https://foundation.wikimedia.org/wiki/Policy:Privacy_policy")
+            destination("ipinfo.io",
+                "Your network address, to place the weather when you do "
+                    + "not name a city.",
+                "https://ipinfo.io/privacy-policy")
+            destination("Open-Meteo and weather.gov",
+                "The coordinates a forecast is for, and nothing else.",
+                "https://open-meteo.com/en/terms")
+            destination("Pages you ask it to read",
+                "Whatever address you or the model hands to the page "
+                    + "reader.", "")
+            destination("Hugging Face",
+                "Model downloads only. No conversation text.",
+                "https://huggingface.co/privacy")
+        }
+    }
+
+    private func providerRow(_ provider: SearchProvider) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle(provider.label, isOn: Binding(
+                get: { provider.on },
+                set: { on in
+                    model.setSearchProvider(provider, on)
+                    searchRevision += 1
+                }
+            ))
+            .toggleStyle(.switch)
+            explain(provider.detail)
+            HStack(spacing: 14) {
+                policyLink(provider.home, provider.home)
+                policyLink("Privacy policy", provider.privacy)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func destination(_ name: String, _ what: String,
+                             _ policy: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(name)
+            explain(what)
+            policyLink("Privacy policy", policy)
+        }
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private func policyLink(_ label: String, _ address: String) -> some View {
+        if let url = URL(string: address), !address.isEmpty {
+            Link(label, destination: url).appFont(.caption)
         }
     }
 

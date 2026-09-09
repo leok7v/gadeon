@@ -68,6 +68,12 @@ public enum Flags {
         Knob(name: "stall-probe", takesValue: false, help:
             "arm the transcript stall-detection shimmer", scope: .diagnostic,
             defaultValue: "0"),
+        Knob(name: "search-parallel", takesValue: false, help:
+            "use the Parallel web search service", scope: .engine,
+            defaultValue: "1"),
+        Knob(name: "search-mwmbl", takesValue: false, help:
+            "use the Mwmbl web search index", scope: .engine,
+            defaultValue: "1"),
         Knob(name: "debug", takesValue: false, help:
             "the diagnostics master switch, equal to --verbosity 1",
             scope: .diagnostic, defaultValue: ""),

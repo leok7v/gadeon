@@ -70,6 +70,21 @@ enum Credits {
                changed: "Quantized to GGUF. It matches your question to a "
                    + "Wikipedia article on this device, which is what keeps "
                    + "the question itself off the network."),
+        Credit(name: "Parallel",
+               author: "Parallel Web Systems",
+               terms: "Commercial service",
+               source: "https://parallel.ai/privacy-policy",
+               changed: "Answers web searches while it is switched on in "
+                   + "Settings. What you searched for and your network "
+                   + "address reach it; nothing else from the conversation "
+                   + "does."),
+        Credit(name: "Mwmbl",
+               author: "Mwmbl, a non-profit",
+               terms: "Open source, independent index",
+               source: "https://mwmbl.org/privacy",
+               changed: "Answers web searches when Parallel is switched off "
+                   + "or comes back empty. It stores no network address and "
+                   + "keeps no search that points back to you."),
         Credit(name: "Wikipedia",
                author: "Wikimedia Foundation and contributors",
                terms: "CC BY-SA 4.0",
