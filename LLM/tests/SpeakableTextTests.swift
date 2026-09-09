@@ -138,6 +138,13 @@ private func spokenByCharacter(_ text: String) -> [String] {
         #expect(out == ["first item", "second item", "third item"])
     }
 
+    @Test func aNumberedMarkerIsNotSpokenAsItsOwnSentence() {
+        let text = "1. First point here.\n2. Second point here.\n"
+        #expect(spoken(text) == ["First point here.",
+                                 "Second point here."])
+        #expect(spokenByCharacter(text) == spoken(text))
+    }
+
     @Test func headingsAreTheirOwnBreath() {
         let out = spoken("## Overview\nThe body follows.\n")
         #expect(out == ["Overview", "The body follows."])

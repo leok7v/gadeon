@@ -352,8 +352,17 @@ public struct SpeakableText {
                 ends = false
             }
             if ends && c[i] == "." { ends = !endsAbbreviation(c, i) }
+            if ends && c[i] == "." { ends = !opensListItem(c, i) }
         }
         return ends
+    }
+
+    private static func opensListItem(_ c: [Character], _ i: Int) -> Bool {
+        var k = 0
+        while k < i && (c[k] == " " || c[k] == "\t") { k += 1 }
+        var digits = 0
+        while k + digits < i && c[k + digits].isNumber { digits += 1 }
+        return digits > 0 && digits <= 3 && k + digits == i
     }
 
     // Titles and month names take a full stop mid-sentence, and a single

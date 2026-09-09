@@ -126,10 +126,13 @@ private struct ListBlock: View {
     private func marker(_ item: Markdown.ListItem) -> some View {
         if let checked = item.checked {
             Image(systemName: checked ? "checkmark.square.fill" : "square")
+                .font(.system(size: style.bodySize))
                 .foregroundStyle(checked ? Color.accentColor
                                          : style.secondaryColor)
         } else {
-            Text(item.marker).foregroundStyle(style.secondaryColor)
+            Text(item.marker)
+                .font(.system(size: style.bodySize))
+                .foregroundStyle(style.secondaryColor)
         }
     }
 }
