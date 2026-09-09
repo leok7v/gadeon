@@ -1,13 +1,6 @@
 import Foundation
 import os
 
-// Unified diagnostics sink shared by App and LLM. Every report() lands three
-// places: stderr (Xcode console), the unified log (Console.app), and an appended
-// per-run file under Caches/<bundle>/diag.log/, tagged with a timestamp and the
-// caller's file:line. One file per launch, pruned after ~24h, so a whole day of
-// runs -- iOS and macOS alike -- reads as one folder with no copy/paste.
-// rollingFile is reused for the transcript folder.
-
 public final class Diag: @unchecked Sendable {
 
     public static let shared = Diag()
@@ -17,21 +10,34 @@ public final class Diag: @unchecked Sendable {
     private let log = Logger(subsystem: "io.github.leok7v.gadeon",
                              category: "diag")
     private let lock = NSLock()
-    private let handle: FileHandle?
+    private var handle: FileHandle?
+    private var filePath = ""
     private let stamp: DateFormatter
     // Where this run is writing, so the debug view can offer the file itself
     // instead of a path a phone user cannot act on anyway.
-    public let path: String
+    public var path: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return filePath
+    }
 
     private init() {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "HH:mm:ss.SSS"
         stamp = f
-        let url = Diag.startRun(folder: "diag.log")
-        FileManager.default.createFile(atPath: url.path, contents: Data())
-        handle = try? FileHandle(forWritingTo: url)
-        path = url.path
+    }
+
+    static let echoes = Bundle.main.bundleIdentifier == nil || DiagGate.debug
+
+    private func opened() -> FileHandle? {
+        if handle == nil {
+            let url = Diag.startRun(folder: "diag.log")
+            FileManager.default.createFile(atPath: url.path, contents: Data())
+            handle = try? FileHandle(forWritingTo: url)
+            filePath = url.path
+        }
+        return handle
     }
 
     // A memory-footprint reporter, filled in by the App layer (which owns the
@@ -51,16 +57,28 @@ public final class Diag: @unchecked Sendable {
 
     // The caller's file:line comes free via the default arguments, captured at
     // the call site (a thin forwarder passes them through).
-    public func report(_ s: String, file: String = #fileID, line: Int = #line) {
+    public func report(_ s: String, file: String = #fileID,
+                       line: Int = #line) {
+        report(.fault, s, file: file, line: line)
+    }
+
+    public func report(_ gate: DiagGate, _ s: String,
+                       file: String = #fileID, line: Int = #line) {
+        let show = gate.on
         let name = file.split(separator: "/").last.map(String.init) ?? file
         let out = "\(stamp.string(from: Date())) \(name):\(line) \(s)"
-        log.notice("\(s, privacy: .public)")
+        if show { log.notice("\(s, privacy: .public)") }
         // write(contentsOf:), not write(Data:) -- the latter raises an
         // uncatchable ObjC exception on iOS.
-        try? FileHandle.standardError.write(contentsOf: Data("\(out)\n".utf8))
-        lock.lock()
-        try? handle?.write(contentsOf: Data("\(out)\n".utf8))
-        lock.unlock()
+        if show && Diag.echoes {
+            try? FileHandle.standardError.write(
+                contentsOf: Data("\(out)\n".utf8))
+        }
+        if show && DiagGate.debug {
+            lock.lock()
+            try? opened()?.write(contentsOf: Data("\(out)\n".utf8))
+            lock.unlock()
+        }
     }
 
     // The current run always writes to <folder>/current.txt -- a STABLE name a
@@ -68,6 +86,13 @@ public final class Diag: @unchecked Sendable {
     // unreliable). The PREVIOUS run's current.txt is archived to a timestamped
     // file, and archives older than the retention window are pruned, so a day of
     // runs is preserved while the latest is always at a known path.
+    public static func eraseCaches() {
+        let fm = FileManager.default
+        let root = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(Bundle.main.bundleIdentifier ?? "app")
+        try? fm.removeItem(at: root)
+    }
+
     public static func startRun(folder: String) -> URL {
         let fm = FileManager.default
         let dir = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]

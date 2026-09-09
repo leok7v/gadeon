@@ -34,7 +34,7 @@ public final class Relay: NSObject, URLSessionDownloadDelegate,
             task.cancel()
         }
         clearLive()
-        Diag.shared.report("background tasks cancelled for foreground")
+        Diag.shared.report(.net, "background tasks cancelled for foreground")
     }
 
     func dropStale() async {
@@ -45,7 +45,7 @@ public final class Relay: NSObject, URLSessionDownloadDelegate,
             let live = dir.map { d in fm.fileExists(atPath: d) } ?? false
             if !live {
                 task.cancel()
-                Diag.shared.report("cancelled stale "
+                Diag.shared.report(.net, "cancelled stale "
                     + "\(task.taskDescription ?? "?")")
             }
         }
@@ -84,7 +84,7 @@ public final class Relay: NSObject, URLSessionDownloadDelegate,
         live[Relay.stamp(dst)] = 0
         lock.unlock()
         task.resume()
-        Diag.shared.report("enqueue \(dst.lastPathComponent)")
+        Diag.shared.report(.net, "enqueue \(dst.lastPathComponent)")
     }
 
     func busy() async -> Set<Int64> {
@@ -147,13 +147,13 @@ public final class Relay: NSObject, URLSessionDownloadDelegate,
             try? fm.removeItem(at: dst)
             do {
                 try fm.moveItem(at: location, to: dst)
-                Diag.shared.report("landed \(dst.lastPathComponent)")
+                Diag.shared.report(.net, "landed \(dst.lastPathComponent)")
             } catch {
                 Diag.shared.report("landed BUT MOVE FAILED "
                     + "\(dst.lastPathComponent): \(error)")
             }
         } else {
-            Diag.shared.report("piece failed code \(code)")
+            Diag.shared.report(.net, "piece failed code \(code)")
         }
         retire(downloadTask)
     }
@@ -162,7 +162,8 @@ public final class Relay: NSObject, URLSessionDownloadDelegate,
                            didCompleteWithError error: Error?) {
         let code = (error as? URLError)?.code
         if let error, code != .cancelled {
-            Diag.shared.report("piece error \(error.localizedDescription)")
+            Diag.shared.report(.net, "piece error "
+                + error.localizedDescription)
         }
         retire(task)
     }
@@ -181,7 +182,7 @@ public final class Relay: NSObject, URLSessionDownloadDelegate,
 
     public func urlSessionDidFinishEvents(
         forBackgroundURLSession session: URLSession) {
-        Diag.shared.report("background session idle")
+        Diag.shared.report(.net, "background session idle")
         Relay.idle?()
     }
 }
@@ -204,7 +205,7 @@ extension HubFetch {
                 try append(next, to: part)
                 try? fm.removeItem(at: next)
                 have = size(part)
-                Diag.shared.report("assembled to \(have)")
+                Diag.shared.report(.net, "assembled to \(have)")
             } else {
                 more = false
             }
@@ -220,7 +221,7 @@ extension HubFetch {
             if BackgroundGate.shared.parked {
                 try await drain(url, e, part, onBytes)
             } else {
-                Diag.shared.report("foreground lanes take over")
+                Diag.shared.report(.net, "foreground lanes take over")
                 try await fill(url, e, part, pump, onBytes)
             }
             have = try assemble(part)
@@ -267,7 +268,7 @@ extension HubFetch {
                 await relay.cancelAll()
             }
             if tick % 10 == 0 {
-                Diag.shared.report("drain \(have)/\(e.size) "
+                Diag.shared.report(.net, "drain \(have)/\(e.size) "
                     + (await relay.state()))
             }
         }

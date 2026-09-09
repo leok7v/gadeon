@@ -335,18 +335,17 @@ schemes:
       # off so os_log reaches Console.app; re-check it if the firehose is too
       # noisy.
       #
-      # The three flags below are the diagnostic channels (App/DiagGates.swift,
-      # LLM/src/Base/Flags.swift). [mem] watch and [beat] are 91% of a
-      # captured log's lines, so they are off unless asked for; [hang] is on
-      # and this box SILENCES it. Every one points the same way: checking it
-      # does what its name says.
+      # The boxes below are the diagnostics master and one category
+      # (LLM/src/Base/DiagGate.swift, LLM/src/Base/Flags.swift). Nothing is
+      # logged at all unless --debug or Settings > Debug is on; checking a
+      # category box then adds it to what the verbosity ladder already gives.
       environmentVariables:
         - variable: OS_ACTIVITY_MODE
           value: disable
           isEnabled: false
       commandLineArguments:
+        "--debug": false
+        "--verbosity 3": false
         "--log-memory": false
-        "--log-beat": false
-        "--no-log-hang": false
     archive:
       config: Release

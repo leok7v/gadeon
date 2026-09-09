@@ -45,11 +45,8 @@ struct ViewCommands: Commands {
             .keyboardShortcut("-", modifiers: .command)
             .disabled(!model.canZoomOut)
             Divider()
-            Button {
-                model.statusLine.toggle()
-            } label: {
-                Label(model.statusLine ? "Hide Status Bar"
-                                       : "Show Status Bar",
+            Toggle(isOn: $model.statusLine) {
+                Label("Debug",
                       systemImage: "rectangle.bottomthird.inset.filled")
             }
         }

@@ -38,6 +38,8 @@ let reasoningEffort = reVal.flatMap { v in
     ["none", "on"].contains(v) ? nil : v
 }
 args.consume("--seed", hasValue: true)
+args.consume("--verbosity", hasValue: true)
+args.consume("--diagnostics", hasValue: true)
 let seedVal = Flags.uint64("seed") ?? 0
 // --overthink LAMBDA: bias the curated branch-opening tokens down while
 // thinking to shorten chain-of-thought (arxiv 2606.00206). Absent / 0 -> off.

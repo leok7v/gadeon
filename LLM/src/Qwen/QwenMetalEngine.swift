@@ -1071,12 +1071,15 @@ public final class QwenMetalEngine {
                 gdnRec[il] = ctx.makeF32(
                     recSlots * c.nVHead * c.dState * c.dState)
             }
-            Diag.shared.report("[mtp] ON: metal drafter, n=\(drafts), "
+            Diag.shared.report(.load, "[mtp] ON: metal drafter, "
+                + "n=\(drafts), "
                 + "\(recSlots) state slots")
         } else if model.mtp != nil, drafts > 0, !batched {
-            Diag.shared.report("[mtp] OFF: the verify needs matrix units")
+            Diag.shared.report(.load,
+                               "[mtp] OFF: the verify needs matrix units")
         } else if model.mtp != nil, drafts > 0, !ringFits(drafts) {
-            Diag.shared.report("[mtp] OFF: the \(drafts + 2)-slot ring needs "
+            Diag.shared.report(.load, "[mtp] OFF: the "
+                + "\(drafts + 2)-slot ring needs "
                 + "\(ringBytes(drafts) / 1_048_576) MB, over "
                 + "\(Int(QwenMetalEngine.ringShare * 100))% of this machine")
         }

@@ -10,15 +10,13 @@ public enum Instrument {
 
     public static func install() -> Bool {
         stampLaunch()
-        Diag.shared.report("[args] \(Flags.given)")
-        MarkdownDiag.report = { s in Diag.shared.report(s) }
+        Diag.shared.report(.load, "[args] \(Flags.given)")
+        MarkdownDiag.report = { s in Diag.shared.report(.perf, s) }
         MainQueueWatch.shared.start()
         Footprint.watch()
         Footprint.watchPressure()
-        Diag.memory = { tag in Footprint.report(tag) }
-        Diag.memoryDetail = { tag in
-            if DiagGate.memory.on { Footprint.report(tag) }
-        }
+        Diag.memory = { tag in Footprint.report(.load, tag) }
+        Diag.memoryDetail = { tag in Footprint.report(.memory, tag) }
         return true
     }
 
@@ -30,23 +28,27 @@ public enum Instrument {
         let ms = Double(DispatchTime.now().uptimeNanoseconds
             - t0.uptimeNanoseconds) / 1e6
         if ms >= over {
-            Diag.shared.report(String(format: "[app] %.1fms %@", ms, label()))
+            Diag.shared.report(.perf,
+                               String(format: "[app] %.1fms %@",
+                                      ms, label()))
         }
         return result
     }
 
     @MainActor private static var beats: [String: (n: Int, at: Date)] = [:]
 
-    public static func note(_ text: String) { Diag.shared.report(text) }
+    public static func note(_ gate: DiagGate, _ text: String) {
+        Diag.shared.report(gate, text)
+    }
 
     @MainActor public static func beat(_ label: String) {
-        if DiagGate.beat.on {
+        if DiagGate.perf.on {
             var b = beats[label] ?? (0, Date())
             b.n += 1
             let dt = Date().timeIntervalSince(b.at)
             if dt >= 1.0 {
-                Diag.shared.report("[beat] \(label): \(b.n) evals in "
-                    + String(format: "%.1fs", dt))
+                Diag.shared.report(.perf, "[beat] \(label): \(b.n) "
+                    + "evals in " + String(format: "%.1fs", dt))
                 b = (0, Date())
             }
             beats[label] = b
@@ -97,8 +99,8 @@ final class MainQueueWatch: @unchecked Sendable {
                 if ms >= MainQueueWatch.thresholdMs,
                    sent.uptimeNanoseconds >= self.drained {
                     self.drained = now.uptimeNanoseconds
-                    if DiagGate.hang.on {
-                        Diag.shared.report(String(format:
+                    if DiagGate.perf.on {
+                        Diag.shared.report(.perf, String(format:
                             "[hang] main queue starved %.0fms, main thread "
                             + "used %.0fms CPU", ms, burned))
                     }

@@ -103,9 +103,13 @@ struct DebugView: View {
         HStack(spacing: 8) {
             if !model.tracePath.isEmpty {
                 logButton("Transcript", model.tracePath)
-                Text("\u{00B7}").foregroundStyle(.tertiary)
+                if !model.diagPath.isEmpty {
+                    Text("\u{00B7}").foregroundStyle(.tertiary)
+                }
             }
-            logButton("Diagnostics", model.diagPath)
+            if !model.diagPath.isEmpty {
+                logButton("Diagnostics", model.diagPath)
+            }
             Spacer()
         }
         .appFont(.caption2)

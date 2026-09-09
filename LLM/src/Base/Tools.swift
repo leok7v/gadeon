@@ -1,5 +1,4 @@
 import Foundation
-import os
 
 // The cross-platform half of the agentic tool layer: tool specs, the Qwen /
 // Hermes tool-call parser, a pure pre-exec sanitizer (no filesystem, no
@@ -219,16 +218,6 @@ public struct SafeToolRunner: ToolRunner {
 public enum Tools {
     private static let maxParams = 8
 
-    // Diagnostic surface for the network tools: what the endpoint ACTUALLY
-    // returned when a search comes back empty or failing -- os_log (the
-    // app's `log stream`) + stderr (gadeon-cli), like ChatSession.toolLog.
-    // Never laid into the KV; the model keeps the short grounding text.
-    private static let netLog = Logger(
-        subsystem: "io.github.leok7v.gadeon", category: "tools")
-
-    // Optional structured sink: the app routes diagnostics into the session
-    // trace so the debug view and transcript.log.txt carry them beside the
-    // tool round they explain. os_log + stderr always fire regardless.
     private static let diagSinkLock = NSLock()
     nonisolated(unsafe) private static var diagSinkBox:
         (@Sendable (String) -> Void)?
@@ -240,8 +229,7 @@ public enum Tools {
     }
 
     private static func diag(_ s: String) {
-        netLog.info("\(s, privacy: .public)")
-        try? FileHandle.standardError.write(contentsOf: Data("\(s)\n".utf8))
+        Diag.shared.report(.tools, s)
         diagSinkLock.lock()
         let sink = diagSinkBox
         diagSinkLock.unlock()

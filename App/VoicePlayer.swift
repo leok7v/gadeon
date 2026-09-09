@@ -69,7 +69,7 @@ final class VoicePlayer: @unchecked Sendable {
     }
 
     private func log(_ what: @autoclosure () -> String) {
-        Diag.shared.report("[tts] " + what())
+        if DiagGate.voice.on { Diag.shared.report(.voice, "[tts] " + what()) }
     }
 
     private func counts() -> String {

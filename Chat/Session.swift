@@ -206,7 +206,7 @@ public enum TurnEvent: Sendable {
 
     nonisolated private static func loadHeavy(name: String, path: String)
         async -> (built: HeavyBuild?, media: (any MediaEncoder)?) {
-        Footprint.report("before \(name)")
+        Footprint.report(.load, "before \(name)")
         var built: HeavyBuild?
         var loadedMedia: (any MediaEncoder)?
         do {
@@ -234,7 +234,7 @@ public enum TurnEvent: Sendable {
             Diag.shared.report("model prep FAILED \(name): \(error)")
             built = nil
         }
-        Footprint.report("loaded \(name)")
+        Footprint.report(.load, "loaded \(name)")
         if built != nil { Session.warm(path: path) }
         return (built, loadedMedia)
     }
@@ -252,7 +252,7 @@ public enum TurnEvent: Sendable {
                 total += data.count
                 chunk = try? file.read(upToCount: 8 << 20)
             }
-            Diag.shared.report(String(
+            Diag.shared.report(.load, String(
                 format: "warmed %.1f GB in %.1fs", Double(total) / 1e9,
                 Date().timeIntervalSince(t0)))
         }
@@ -541,7 +541,7 @@ public enum TurnEvent: Sendable {
     ) async {
         await drainMeta()
         await session?.endPriming()
-        Footprint.report("newChat outgoing released")
+        Footprint.report(.load, "newChat outgoing released")
         makeSession(config, onEvent: onEvent)
         primeSession(resetFirst: true,
                     thinkingActive: config.thinking && modelSupportsThinking)
@@ -667,7 +667,7 @@ public enum TurnEvent: Sendable {
                            _ outcome: ChatSession.TurnOutcome,
                             _ thinkingActive: Bool, _ cap: Int,
                             _ since: Date) {
-        Diag.shared.report(String(
+        Diag.shared.report(.turn, String(
             format: "[turn] %@ thinking=%@ cap=%d outcome=%@ end=%@ tools=%@ "
                 + "think=%d content=%d ctx=%d %.1fs%@",
             modelName, thinkingActive ? "on" : "off", cap, outcome.rawValue,
@@ -918,7 +918,7 @@ public enum TurnEvent: Sendable {
                          got.rows, t0)
         }
         if !images.isEmpty || !clips.isEmpty {
-            Footprint.report("encoded \(images.count) img "
+            Footprint.report(.turn, "encoded \(images.count) img "
                 + "\(clips.count) clip")
         }
         return (out.parts, out.spans, widest)
@@ -944,7 +944,7 @@ public enum TurnEvent: Sendable {
 
     nonisolated private static func note(_ kind: String, _ name: String,
                                         _ rows: Int, _ since: Date) {
-        Diag.shared.report(String(
+        Diag.shared.report(.turn, String(
             format: "attach %@ %@ -> %d soft tokens (%.1fs)",
             kind, name, rows, Date().timeIntervalSince(since)))
     }

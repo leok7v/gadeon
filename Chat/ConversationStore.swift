@@ -186,6 +186,13 @@ import Foundation
         trashed = []
     }
 
+    public func eraseAll() {
+        try? FileManager.default.removeItem(at: conversationsDir())
+        list = []
+        trashed = []
+        words = [:]
+    }
+
     // A stamp rather than the file's mtime, which a copy or a restore from
     // backup would reset.
     private func purgeExpired() {

@@ -68,20 +68,40 @@ public enum Flags {
         Knob(name: "stall-probe", takesValue: false, help:
             "arm the transcript stall-detection shimmer", scope: .diagnostic,
             defaultValue: "0"),
+        Knob(name: "debug", takesValue: false, help:
+            "the diagnostics master switch, equal to --verbosity 1",
+            scope: .diagnostic, defaultValue: ""),
+        Knob(name: "verbosity", takesValue: true, help:
+            "0 faults, 1 +load/turn, 2 +net/tools/voice, 3 +everything",
+            scope: .diagnostic, defaultValue: ""),
+        Knob(name: "diagnostics", takesValue: true, help:
+            "comma-separated categories, replacing the verbosity set",
+            scope: .diagnostic, defaultValue: ""),
+        Knob(name: "log-load", takesValue: false, help:
+            "launch, model prepare, prime and release", scope: .diagnostic,
+            defaultValue: ""),
+        Knob(name: "log-net", takesValue: false, help:
+            "download lanes", scope: .diagnostic, defaultValue: ""),
+        Knob(name: "log-turn", takesValue: false, help:
+            "one line per reply, and one per attachment",
+            scope: .diagnostic, defaultValue: ""),
+        Knob(name: "log-tools", takesValue: false, help:
+            "tool rounds and the network traffic they cause",
+            scope: .diagnostic, defaultValue: ""),
+        Knob(name: "log-voice", takesValue: false, help:
+            "microphone capture and speech playback", scope: .diagnostic,
+            defaultValue: ""),
+        Knob(name: "log-perf", takesValue: false, help:
+            "main-thread stalls and screen rebuild counts",
+            scope: .diagnostic, defaultValue: ""),
         Knob(name: "log-memory", takesValue: false, help:
             "a memory line per download and prefill chunk", scope: .diagnostic,
-            defaultValue: "0"),
-        Knob(name: "log-beat", takesValue: false, help:
-            "count transcript rebuilds per second", scope: .diagnostic,
-            defaultValue: "0"),
-        Knob(name: "log-hang", takesValue: false, help:
-            "log main-thread stalls over 200ms", scope: .diagnostic,
-            defaultValue: "1"),
+            defaultValue: ""),
         Knob(name: "log-pressure", takesValue: false, help:
-            "log system memory-pressure warnings", scope: .diagnostic,
-            defaultValue: "1"),
+            "system memory-pressure warnings", scope: .diagnostic,
+            defaultValue: ""),
         Knob(name: "log-transcript", takesValue: false, help:
-            "log every render/prefill/decode with its full text",
+            "every render/prefill/decode with its full text",
             scope: .diagnostic, defaultValue: ""),
         Knob(name: "gpu-capture", takesValue: true, help:
             "write a .gputrace document to this path (kernel-bench)",

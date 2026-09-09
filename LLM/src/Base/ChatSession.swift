@@ -1,9 +1,5 @@
 import CryptoKit
 import Foundation
-import os
-
-private let chatLog = Logger(subsystem: "io.github.leok7v.gadeon",
-                             category: "chat")
 
 // Holds the tool-call structure grammar while it is armed. The sampler's mask
 // closure and the decode loop both touch it, but only under the ChatSession
@@ -575,7 +571,7 @@ public actor ChatSession {
             full = String(both.dropLast(probeText.count))
         }
         if full.isEmpty {
-            chatLog.error("no precook prefix under this template")
+            Diag.shared.report("no precook prefix under this template")
         }
         var prefix = full
         if !systemTail.isEmpty,
@@ -872,7 +868,7 @@ public actor ChatSession {
             lastMetrics = savedMetrics
             turnOutcome = savedOutcome
             try? await backend.rollback(save)
-            Diag.shared.report(String(
+            Diag.shared.report(.turn, String(
                 format: "%@ %@ raw=%@ think=%d content=%d in %.1fs", label,
                 appended == nil ? "relaid" : "appended",
                 raw.debugDescription, spent.thinkTokens, spent.contentTokens,
@@ -1379,13 +1375,13 @@ public actor ChatSession {
             fullText = String(fullText.dropFirst(lead.count))
         }
         if fullText.isEmpty {
-            chatLog.error("template rendered nothing for these variables")
+            Diag.shared.report("template rendered nothing for these variables")
         }
         if !fullText.hasPrefix(closedText) {
             // A template whose generation prompt is not a pure render suffix
             // breaks the delta-continuation model; mark after everything
             // rather than guess at its markup.
-            chatLog.warning("generation prompt is not a render suffix")
+            Diag.shared.report("generation prompt is not a render suffix")
         }
         var genText = fullText.hasPrefix(closedText)
             ? String(fullText.dropFirst(closedText.count)) : ""
@@ -1405,7 +1401,7 @@ public actor ChatSession {
             let stale = await backend.position
             if stale > 0 {
                 let msgs = history.count
-                chatLog.warning("RESET reprefill (history=\(msgs) msgs)")
+                Diag.shared.report("RESET reprefill (history=\(msgs) msgs)")
                 trace(.reset, ctx: 0,
                       summary: "fresh turn over stale state (\(stale) tok)")
             }
@@ -1921,7 +1917,7 @@ public actor ChatSession {
                     }
                     if markAt == emitted, markAt + markLen <= n {
                         if markLen == closeTag.count, !sawToolOpen {
-                            chatLog.error("suppressed a stray close tag")
+                            Diag.shared.report("suppressed a stray close tag")
                         }
                         emitted = markAt + markLen
                     }
@@ -2148,7 +2144,8 @@ public actor ChatSession {
             } else {
                 for pat in [wire.toolCallOpen, wire.toolCallClose]
                 where !pat.isEmpty && answer.contains(pat) {
-                    chatLog.error("stripped stray tool markup from an answer")
+                    Diag.shared.report(
+                        "stripped stray tool markup from an answer")
                     answer = answer.replacingOccurrences(of: pat, with: "")
                 }
                 answer = answer.trimmingCharacters(
@@ -2204,11 +2201,8 @@ public actor ChatSession {
     // compressed away after (like past-turn reasoning), so a later turn's
     // append-delta never renders a user-less [tool, assistant] slice (which the
     // Qwen template rejects for having no user query).
-    // stderr only: an os_log copy doubled every tool line in Console
-    // captures (Engine.report made the same call), and the structured trace
-    // already carries each round for the app's surfaces.
     private func toolLog(_ s: String) {
-        try? FileHandle.standardError.write(contentsOf: Data("\(s)\n".utf8))
+        Diag.shared.report(.tools, s)
     }
 
     // The canonical re-lay is the model's one view of the CORRECT wire, so

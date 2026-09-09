@@ -9,7 +9,7 @@ struct SettingsView: View {
     @State private var deleteName: String?
     @State private var confirmReset = false
     @State private var confirmClear = false
-    @ScaledMetric(relativeTo: .body) private var railWidth: CGFloat = 180
+    @ScaledMetric(relativeTo: .body) private var railWidth: CGFloat = 215
     @ScaledMetric(relativeTo: .body) private var railIcon: CGFloat = 20
     @State private var draftZoom: Int?
     @State private var gateRevision = 0
@@ -60,9 +60,10 @@ struct SettingsView: View {
             Button("Proceed", role: .destructive) { model.factoryReset() }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This deletes every downloaded model and all settings, then "
-               + "quits. The next launch shows the terms again and downloads "
-               + "a model from scratch.")
+            Text("This deletes every downloaded model, every conversation "
+               + "including the trash, every attachment kept with them, and "
+               + "all settings, then quits. The next launch starts like a "
+               + "fresh install.")
         }
         .alert("Clear all conversations?", isPresented: $confirmClear) {
             Button("Clear", role: .destructive) {
@@ -298,7 +299,7 @@ struct SettingsView: View {
             ? model.settingsCategory : .systemPrompt
     }
 
-    private var unlocked: Bool { model.statusLine && model.optionDown }
+    private var unlocked: Bool { model.unlocked }
 
     private var listed: [String] { Models.offered(unlocked: unlocked) }
 
@@ -557,7 +558,9 @@ struct SettingsView: View {
                 .toggleStyle(.switch)
             explain("Show a status bar under the message box with context, "
                 + "speed and memory, add a session details button to the "
-                + "chat actions, and reveal the Diagnostics pane.")
+                + "chat actions, and reveal the Diagnostics pane. Nothing is "
+                + "written to a log file while this is off, and logging "
+                + "starts at the next launch.")
             if !ConversationStore.shared.list.isEmpty {
                 Divider().padding(.vertical, 4)
                 Button(role: .destructive) { confirmClear = true } label: {
@@ -571,8 +574,8 @@ struct SettingsView: View {
                 Button(role: .destructive) { confirmReset = true } label: {
                     Label("Factory Reset", systemImage: "trash")
                 }
-                explain("Delete every downloaded model and all settings, "
-                    + "then quit.")
+                explain("Delete every downloaded model, every "
+                    + "conversation and all settings, then quit.")
             }
         }
     }
@@ -601,8 +604,9 @@ struct SettingsView: View {
             title("Diagnostics")
             explain("Extra detail for the diagnostics log. A switch that is "
                 + "off costs nothing. The session details screen says where "
-                + "the log is.")
-            ForEach(DiagGate.allCases) { gate in gateRow(gate) }
+                + "the log is. A launch argument naming the same category "
+                + "wins over these switches for that run.")
+            ForEach(DiagGate.switchable) { gate in gateRow(gate) }
                 .id(gateRevision)
         }
     }
@@ -610,7 +614,7 @@ struct SettingsView: View {
     private func gateRow(_ gate: DiagGate) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle(gate.label, isOn: Binding(
-                get: { gate.on },
+                get: { gate.wanted },
                 set: { on in
                     gate.set(on)
                     gateRevision += 1

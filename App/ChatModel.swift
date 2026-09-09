@@ -357,6 +357,7 @@ import UniformTypeIdentifiers
     var showDebug = false
     var settingsCategory: SettingsView.Category = .systemPrompt
     var optionDown = false
+    var unlocked: Bool { statusLine && optionDown }
     var traceEvents: [TraceEvent] = []
     var tracePath: String { session.tracePath }
     var diagPath: String { session.diagPath }
@@ -695,7 +696,7 @@ import UniformTypeIdentifiers
     }
 
     func newChat() {
-        Footprint.report("newChat begin")
+        Footprint.report(.load, "newChat begin")
         followupHint = ""
         lastTurnSpoken = false
         speech.stopSpeaking()
@@ -718,7 +719,7 @@ import UniformTypeIdentifiers
                 self?.recordTrace(e)
             }
             genTask = nil
-            Footprint.report("newChat end")
+            Footprint.report(.load, "newChat end")
         }
     }
 
@@ -925,7 +926,7 @@ import UniformTypeIdentifiers
                              _ since: Date, _ limit: Int) {
         let bytes = text?.utf8.count ?? 0
         let cut = bytes > limit ? ", TRUNCATED to \(limit)" : ""
-        Diag.shared.report(String(
+        Diag.shared.report(.turn, String(
             format: "attach document %@ -> %d bytes%@ (%.1fs)", name, bytes,
             cut, Date().timeIntervalSince(since)))
     }
@@ -1171,7 +1172,7 @@ import UniformTypeIdentifiers
                         micPhrases?.cancel()
                         micPhrases = phraseCycler()
                         watchForEndOfTurn()
-                        Diag.shared.report(
+                        Diag.shared.report(.voice,
                             "[mic] listening at \(Int(rate)) Hz "
                             + AudioSession.describe())
                     } catch {
@@ -1196,8 +1197,8 @@ import UniformTypeIdentifiers
                 hearingSpeech = gate?.hearing ?? false
                 speechLevel = Double(gate?.level ?? 0)
                 ticks += 1
-                if ticks % 16 == 0, let gate {
-                    Diag.shared.report(String(
+                if ticks % 16 == 0, let gate, DiagGate.voice.on {
+                    Diag.shared.report(.voice, String(
                         format: "[mic] .. %4.1fs open, hearing %@, bar %.5f, "
                             + "loudestFrame %.5f (%.1fx bar), peak %.5f, "
                             + "kept %.1fs, %d utt",
@@ -1235,7 +1236,7 @@ import UniformTypeIdentifiers
         speechLevel = 0
         let said = heard.take()
         let secs = Double(heard.samples) / max(rateInUse, 1)
-        Diag.shared.report(String(
+        Diag.shared.report(.voice, String(
             format: "[mic] stopped: %.1fs captured, %d utterance(s), "
                 + "%.1fs of speech, bar %.5f, peak %.6f, rms %.6f, %@",
             secs, said.count,
@@ -1261,8 +1262,11 @@ import UniformTypeIdentifiers
         if let id = Bundle.main.bundleIdentifier {
             d.removePersistentDomain(forName: id)
         }
-        Session.wipePrecook()
-        try? FileManager.default.removeItem(at: Bundle.modelStore())
+        ConversationStore.shared.eraseAll()
+        let fm = FileManager.default
+        try? fm.removeItem(at: Session.attachments)
+        try? fm.removeItem(at: Bundle.modelStore())
+        Diag.eraseCaches()
         quitApp()
     }
 

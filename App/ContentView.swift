@@ -171,7 +171,7 @@ struct ContentView: View {
     }
 
     private var newChatButton: some View {
-        Button(action: openNewChat) {
+        Button(action: newChatOrReveal) {
             Image(systemName: "square.and.pencil")
         }
         .help("New chat")
@@ -217,7 +217,9 @@ struct ContentView: View {
 
     private var debugAction: (() -> Void)? {
         var out: (() -> Void)? = nil
-        if model.statusLine { out = openDebug }
+        if model.statusLine, !model.traceEvents.isEmpty {
+            out = openDebug
+        }
         return out
     }
 
@@ -345,7 +347,7 @@ struct ContentView: View {
             as? String) ?? "Gadeon"
 
     private var pickable: [String] {
-        Models.offered(unlocked: model.statusLine && model.optionDown)
+        Models.offered(unlocked: model.unlocked)
     }
 
     private func pick(_ name: String) {
@@ -411,6 +413,16 @@ struct ContentView: View {
 
     private func refocusPrompt() {
         if !isOS { promptFocus.request(true) }
+    }
+
+    private func newChatOrReveal() {
+        if !isOS, model.unlocked {
+            dismissKeyboard()
+            model.revealHidden()
+            closeSidebar()
+        } else {
+            openNewChat()
+        }
     }
 
     private func openNewChat() {
@@ -575,7 +587,7 @@ struct ContentView: View {
 
     static let stallProbeOn: Bool = {
         let on = Flags.on("stall-probe")
-        Instrument.note("[stall] probe \(on ? "ARMED" : "off")")
+        Instrument.note(.perf, "[stall] probe \(on ? "ARMED" : "off")")
         return on
     }()
 

@@ -86,18 +86,19 @@ public enum Footprint {
         let bytes = m.physicalMemory
         let tier = (bytes + (1 << 29)) >> 30
         let gib = (Double(bytes) / 1_073_741_824 * 100).rounded(.down) / 100
-        Diag.shared.report(String(
+        Diag.shared.report(.load, String(
             format: "[mem] device: %.2f GiB physical (tier %d GB), "
                 + "%d cores, %@ %@",
             gib, tier, m.processorCount,
             m.operatingSystemVersionString, hardwareID()))
-        Diag.shared.report("[mem] offers \(Models.all.joined(separator: ", "))"
+        Diag.shared.report(.load, "[mem] offers "
+            + Models.all.joined(separator: ", ")
             + (debugBuild ? " (debug)" : ""))
     }
 
     public static var watching: Bool {
         DiagGate.memory.on
-            || UserDefaults.standard.bool(forKey: "statusLine")
+            || UserDefaults.standard.bool(forKey: DiagGate.masterKey)
     }
 
     public static func watch() {
@@ -113,7 +114,7 @@ public enum Footprint {
                            || moved(s.systemWired, lastWired) {
                         last = s.footprint
                         lastWired = s.systemWired
-                        report("watch")
+                        report(.memory, "watch")
                     }
                 }
                 timer = t
@@ -131,9 +132,7 @@ public enum Footprint {
                 let source = DispatchSource.makeMemoryPressureSource(
                     eventMask: [.warning, .critical], queue: queue)
                 source.setEventHandler {
-                    if DiagGate.pressure.on {
-                        report("PRESSURE " + level(source.data))
-                    }
+                    report(.pressure, "PRESSURE " + level(source.data))
                 }
                 pressure = source
                 source.resume()
@@ -165,14 +164,14 @@ public enum Footprint {
             ? out + "+lowpower" : out
     }
 
-    public static func report(_ tag: String,
+    public static func report(_ gate: DiagGate, _ tag: String,
                        file: String = #fileID, line: Int = #line) {
-        if let s = sample() {
+        if gate.on, let s = sample() {
             func mb(_ v: UInt64) -> String {
                 String(format: "%.0f MB", Double(v) / 1_048_576)
             }
             let head = s.headroomToJetsam.map { v in mb(v) } ?? "n/a"
-            Diag.shared.report(
+            Diag.shared.report(gate,
                 "[mem] \(tag): footprint \(mb(s.footprint)) "
                 + "(peak \(mb(s.peak)), headroom \(head)) | "
                 + "resident \(mb(s.resident)) = dirty \(mb(s.dirty)) "
