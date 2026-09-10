@@ -81,6 +81,7 @@ struct ContentView: View {
     @FocusState private var findFocused: Bool
     @State private var actionsExpanded = false
     @State private var actionsHovering = false
+    @State private var actionsExporting = false
     @State private var shellWidth: CGFloat = 0
 
     var body: some View {
@@ -199,6 +200,7 @@ struct ContentView: View {
                         document: model.transcriptDocument,
                         title: model.transcriptTitle,
                         renderMarkdown: $model.renderMarkdown,
+                        exporting: $actionsExporting,
                         onFind: openFind, onDebug: debugAction)
                 } else {
                     Button { actionsExpanded = true } label: {
@@ -224,7 +226,7 @@ struct ContentView: View {
     }
 
     private var actionsIdle: Bool {
-        !isOS && actionsExpanded && !actionsHovering
+        !isOS && actionsExpanded && !actionsHovering && !actionsExporting
     }
 
     private func collapseActionsAfterIdle() async {
@@ -1329,6 +1331,8 @@ private struct ReasoningView: View {
         }
     }
 
+    private var marqueeing: Bool { active && !expanded }
+
     private var header: some View {
         HStack(spacing: 6) {
             Button {
@@ -1339,15 +1343,19 @@ private struct ReasoningView: View {
                           ? "chevron.down" : "chevron.right")
                         .appFont(.caption2)
                         .foregroundStyle(.secondary)
-                    Text(label)
-                        .appFont(.caption)
-                        .foregroundStyle(.secondary)
+                        .frame(minWidth: marqueeing ? 18 : 0,
+                               minHeight: marqueeing ? 20 : 0)
+                    if !marqueeing {
+                        Text(label)
+                            .appFont(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .fixedSize()
-            if active && !expanded {
+            if marqueeing {
                 ThinkingMarquee(text: text)
             }
         }

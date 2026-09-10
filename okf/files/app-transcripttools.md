@@ -9,3 +9,6 @@ timestamp: 2026-08-10T00:10:24Z
 ---
 
 Write only. The transcript is never read back from a file.
+
+The save panel is presented from here but its `isPresented` belongs to the
+caller, so the toolbar strip cannot collapse out from under an open panel.

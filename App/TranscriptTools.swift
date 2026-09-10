@@ -8,13 +8,13 @@ struct TranscriptActions: View {
     let document: Markdown.Document
     let title: String
     @Binding var renderMarkdown: Bool
+    @Binding var exporting: Bool
     let onFind: () -> Void
     let onDebug: (() -> Void)?
     @State private var pdfURL: URL?
     @State private var htmlURL: URL?
     @State private var exportFile: ExportFile?
     @State private var exportType: UTType = .pdf
-    @State private var showExporter = false
     @State private var copied = false
     @State private var copiedReset: Task<Void, Never>?
 
@@ -59,7 +59,7 @@ struct TranscriptActions: View {
             }
         }
         .task(id: document) { await prepareExports() }
-        .fileExporter(isPresented: $showExporter, document: exportFile,
+        .fileExporter(isPresented: $exporting, document: exportFile,
                       contentType: exportType,
                       defaultFilename: exportName) { _ in }
     }
@@ -77,7 +77,7 @@ struct TranscriptActions: View {
         if let url, let data = try? Data(contentsOf: url) {
             exportFile = ExportFile(data: data)
             exportType = type
-            showExporter = true
+            exporting = true
         }
     }
 
