@@ -151,20 +151,21 @@ struct SettingsView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
-            .background(selected ? Color.accentColor.opacity(0.15) : .clear,
+            .background(selected ? Color.accentColor : .clear,
                         in: RoundedRectangle(cornerRadius: 7))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(selected ? Color.accentColor : Color.primary)
+        .foregroundStyle(selected ? Color.white : Color.primary)
     }
 
     private func paneScroll(_ item: Category) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 18) {
                 pane(item)
             }
             .padding(20)
+            .frame(maxWidth: 720, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -184,17 +185,93 @@ struct SettingsView: View {
         }
     }
 
+    private var cardFill: some ShapeStyle { Color.primary.opacity(0.055) }
+
+    private func card<Content: View>(
+        @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(spacing: 0) { content() }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(cardFill, in: RoundedRectangle(cornerRadius: 10))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(.separator.opacity(0.6), lineWidth: 0.5)
+            }
+    }
+
+    private var hairline: some View {
+        Divider().padding(.leading, 14)
+    }
+
+    private func heading(_ text: String) -> some View {
+        Text(text)
+            .appFont(.callout)
+            .bold()
+            .foregroundStyle(.secondary)
+            .padding(.leading, 4)
+            .padding(.top, 2)
+    }
+
+    private func row<Control: View>(
+        _ label: String, _ detail: String? = nil,
+        @ViewBuilder control: () -> Control) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 12) {
+                Text(label)
+                Spacer(minLength: 12)
+                control()
+            }
+            if let detail, !detail.isEmpty { explain(detail) }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func wideRow<Control: View>(
+        _ label: String?, _ detail: String? = nil,
+        @ViewBuilder control: () -> Control) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let label { Text(label) }
+            control()
+            if let detail, !detail.isEmpty { explain(detail) }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func switchRow(_ label: String, _ detail: String,
+                           _ isOn: Binding<Bool>) -> some View {
+        row(label, detail) {
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+    }
+
+    private func note(_ text: String) -> some View {
+        explain(text)
+            .padding(.horizontal, 4)
+    }
+
     private var aboutPane: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 18) {
             title("About")
-            creditRow(Credits.app)
-            Divider().padding(.vertical, 4)
-            explain("Built on the work below. Each entry says who made it, "
+            card { creditRow(Credits.app) }
+            note("Built on the work below. Each entry says who made it, "
                 + "the terms it arrives under, and what this app changed.")
-            ForEach(Credits.all) { item in creditRow(item) }
-            Divider().padding(.vertical, 4)
-            licence("Apache License 2.0", Licence.apache2)
-            licence("GNU General Public License v3", Licence.gpl3)
+            card {
+                ForEach(Credits.all) { item in
+                    if item.id != Credits.all.first?.id { hairline }
+                    creditRow(item)
+                }
+            }
+            heading("Licences")
+            card {
+                licence("Apache License 2.0", Licence.apache2)
+                hairline
+                licence("GNU General Public License v3", Licence.gpl3)
+            }
         }
     }
 
@@ -212,8 +289,9 @@ struct SettingsView: View {
             }
             explain(item.changed)
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 4)
     }
 
     private func licence(_ name: String, _ text: String) -> some View {
@@ -229,31 +307,44 @@ struct SettingsView: View {
             }
             .frame(maxHeight: 260)
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
     }
 
     private var voicePane: some View {
         @Bindable var speech = model.speech
-        return VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: 18) {
             title("Voice")
-            explain("Replies are read aloud on this device; nothing is sent "
+            note("Replies are read aloud on this device; nothing is sent "
                 + "anywhere. Tap a voice to hear it. Opening the microphone "
                 + "stops the reading, so you can interrupt at any time.")
-            Picker("Speak", selection: $speech.mode) {
-                ForEach(VoiceSession.Mode.allCases) { mode in
-                    Text(mode.label).tag(mode)
+            card {
+                wideRow("Speak", speech.mode.detail) {
+                    Picker("Speak", selection: $speech.mode) {
+                        ForEach(VoiceSession.Mode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+                hairline
+                row("Speed") {
+                    HStack(spacing: 10) {
+                        Slider(value: $speech.speed, in: 0.7...1.5, step: 0.05)
+                            .frame(maxWidth: 220)
+                        Text(String(format: "%.2fx", speech.speed))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            explain(speech.mode.detail)
-            ForEach(Speech.voices) { v in voiceRow(v) }
-            Divider().padding(.vertical, 4)
-            HStack {
-                Text("Speed")
-                Slider(value: $speech.speed, in: 0.7...1.5, step: 0.05)
-                Text(String(format: "%.2fx", speech.speed))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
+            heading("Voices")
+            card {
+                ForEach(Speech.voices) { v in
+                    if v.id != Speech.voices.first?.id { hairline }
+                    voiceRow(v)
+                }
             }
         }
     }
@@ -272,24 +363,27 @@ struct SettingsView: View {
                 Image(systemName: "play.circle")
                     .foregroundStyle(.secondary)
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 
     private var systemPromptPane: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 18) {
             title("System Prompt")
-            explain("Instructions the assistant reads before every "
+            note("Instructions the assistant reads before every "
                 + "conversation, for tone and behaviour. Applies from the "
                 + "next new chat.")
             TextEditor(text: $model.systemPrompt)
                 .appFont(.body)
                 .frame(minHeight: 160)
                 .padding(6)
+                .background(cardFill, in: RoundedRectangle(cornerRadius: 10))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(.separator, lineWidth: 0.5)
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(.separator.opacity(0.6), lineWidth: 0.5)
                 }
             Button("Reset to default") {
                 model.systemPrompt = ChatModel.defaultSystemPrompt
@@ -308,18 +402,21 @@ struct SettingsView: View {
     private var listed: [String] { Models.offered(unlocked: unlocked) }
 
     private var modelsPane: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 18) {
             title("Models")
-            explain("Each model downloads once and stays on this device. "
+            note("Each model downloads once and stays on this device. "
                 + "Deleting one frees the space, and it can be downloaded "
                 + "again. The model in use cannot be deleted. To delete it, "
                 + "switch to another model first.")
-            ForEach(listed, id: \.self) { name in
-                modelRow(name)
+            card {
+                ForEach(listed, id: \.self) { name in
+                    if name != listed.first { hairline }
+                    modelRow(name)
+                }
             }
             .id(model.diskRevision)
             if unlocked {
-                explain("Every model this Mac can run, shown while Option is "
+                note("Every model this Mac can run, shown while Option is "
                     + "held with Debug on. Normally only the ones its memory "
                     + "allows are offered.")
             }
@@ -357,7 +454,8 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             rowButton(name, downloaded: downloaded, active: active)
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
     }
 
     private func rowButton(_ name: String, downloaded: Bool,
@@ -389,8 +487,10 @@ struct SettingsView: View {
     }
 
     private var imageRows: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Images")
+        wideRow("Images",
+                "How closely the assistant looks at a picture: about "
+                + "\(model.imageBudget.tokens) tokens per picture, at its "
+                + "own shape. Larger sees finer detail and takes longer.") {
             Picker("Image detail", selection: $model.imageBudget) {
                 ForEach(ChatModel.ImageBudget.allCases) { size in
                     Text(size.rawValue).tag(size)
@@ -398,16 +498,14 @@ struct SettingsView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            explain("How closely the assistant looks at a picture: about "
-                    + "\(model.imageBudget.tokens) tokens per picture, at "
-                    + "its own shape. Larger sees finer detail and takes "
-                    + "longer.")
         }
     }
 
     private var documentRows: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Documents")
+        wideRow("Documents",
+                "How much of an attached document the assistant reads: up "
+                + "to about \(model.docBudget.pages) pages of text. Anything "
+                + "past that is left out, and the chat says so.") {
             Picker("Document size", selection: $model.docBudget) {
                 ForEach(ChatModel.DocBudget.allCases) { size in
                     Text(size.rawValue).tag(size)
@@ -415,29 +513,28 @@ struct SettingsView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            explain("How much of an attached document the assistant reads: "
-                    + "up to about \(model.docBudget.pages) pages of text. "
-                    + "Anything past that is left out, and the chat says so.")
         }
     }
 
     private var viewPane: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 18) {
             title("View")
-            Toggle("Markdown", isOn: $model.renderMarkdown)
-                .toggleStyle(.switch)
-            explain("Show replies with headings, lists, code and tables.")
-            Toggle("Always show sample prompts", isOn: $model.alwaysShowSamples)
-                .toggleStyle(.switch)
-            explain("Keep the examples on an empty chat after you have tried "
-                + "them all.")
-            Text("Zoom")
-            textSizeRow
+            card {
+                switchRow("Markdown",
+                          "Show replies with headings, lists, code and "
+                          + "tables.", $model.renderMarkdown)
+                hairline
+                switchRow("Always show sample prompts",
+                          "Keep the examples on an empty chat after you have "
+                          + "tried them all.", $model.alwaysShowSamples)
+            }
+            heading("Zoom")
+            card { textSizeRow }
         }
     }
 
     private var textSizeRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
                 Text("a").font(.system(size: 11))
                 VStack(spacing: 3) {
@@ -446,15 +543,18 @@ struct SettingsView: View {
                                ... Double(ChatModel.zoomLimit),
                            step: 1)
                     detents
-                    Button("Reset Zoom") { draftZoom = 0 }
-                        .disabled(notch == 0)
                 }
-                .frame(maxWidth: 220)
+                .frame(maxWidth: 260)
                 Text("A").font(.system(size: 21))
                 Spacer()
+                Button("Reset Zoom") { draftZoom = 0 }
+                    .disabled(notch == 0)
             }
             draftSample
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var zoomNotch: Binding<Double> {
@@ -488,130 +588,165 @@ struct SettingsView: View {
     }
 
     private var intelligencePane: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 18) {
             title("Intelligence")
-            if model.modelSupportsThinking { thinkingRows }
-            if model.canSuggestFollowups {
-                Toggle("Suggest follow-up questions",
-                       isOn: $model.suggestFollowups)
-                    .toggleStyle(.switch)
-                explain("Suggest a sensible next question as a hint in the "
-                    + "message box. "
-                    + (isOS ? "Swipe right to ask it."
-                            : "Tab or the right arrow asks it."))
+            if model.modelSupportsThinking {
+                card { thinkingRows }
             }
-            Toggle("Wikipedia", isOn: Binding(
-                get: { model.wikipedia },
-                set: { on in
-                    model.setAccess(wikipedia: on, web: model.webAccess)
+            card {
+                if model.canSuggestFollowups {
+                    switchRow("Suggest follow-up questions",
+                              "Suggest a sensible next question as a hint in "
+                              + "the message box. "
+                              + (isOS ? "Swipe right to ask it."
+                                      : "Tab or the right arrow asks it."),
+                              $model.suggestFollowups)
+                    hairline
                 }
-            ))
-            .toggleStyle(.switch)
-            explain("Let the assistant look things up in Wikipedia. The "
-                + "lookup runs locally on your device, so what you type "
-                + "stays here. Only the matching article is downloaded.")
-            Toggle("Web Access", isOn: Binding(
-                get: { model.webAccess },
-                set: { on in
-                    model.setAccess(wikipedia: model.wikipedia, web: on)
+                switchRow("Wikipedia",
+                          "Let the assistant look things up in Wikipedia. "
+                          + "The lookup runs locally on your device, so what "
+                          + "you type stays here. Only the matching article "
+                          + "is downloaded.", Binding(
+                    get: { model.wikipedia },
+                    set: { on in
+                        model.setAccess(wikipedia: on, web: model.webAccess)
+                    }
+                ))
+                hairline
+                switchRow("Web Access",
+                          "Let the assistant search, fetch and read the "
+                          + "Internet. Your search terms leave the device, "
+                          + "and the weather uses your rough location.",
+                          Binding(
+                    get: { model.webAccess },
+                    set: { on in
+                        model.setAccess(wikipedia: model.wikipedia, web: on)
+                    }
+                ))
+            }
+            heading("Attachments")
+            card {
+                if model.canAttachImages {
+                    imageRows
+                    hairline
                 }
-            ))
-            .toggleStyle(.switch)
-            explain("Let the assistant search, fetch and read the Internet. "
-                + "Your search terms leave the device, and the weather uses "
-                + "your rough location.")
-            if model.canAttachImages { imageRows }
-            documentRows
+                documentRows
+            }
         }
     }
 
     private var thinkingRows: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Toggle("Thinking", isOn: Binding(
+        VStack(spacing: 0) {
+            switchRow("Thinking",
+                      "Think before answering. Slower, but better on hard "
+                      + "questions. The thinking shows above each answer, "
+                      + "and Quick Answer cuts it short.", Binding(
                 get: { model.thinkingActive },
                 set: { on in
                     if on != model.thinking { model.toggleThinking() }
                 }
             ))
-            .toggleStyle(.switch)
-            explain("Think before answering. Slower, but better on hard "
-                + "questions. The thinking shows above each answer, and "
-                + "Quick Answer cuts it short.")
-            Picker("Thinking budget", selection: $model.thinkBudget) {
-                ForEach(ChatModel.ThinkBudget.allCases) { size in
-                    Text(size.rawValue).tag(size)
+            hairline
+            wideRow("Budget",
+                    "How long to think before answering: about "
+                    + "\(Int(model.thinkBudget.seconds)) seconds.") {
+                Picker("Thinking budget", selection: $model.thinkBudget) {
+                    ForEach(ChatModel.ThinkBudget.allCases) { size in
+                        Text(size.rawValue).tag(size)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            explain("How long to think before answering: about "
-                + "\(Int(model.thinkBudget.seconds)) seconds.")
-            if model.modelSupportsReasoningEffort { reasoningEffortRow }
+            if model.modelSupportsReasoningEffort {
+                hairline
+                reasoningEffortRow
+            }
         }
     }
 
     private var privacyPane: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 18) {
             title("Privacy")
-            explain("What you type is answered on this device. These are "
+            note("What you type is answered on this device. These are "
                 + "the only places anything leaves it, and only while the "
                 + "tool that needs them is switched on.")
-            Text("Web search").bold()
-            ForEach(SearchProvider.allCases) { provider in
-                providerRow(provider)
+            heading("Web search")
+            card {
+                ForEach(SearchProvider.allCases) { provider in
+                    if provider != SearchProvider.allCases.first { hairline }
+                    providerRow(provider)
+                }
             }
             .id(searchRevision)
-            explain("With both off, the assistant is not offered web "
-                + "search at all.")
-            Divider().padding(.vertical, 4)
-            Text("Also reached").bold()
-            destination("Wikipedia",
-                "The number of the article the model picked. Your question "
-                    + "is matched on this device and never sent.",
-                "https://foundation.wikimedia.org/wiki/Policy:Privacy_policy")
-            destination("ipinfo.io",
-                "Your network address, to place the weather when you do "
-                    + "not name a city.",
-                "https://ipinfo.io/privacy-policy")
-            destination("Open-Meteo and weather.gov",
-                "The coordinates a forecast is for, and nothing else.",
-                "https://open-meteo.com/en/terms")
-            destination("Pages you ask it to read",
-                "Whatever address you or the model hands to the page "
-                    + "reader.", "")
-            destination("Hugging Face",
-                "Model downloads only. No conversation text.",
-                "https://huggingface.co/privacy")
+            note("With both off, the assistant is not offered web search "
+                + "at all.")
+            heading("Also reached")
+            card {
+                destination("Wikipedia",
+                    "The number of the article the model picked. Your "
+                        + "question is matched on this device and never "
+                        + "sent.",
+                    "https://foundation.wikimedia.org/wiki/"
+                        + "Policy:Privacy_policy")
+                hairline
+                destination("ipinfo.io",
+                    "Your network address, to place the weather when you do "
+                        + "not name a city.",
+                    "https://ipinfo.io/privacy-policy")
+                hairline
+                destination("Open-Meteo and weather.gov",
+                    "The coordinates a forecast is for, and nothing else.",
+                    "https://open-meteo.com/en/terms")
+                hairline
+                destination("Pages you ask it to read",
+                    "Whatever address you or the model hands to the page "
+                        + "reader.", "")
+                hairline
+                destination("Hugging Face",
+                    "Model downloads only. No conversation text.",
+                    "https://huggingface.co/privacy")
+            }
         }
     }
 
     private func providerRow(_ provider: SearchProvider) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Toggle(provider.label, isOn: Binding(
-                get: { provider.on },
-                set: { on in
-                    model.setSearchProvider(provider, on)
-                    searchRevision += 1
-                }
-            ))
-            .toggleStyle(.switch)
+            HStack(spacing: 12) {
+                Text(provider.label)
+                Spacer(minLength: 12)
+                Toggle("", isOn: Binding(
+                    get: { provider.on },
+                    set: { on in
+                        model.setSearchProvider(provider, on)
+                        searchRevision += 1
+                    }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+            }
             explain(provider.detail)
             HStack(spacing: 14) {
                 policyLink(provider.home, provider.home)
                 policyLink("Privacy policy", provider.privacy)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func destination(_ name: String, _ what: String,
                              _ policy: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(name)
             explain(what)
             policyLink("Privacy policy", policy)
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -622,42 +757,59 @@ struct SettingsView: View {
     }
 
     private var miscPane: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 18) {
             title("Misc")
-            Toggle("Confirm before deleting a conversation",
-                   isOn: $model.confirmDeleteConversation)
-                .toggleStyle(.switch)
-            explain("Ask before a conversation is deleted. Off deletes at "
-                + "once.")
-            Toggle("Debug", isOn: $model.statusLine)
-                .toggleStyle(.switch)
-            explain("Show a status bar under the message box with context, "
-                + "speed and memory, add a session details button to the "
-                + "chat actions, and reveal the Diagnostics pane. Nothing is "
-                + "written to a log file while this is off, and logging "
-                + "starts at the next launch.")
-            if !ConversationStore.shared.list.isEmpty {
-                Divider().padding(.vertical, 4)
-                Button(role: .destructive) { confirmClear = true } label: {
-                    Label("Clear all conversations", systemImage: "trash")
-                }
-                .disabled(model.busy)
-                explain("Move every saved conversation to the trash.")
+            card {
+                switchRow("Confirm before deleting a conversation",
+                          "Ask before a conversation is deleted. Off deletes "
+                          + "at once.", $model.confirmDeleteConversation)
+                hairline
+                switchRow("Debug",
+                          "Show a status bar under the message box with "
+                          + "context, speed and memory, add a session details "
+                          + "button to the chat actions, and reveal the "
+                          + "Diagnostics pane. Nothing is written to a log "
+                          + "file while this is off, and logging starts at "
+                          + "the next launch.", $model.statusLine)
             }
-            if unlocked {
-                Divider().padding(.vertical, 4)
-                Button(role: .destructive) { confirmReset = true } label: {
-                    Label("Factory Reset", systemImage: "trash")
+            if !ConversationStore.shared.list.isEmpty || unlocked {
+                card {
+                    if !ConversationStore.shared.list.isEmpty {
+                        wideRow(nil,
+                                "Move every saved conversation to the "
+                                + "trash.") {
+                            Button(role: .destructive) {
+                                confirmClear = true
+                            } label: {
+                                Label("Clear all conversations",
+                                      systemImage: "trash")
+                            }
+                            .disabled(model.busy)
+                        }
+                    }
+                    if unlocked {
+                        if !ConversationStore.shared.list.isEmpty { hairline }
+                        wideRow(nil,
+                                "Delete every downloaded model, every "
+                                + "conversation and all settings, then "
+                                + "quit.") {
+                            Button(role: .destructive) {
+                                confirmReset = true
+                            } label: {
+                                Label("Factory Reset", systemImage: "trash")
+                            }
+                        }
+                    }
                 }
-                explain("Delete every downloaded model, every "
-                    + "conversation and all settings, then quit.")
             }
         }
     }
 
     private var reasoningEffortRow: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Reasoning Effort")
+        wideRow("Reasoning Effort",
+                "How hard to think. High thinks longer and more carefully "
+                + "but can go in circles. Low answers sooner. Applies from "
+                + "the next new chat.") {
             Picker("Reasoning effort", selection: Binding(
                 get: { model.reasoningEffort },
                 set: { level in model.setReasoningEffort(level) }
@@ -668,36 +820,34 @@ struct SettingsView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            explain("How hard to think. High thinks longer and more "
-                + "carefully but can go in circles. Low answers sooner. "
-                + "Applies from the next new chat.")
         }
     }
 
     private var diagnosticsPane: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 18) {
             title("Diagnostics")
-            explain("Extra detail for the diagnostics log. A switch that is "
+            note("Extra detail for the diagnostics log. A switch that is "
                 + "off costs nothing. The session details screen says where "
                 + "the log is. A launch argument naming the same category "
                 + "wins over these switches for that run.")
-            ForEach(DiagGate.switchable) { gate in gateRow(gate) }
-                .id(gateRevision)
+            card {
+                ForEach(DiagGate.switchable) { gate in
+                    if gate != DiagGate.switchable.first { hairline }
+                    gateRow(gate)
+                }
+            }
+            .id(gateRevision)
         }
     }
 
     private func gateRow(_ gate: DiagGate) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Toggle(gate.label, isOn: Binding(
-                get: { gate.wanted },
-                set: { on in
-                    gate.set(on)
-                    gateRevision += 1
-                }
-            ))
-            .toggleStyle(.switch)
-            explain(gate.detail)
-        }
+        switchRow(gate.label, gate.detail, Binding(
+            get: { gate.wanted },
+            set: { on in
+                gate.set(on)
+                gateRevision += 1
+            }
+        ))
     }
 
     @ViewBuilder
