@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/MetalKVPool.swift
+title: LLM/Base/MetalKVPool.swift
 description: The paged KV cache for one attention layer, on the GPU.
 sources:
-  - resource: LLM/src/Base/MetalKVPool.swift
+  - resource: LLM/Base/MetalKVPool.swift
 tags: [orientation]
 timestamp: 2026-09-05T12:00:00Z
 ---

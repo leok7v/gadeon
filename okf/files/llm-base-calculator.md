@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/Calculator.swift
+title: LLM/Base/Calculator.swift
 description: The engine behind the always-available calculator tool, and the
   shapes models actually send it that it tolerates on purpose.
 sources:
-  - resource: LLM/src/Base/Calculator.swift
+  - resource: LLM/Base/Calculator.swift
 tags: [orientation]
 timestamp: 2026-09-04T11:00:00Z
 ---

@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Diag.swift
+title: LLM/Base/Diag.swift
 description: The one diagnostics sink, shared by App and LLM.
 sources:
-  - resource: LLM/src/Base/Diag.swift
+  - resource: LLM/Base/Diag.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

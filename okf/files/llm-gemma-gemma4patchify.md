@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4Patchify.swift
+title: LLM/Gemma/Gemma4Patchify.swift
 description: An image into the patches and positions the tower consumes.
 sources:
-  - resource: LLM/src/Gemma/Gemma4Patchify.swift
+  - resource: LLM/Gemma/Gemma4Patchify.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

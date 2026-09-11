@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/TeX.swift
+title: MD/TeX.swift
 description: Inline maths, mapped to Unicode rather than laid out.
 sources:
-  - resource: MD/src/TeX.swift
+  - resource: MD/TeX.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

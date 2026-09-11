@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/TTS/SpeakableText.swift
+title: LLM/TTS/SpeakableText.swift
 description: Markdown answer text turned into sentences a voice should
   say.
 sources:
-  - resource: LLM/src/TTS/SpeakableText.swift
+  - resource: LLM/TTS/SpeakableText.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

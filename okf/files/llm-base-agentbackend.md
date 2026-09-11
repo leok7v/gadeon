@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/AgentBackend.swift
+title: LLM/Base/AgentBackend.swift
 description: The seam every turn loop renders and decodes against.
 sources:
-  - resource: LLM/src/Base/AgentBackend.swift
+  - resource: LLM/Base/AgentBackend.swift
 tags: [orientation]
 timestamp: 2026-09-05T12:00:00Z
 ---

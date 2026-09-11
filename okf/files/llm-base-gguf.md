@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/GGUF.swift
+title: LLM/Base/GGUF.swift
 description: A GGUF v3 reader over the mapped file.
 sources:
-  - resource: LLM/src/Base/GGUF.swift
+  - resource: LLM/Base/GGUF.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

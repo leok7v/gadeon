@@ -1,10 +1,10 @@
 ---
 type: File
-title: MD/src/KaTeX.swift
+title: MD/KaTeX.swift
 description: A self-contained TeX math layout engine. One file, one font, no
   WebView and no JavaScript.
 sources:
-  - resource: MD/src/KaTeX.swift
+  - resource: MD/KaTeX.swift
 tags: [orientation, vendored]
 timestamp: 2026-08-10T03:30:00Z
 ---
@@ -15,7 +15,7 @@ this package carries in Resources. Parse and lay out a fragment, then draw or
 rasterize it.
 
 Its output is GEOMETRY, so a change here breaks nothing that compiles and
-shows up in no diff. `MD/tests/KaTeXGoldenTests.swift` is the gate.
+shows up in no diff. `MD/MDTests/KaTeXGoldenTests.swift` is the gate.
 
 Carried in from another project, and it now obeys the house rules rather
 than claiming the exemption it used to. Four divergences from upstream must

@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/SpeechGate.swift
+title: LLM/Base/SpeechGate.swift
 description: Which live audio ever becomes tokens.
 sources:
-  - resource: LLM/src/Base/SpeechGate.swift
+  - resource: LLM/Base/SpeechGate.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

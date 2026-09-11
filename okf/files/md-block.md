@@ -1,10 +1,10 @@
 ---
 type: File
-title: MD/src/Block.swift
+title: MD/Block.swift
 description: The block model. One AST feeds every renderer and both
   parsers.
 sources:
-  - resource: MD/src/Block.swift
+  - resource: MD/Block.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

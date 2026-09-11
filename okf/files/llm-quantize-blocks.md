@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Quantize/Blocks.swift
+title: LLM/Quantize/Blocks.swift
 description: The one ggml-type-to-decoder table, and the predicate every
   dispatch site asks.
 sources:
-  - resource: LLM/src/Quantize/Blocks.swift
+  - resource: LLM/Quantize/Blocks.swift
 tags: [orientation]
 timestamp: 2026-08-22T19:30:00Z
 ---

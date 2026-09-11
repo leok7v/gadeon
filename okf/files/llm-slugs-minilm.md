@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Slugs/MiniLM.swift
+title: LLM/Slugs/MiniLM.swift
 description: A sentence encoder, the embedder behind the semantic index.
 sources:
-  - resource: LLM/src/Slugs/MiniLM.swift
+  - resource: LLM/Slugs/MiniLM.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

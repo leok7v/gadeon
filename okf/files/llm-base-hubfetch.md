@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/HubFetch.swift
+title: LLM/Base/HubFetch.swift
 description: Model download from the Hugging Face Hub, with no dependency.
 sources:
-  - resource: LLM/src/Base/HubFetch.swift
+  - resource: LLM/Base/HubFetch.swift
 tags: [orientation]
 timestamp: 2026-09-05T12:00:00Z
 ---

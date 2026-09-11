@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenMetalViT.swift
+title: LLM/Qwen/QwenMetalViT.swift
 description: The Qwen3-VL vision tower on the GPU.
 sources:
-  - resource: LLM/src/Qwen/QwenMetalViT.swift
+  - resource: LLM/Qwen/QwenMetalViT.swift
 tags: [orientation]
 timestamp: 2026-09-05T02:00:00Z
 ---

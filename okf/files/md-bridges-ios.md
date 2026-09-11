@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/Bridges-iOS.swift
+title: MD/Bridges-iOS.swift
 description: The UIKit side of the native text surface.
 sources:
-  - resource: MD/src/Bridges-iOS.swift
+  - resource: MD/Bridges-iOS.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

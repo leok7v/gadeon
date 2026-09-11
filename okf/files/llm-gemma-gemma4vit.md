@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4ViT.swift
+title: LLM/Gemma/Gemma4ViT.swift
 description: The gemma-4 vision tower on the CPU.
 sources:
-  - resource: LLM/src/Gemma/Gemma4ViT.swift
+  - resource: LLM/Gemma/Gemma4ViT.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

@@ -32,7 +32,7 @@ types reach both families through a generic slice over their materializing
 decoders. Q8_0 and IQ4_NL join them as eight 32-weight blocks per 256-weight
 span, with a compile-time tail flag for a row that is not a multiple of 256;
 Q4_0 and Q2_0 measured better on their own kernels. The Swift codecs in
-`LLM/src/Quantize` are the oracle and are themselves gated against ggml.
+`LLM/Quantize` are the oracle and are themselves gated against ggml.
 
 The drafting head closes the file: k masked-argmax passes pick the best
 clusters out of 2048, then one gathered dot-and-argmax runs over only the

@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/PdfTable.swift
+title: MD/PdfTable.swift
 description: One table drawn into the PDF renderer.
 sources:
-  - resource: MD/src/PdfTable.swift
+  - resource: MD/PdfTable.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

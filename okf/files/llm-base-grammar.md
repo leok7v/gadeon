@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Grammar.swift
+title: LLM/Base/Grammar.swift
 description: A byte-level NFA that constrains what the sampler may pick.
 sources:
-  - resource: LLM/src/Base/Grammar.swift
+  - resource: LLM/Base/Grammar.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

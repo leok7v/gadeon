@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/SpecialIndex.swift
+title: LLM/Base/SpecialIndex.swift
 description: Finds the earliest control token in one pass instead of one
   whole-text search per special.
 sources:
-  - resource: LLM/src/Base/SpecialIndex.swift
+  - resource: LLM/Base/SpecialIndex.swift
 timestamp: 2026-08-31T15:00:00Z
 ---
 

@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/TableMetrics.swift
+title: MD/TableMetrics.swift
 description: Shared column-width maths for every table renderer.
 sources:
-  - resource: MD/src/TableMetrics.swift
+  - resource: MD/TableMetrics.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

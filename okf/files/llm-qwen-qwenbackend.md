@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenBackend.swift
+title: LLM/Qwen/QwenBackend.swift
 description: The ternary CPU engine adapted to the backend seam.
 sources:
-  - resource: LLM/src/Qwen/QwenBackend.swift
+  - resource: LLM/Qwen/QwenBackend.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

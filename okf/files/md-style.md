@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/Style.swift
+title: MD/Style.swift
 description: The app-facing look.
 sources:
-  - resource: MD/src/Style.swift
+  - resource: MD/Style.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

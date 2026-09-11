@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/Find.swift
+title: MD/Find.swift
 description: Find across the transcript's per-message text surfaces.
 sources:
-  - resource: MD/src/Find.swift
+  - resource: MD/Find.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

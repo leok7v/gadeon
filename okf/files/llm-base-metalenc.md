@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/MetalEnc.swift
+title: LLM/Base/MetalEnc.swift
 description: The typed one-token dispatch surface.
 sources:
-  - resource: LLM/src/Base/MetalEnc.swift
+  - resource: LLM/Base/MetalEnc.swift
 tags: [orientation]
 timestamp: 2026-09-07T04:40:00Z
 ---

@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Tensor.swift
+title: LLM/Base/Tensor.swift
 description: A strided f32 CPU tensor library over Accelerate.
 sources:
-  - resource: LLM/src/Base/Tensor.swift
+  - resource: LLM/Base/Tensor.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

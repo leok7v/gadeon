@@ -15,9 +15,6 @@
 //
 //  Nothing here is safe to change by eye: the output is geometry, and a
 //  glyph moved by a point compiles clean and reads as no diff at all.
-//  MD/tests/KaTeXGoldenTests.swift fingerprints 36 formulas by their
-//  layout metrics and by a hash of their rasterized pixels -- run it
-//  after touching anything in this file.
 //
 
 import Foundation

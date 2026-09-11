@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Pdf2mdPublic.swift
+title: LLM/Base/Pdf2mdPublic.swift
 description: The public seam over the vendored PDF converter.
 sources:
-  - resource: LLM/src/Base/Pdf2mdPublic.swift
+  - resource: LLM/Base/Pdf2mdPublic.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/SoftSpan.swift
+title: LLM/Base/SoftSpan.swift
 description: One attachment resolved into everything a turn needs from it.
 sources:
-  - resource: LLM/src/Base/SoftSpan.swift
+  - resource: LLM/Base/SoftSpan.swift
 tags: [orientation]
 timestamp: 2026-09-05T03:30:00Z
 ---

@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/MergeTable.swift
+title: LLM/Base/MergeTable.swift
 description: The merge-rank BPE both tokenizers run, with the split that
   keeps it linear.
 sources:
-  - resource: LLM/src/Base/MergeTable.swift
+  - resource: LLM/Base/MergeTable.swift
 timestamp: 2026-08-31T15:00:00Z
 ---
 

@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/EngineTypes.swift
+title: LLM/Base/EngineTypes.swift
 description: The error and the speculative-decode tally every backend
   shares.
 sources:
-  - resource: LLM/src/Base/EngineTypes.swift
+  - resource: LLM/Base/EngineTypes.swift
 tags: [orientation]
 timestamp: 2026-08-26T02:00:00Z
 ---

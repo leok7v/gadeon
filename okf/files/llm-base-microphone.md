@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Microphone.swift
+title: LLM/Base/Microphone.swift
 description: The microphone as mono f32 samples at a requested rate.
 sources:
-  - resource: LLM/src/Base/Microphone.swift
+  - resource: LLM/Base/Microphone.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

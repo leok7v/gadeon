@@ -295,7 +295,6 @@ struct Docs2mdTests {
     //     pandoc harvest-report.md -o harvest-report.docx
     //     pandoc harvest-report.md -o harvest-report.pptx
     //
-    // Two components up from LLM/tests/<file> is LLM.
     private static let written = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
         .deletingLastPathComponent()

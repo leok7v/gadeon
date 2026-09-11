@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4MetalAssist.swift
+title: LLM/Gemma/Gemma4MetalAssist.swift
 description: The gemma-4 MTP drafting head on the GPU.
 sources:
-  - resource: LLM/src/Gemma/Gemma4MetalAssist.swift
+  - resource: LLM/Gemma/Gemma4MetalAssist.swift
 tags: [orientation]
 timestamp: 2026-08-29T02:30:00Z
 ---

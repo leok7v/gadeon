@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenModel.swift
+title: LLM/Qwen/QwenModel.swift
 description: Ternary geometry and per-layer tensor handles, for two
   lineages.
 sources:
-  - resource: LLM/src/Qwen/QwenModel.swift
+  - resource: LLM/Qwen/QwenModel.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

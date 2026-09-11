@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/DocumentText.swift
+title: MD/DocumentText.swift
 description: A whole document flattened into one attributed string.
 sources:
-  - resource: MD/src/DocumentText.swift
+  - resource: MD/DocumentText.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

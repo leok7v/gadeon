@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/MarkdownView.swift
+title: MD/MarkdownView.swift
 description: The per-block SwiftUI renderer.
 sources:
-  - resource: MD/src/MarkdownView.swift
+  - resource: MD/MarkdownView.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

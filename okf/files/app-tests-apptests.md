@@ -1,9 +1,9 @@
 ---
 type: File
-title: App/tests/AppTests.swift
+title: App/AppTests/AppTests.swift
 description: The app layer's own unit tests, hosted by the app target.
 sources:
-  - resource: App/tests/AppTests.swift
+  - resource: App/AppTests/AppTests.swift
 tags: [orientation]
 timestamp: 2026-09-03T12:30:00Z
 ---

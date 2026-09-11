@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/TTS/Kittens.swift
+title: LLM/TTS/Kittens.swift
 description: The speech model itself, transliterated from its reference C.
 sources:
-  - resource: LLM/src/TTS/Kittens.swift
+  - resource: LLM/TTS/Kittens.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

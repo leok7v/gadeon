@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenViT.swift
+title: LLM/Qwen/QwenViT.swift
 description: The Qwen3-VL vision tower on the CPU.
 sources:
-  - resource: LLM/src/Qwen/QwenViT.swift
+  - resource: LLM/Qwen/QwenViT.swift
 tags: [orientation]
 timestamp: 2026-09-05T02:00:00Z
 ---

@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/Diag.swift
+title: MD/Diag.swift
 description: A diagnostics sink the host app wires in.
 sources:
-  - resource: MD/src/Diag.swift
+  - resource: MD/Diag.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

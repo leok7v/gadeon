@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/ImagePrefetch.swift
+title: MD/ImagePrefetch.swift
 description: Fit an image into a box.
 sources:
-  - resource: MD/src/ImagePrefetch.swift
+  - resource: MD/ImagePrefetch.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

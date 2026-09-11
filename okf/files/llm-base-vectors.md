@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/Vectors.swift
+title: LLM/Base/Vectors.swift
 description: The two reductions every engine and every gate needs, written
   once.
 sources:
-  - resource: LLM/src/Base/Vectors.swift
+  - resource: LLM/Base/Vectors.swift
 tags: [orientation]
 timestamp: 2026-09-02T14:00:00Z
 ---

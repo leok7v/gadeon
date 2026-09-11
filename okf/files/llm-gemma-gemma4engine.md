@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4Engine.swift
+title: LLM/Gemma/Gemma4Engine.swift
 description: The gemma-4 text forward on the CPU.
 sources:
-  - resource: LLM/src/Gemma/Gemma4Engine.swift
+  - resource: LLM/Gemma/Gemma4Engine.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

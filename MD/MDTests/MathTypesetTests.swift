@@ -18,7 +18,7 @@ final class MathTypesetTests: XCTestCase {
         let dir = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-            .appendingPathComponent("src/Resources")
+            .appendingPathComponent("Resources")
         let url = Res.url("STIXTwoMath", "otf", dev: dir)
         XCTAssertNotNil(url, "the math font is not found by the resource "
                              + "seam, so iOS has no MATH-table font at all")

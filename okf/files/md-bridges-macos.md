@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/Bridges-macOS.swift
+title: MD/Bridges-macOS.swift
 description: The AppKit side of the native text surface.
 sources:
-  - resource: MD/src/Bridges-macOS.swift
+  - resource: MD/Bridges-macOS.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

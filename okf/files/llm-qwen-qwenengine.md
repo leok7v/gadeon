@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenEngine.swift
+title: LLM/Qwen/QwenEngine.swift
 description: The ternary forward loop on the CPU.
 sources:
-  - resource: LLM/src/Qwen/QwenEngine.swift
+  - resource: LLM/Qwen/QwenEngine.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

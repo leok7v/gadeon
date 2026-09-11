@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/Resample.swift
+title: LLM/Base/Resample.swift
 description: Pillow's separable resampler, because that is what the config
   means.
 sources:
-  - resource: LLM/src/Base/Resample.swift
+  - resource: LLM/Base/Resample.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Media.swift
+title: LLM/Base/Media.swift
 description: The one seam every attachment crosses on its way into a turn.
 sources:
-  - resource: LLM/src/Base/Media.swift
+  - resource: LLM/Base/Media.swift
 tags: [orientation]
 timestamp: 2026-09-05T00:30:00Z
 ---

@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/Vision.swift
+title: LLM/Base/Vision.swift
 description: An image file becomes the CGImage the media encoders scale,
   and the size they scale it to.
 sources:
-  - resource: LLM/src/Base/Vision.swift
+  - resource: LLM/Base/Vision.swift
 tags: [orientation]
 timestamp: 2026-09-05T12:00:00Z
 ---

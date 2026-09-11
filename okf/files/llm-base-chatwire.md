@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/ChatWire.swift
+title: LLM/Base/ChatWire.swift
 description: The chat markup a model's own template speaks, derived by
   diffing it.
 sources:
-  - resource: LLM/src/Base/ChatWire.swift
+  - resource: LLM/Base/ChatWire.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

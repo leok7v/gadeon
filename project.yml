@@ -36,7 +36,7 @@ settings:
 targets:
   # The pure-Swift engine (tokenizer + chat template + sampler + the
   # backend-agnostic ChatSession seam) with per-backend compute under
-  # src/{Base,Qwen,Gemma,Quantize,Slugs,TTS}. A native static-library target
+  # LLM/{Base,Qwen,Gemma,Quantize,Slugs,TTS}. A native static-library target
   # so it inherits every project arch setting -- EXCLUDED_ARCHS reaches it, so
   # Release and "Any Mac" builds are arm64-only like the app.
   #
@@ -47,18 +47,24 @@ targets:
   # below. The five TTS/Slugs data blobs are excluded the same way: a static
   # library has no bundle, so their resources phase would be just as
   # orphaned; the app copies them in directly (see the Res seam,
-  # LLM/src/Base/Res.swift).
+  # LLM/Base/Res.swift).
   LLM:
     type: library.static
     supportedDestinations: [macOS, iOS]
     sources:
-      - path: LLM/src
+      - path: LLM/Base
+      - path: LLM/Gemma
+      - path: LLM/Quantize
+      - path: LLM/Qwen
+      - path: LLM/Slugs
         excludes:
-          - Slugs/minilm.gguf
-          - TTS/kitten_full.gguf
-          - TTS/voices.safetensors
-          - TTS/en_rules
-          - TTS/en_list
+          - minilm.gguf
+      - path: LLM/TTS
+        excludes:
+          - kitten_full.gguf
+          - voices.safetensors
+          - en_rules
+          - en_list
     # Compiler settings set directly, NOT via platform.xcconfig -- that xcconfig
     # carries app-only settings (the *-iOS/-macOS source split) this library
     # must not inherit. Versions come from version.xcconfig (YY.MM.DD /
@@ -99,8 +105,14 @@ targets:
     type: library.static
     supportedDestinations: [macOS, iOS]
     sources:
-      - path: MD/src
+      - path: MD
         excludes:
+          - MDTests
+          - DESIGN.md
+          - INTEGRATION.md
+          - README.md
+          - buildServer.json
+          - .swiftpm
           - Resources/highlights.ini
           - Resources/STIXTwoMath.otf
     settings:
@@ -139,7 +151,7 @@ targets:
     sources:
       - path: App
         excludes:
-          - tests
+          - AppTests
       # IQTables/IQKernels are #included by Kernels.metal; compiled on their
       # own they see no codebook and fail. Kernels.metal lives on the APP
       # target (not LLM) so it lands in a product Metal actually loads from
@@ -149,19 +161,19 @@ targets:
       # instead so they end up inside Gadeon.app. The pronunciation data
       # carries no file extension, which leaves xcodegen unable to infer a
       # build phase for it: naming the phase is what puts it in the bundle.
-      - path: LLM/src/Slugs/minilm.gguf
+      - path: LLM/Slugs/minilm.gguf
         buildPhase: resources
-      - path: LLM/src/TTS/kitten_full.gguf
+      - path: LLM/TTS/kitten_full.gguf
         buildPhase: resources
-      - path: LLM/src/TTS/voices.safetensors
+      - path: LLM/TTS/voices.safetensors
         buildPhase: resources
-      - path: LLM/src/TTS/en_rules
+      - path: LLM/TTS/en_rules
         buildPhase: resources
-      - path: LLM/src/TTS/en_list
+      - path: LLM/TTS/en_list
         buildPhase: resources
-      - path: MD/src/Resources/highlights.ini
+      - path: MD/Resources/highlights.ini
         buildPhase: resources
-      - path: MD/src/Resources/STIXTwoMath.otf
+      - path: MD/Resources/STIXTwoMath.otf
         buildPhase: resources
     dependencies:
       - target: Chat
@@ -252,7 +264,7 @@ targets:
     type: bundle.unit-test
     supportedDestinations: [macOS, iOS]
     sources:
-      - App/tests
+      - App/AppTests
     dependencies:
       - target: Gadeon
       - target: Chat
@@ -274,7 +286,7 @@ targets:
     type: bundle.unit-test
     supportedDestinations: [macOS, iOS]
     sources:
-      - LLM/tests
+      - LLM/LLMTests
       # The Metal kernel tests need a default.metallib of their own -- see
       # the LLM target comment; the same trap applies to a test bundle.
       - path: LLM/metal
@@ -291,7 +303,7 @@ targets:
     type: bundle.unit-test
     supportedDestinations: [macOS, iOS]
     sources:
-      - MD/tests
+      - MD/MDTests
     dependencies:
       - target: MD
     settings:
@@ -324,7 +336,7 @@ schemes:
       # noisy.
       #
       # The boxes below are the diagnostics master and one category
-      # (LLM/src/Base/DiagGate.swift, LLM/src/Base/Flags.swift). Nothing is
+      # (LLM/Base/DiagGate.swift, LLM/Base/Flags.swift). Nothing is
       # logged at all unless --debug or Settings > Debug is on; checking a
       # category box then adds it to what the verbosity ladder already gives.
       environmentVariables:
@@ -335,5 +347,6 @@ schemes:
         "--debug": false
         "--verbosity 3": false
         "--log-memory": false
+        "--speech-floor 3": false
     archive:
       config: Release

@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/EngineBackend.swift
+title: LLM/Base/EngineBackend.swift
 description: The one adapter from any text engine to the backend seam.
 sources:
-  - resource: LLM/src/Base/EngineBackend.swift
+  - resource: LLM/Base/EngineBackend.swift
 tags: [orientation]
 timestamp: 2026-09-05T07:00:00Z
 ---

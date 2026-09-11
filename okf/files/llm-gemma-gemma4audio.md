@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4Audio.swift
+title: LLM/Gemma/Gemma4Audio.swift
 description: The gemma-4 audio tower on the CPU.
 sources:
-  - resource: LLM/src/Gemma/Gemma4Audio.swift
+  - resource: LLM/Gemma/Gemma4Audio.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

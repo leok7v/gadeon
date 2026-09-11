@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4MetalBackend.swift
+title: LLM/Gemma/Gemma4MetalBackend.swift
 description: The gemma GPU engine adapted to the backend seam.
 sources:
-  - resource: LLM/src/Gemma/Gemma4MetalBackend.swift
+  - resource: LLM/Gemma/Gemma4MetalBackend.swift
 tags: [orientation]
 timestamp: 2026-09-05T05:00:00Z
 ---

@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenAttention.swift
+title: LLM/Qwen/QwenAttention.swift
 description: The full-attention layer, one token at a time.
 sources:
-  - resource: LLM/src/Qwen/QwenAttention.swift
+  - resource: LLM/Qwen/QwenAttention.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

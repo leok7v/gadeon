@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/ModelShape.swift
+title: LLM/Base/ModelShape.swift
 description: What a loaded model IS, before any turn has produced a
   number.
 sources:
-  - resource: LLM/src/Base/ModelShape.swift
+  - resource: LLM/Base/ModelShape.swift
 tags: [orientation]
 timestamp: 2026-09-05T12:00:00Z
 ---

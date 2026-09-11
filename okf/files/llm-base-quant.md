@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/Quant.swift
+title: LLM/Base/Quant.swift
 description: The 2-bit block types, their dequant and their mat-vec, and the
   type-dispatching front door the engines call.
 sources:
-  - resource: LLM/src/Base/Quant.swift
+  - resource: LLM/Base/Quant.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

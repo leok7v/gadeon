@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Quantize/RowScales.swift
+title: LLM/Quantize/RowScales.swift
 description: Reads the .rsc row-scale file and multiplies a tensor's output
   rows before quantization.
 sources:
-  - resource: LLM/src/Quantize/RowScales.swift
+  - resource: LLM/Quantize/RowScales.swift
 tags: [orientation]
 timestamp: 2026-08-20T23:25:00Z
 ---

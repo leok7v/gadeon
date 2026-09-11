@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/TTS/PhonemizerProsody.swift
+title: LLM/TTS/PhonemizerProsody.swift
 description: The prosody sub-steps, in the order they run.
 sources:
-  - resource: LLM/src/TTS/PhonemizerProsody.swift
+  - resource: LLM/TTS/PhonemizerProsody.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

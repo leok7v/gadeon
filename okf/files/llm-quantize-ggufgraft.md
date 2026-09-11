@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Quantize/GGUFGraft.swift
+title: LLM/Quantize/GGUFGraft.swift
 description: Grafts a vision tower from a donor GGUF onto a text-only one,
   header rewrite plus verbatim tensor copy.
 sources:
-  - resource: LLM/src/Quantize/GGUFGraft.swift
+  - resource: LLM/Quantize/GGUFGraft.swift
 tags: [orientation]
 timestamp: 2026-08-24T02:20:00Z
 ---

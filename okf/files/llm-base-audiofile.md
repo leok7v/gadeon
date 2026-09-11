@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/AudioFile.swift
+title: LLM/Base/AudioFile.swift
 description: Any container the system reads, decoded to mono f32.
 sources:
-  - resource: LLM/src/Base/AudioFile.swift
+  - resource: LLM/Base/AudioFile.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

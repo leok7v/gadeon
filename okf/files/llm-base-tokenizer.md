@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/Tokenizer.swift
+title: LLM/Base/Tokenizer.swift
 description: GPT-2 byte-level BPE, out of the GGUF's own metadata or a
   tokenizer.json.
 sources:
-  - resource: LLM/src/Base/Tokenizer.swift
+  - resource: LLM/Base/Tokenizer.swift
 tags: [orientation]
 timestamp: 2026-09-05T12:00:00Z
 ---

@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenMetalKernelBench.swift
+title: LLM/Qwen/QwenMetalKernelBench.swift
 description: One tensor, one kernel, many iterations, reported as GB/s.
 sources:
-  - resource: LLM/src/Qwen/QwenMetalKernelBench.swift
+  - resource: LLM/Qwen/QwenMetalKernelBench.swift
 tags: [orientation]
 timestamp: 2026-08-20T05:00:00Z
 ---

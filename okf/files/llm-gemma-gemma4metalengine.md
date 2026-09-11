@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4MetalEngine.swift
+title: LLM/Gemma/Gemma4MetalEngine.swift
 description: The gemma-4 text forward on the GPU.
 sources:
-  - resource: LLM/src/Gemma/Gemma4MetalEngine.swift
+  - resource: LLM/Gemma/Gemma4MetalEngine.swift
 tags: [orientation]
 timestamp: 2026-09-07T03:30:00Z
 ---

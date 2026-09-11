@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Safetensors.swift
+title: LLM/Base/Safetensors.swift
 description: A multi-shard safetensors reader that decodes to f32.
 sources:
-  - resource: LLM/src/Base/Safetensors.swift
+  - resource: LLM/Base/Safetensors.swift
 tags: [orientation]
 timestamp: 2026-08-18T21:32:34Z
 ---

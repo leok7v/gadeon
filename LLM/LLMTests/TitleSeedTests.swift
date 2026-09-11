@@ -9,7 +9,6 @@ import Testing
 // from the template alone -- which is also why it is per-TEMPLATE and not
 // per-engine, whatever backend runs afterwards.
 struct TitleSeedTests {
-    // Two components up from LLM/tests/<file> is LLM.
     private static func fixture(_ name: String) throws -> String {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/WebSearch.swift
+title: LLM/Base/WebSearch.swift
 description: The two web-search providers, and the one shape they both
   come back as.
 sources:
-  - resource: LLM/src/Base/WebSearch.swift
+  - resource: LLM/Base/WebSearch.swift
 tags: [orientation]
 timestamp: 2026-09-09T02:00:00Z
 ---

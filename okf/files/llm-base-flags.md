@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/Flags.swift
+title: LLM/Base/Flags.swift
 description: The one registry a launch knob is declared in, and the
   argv > UserDefaults > default resolution every reader of it shares.
 sources:
-  - resource: LLM/src/Base/Flags.swift
+  - resource: LLM/Base/Flags.swift
 tags: [orientation]
 timestamp: 2026-09-03T00:00:00Z
 ---

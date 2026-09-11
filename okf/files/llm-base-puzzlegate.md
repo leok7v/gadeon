@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/PuzzleGate.swift
+title: LLM/Base/PuzzleGate.swift
 description: The reasoning corpus and the scoring rule that decides PASS,
   FAIL or INCOMPLETE.
 sources:
-  - resource: LLM/src/Base/PuzzleGate.swift
+  - resource: LLM/Base/PuzzleGate.swift
 tags: [orientation]
 timestamp: 2026-08-21T22:30:00Z
 ---

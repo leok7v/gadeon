@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Quantize/KQuants.swift
+title: LLM/Quantize/KQuants.swift
 description: q2_K, q3_K and q4_K decode -- the non-IQ types that turn up
   inside unsloth's mixed files.
 sources:
-  - resource: LLM/src/Quantize/KQuants.swift
+  - resource: LLM/Quantize/KQuants.swift
 tags: [orientation]
 timestamp: 2026-08-22T18:30:00Z
 ---

@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4Kernels.swift
+title: LLM/Gemma/Gemma4Kernels.swift
 description: Elementwise, norm and rope primitives for gemma-4.
 sources:
-  - resource: LLM/src/Gemma/Gemma4Kernels.swift
+  - resource: LLM/Gemma/Gemma4Kernels.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

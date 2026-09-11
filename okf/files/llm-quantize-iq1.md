@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Quantize/IQ1.swift
+title: LLM/Quantize/IQ1.swift
 description: ggml IQ1_S decode, gated bit-for-bit against ggml's own
   dequantisation of the same file.
 sources:
-  - resource: LLM/src/Quantize/IQ1.swift
+  - resource: LLM/Quantize/IQ1.swift
 tags: [orientation]
 timestamp: 2026-08-22T17:40:00Z
 ---

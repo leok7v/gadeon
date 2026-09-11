@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4Media.swift
+title: LLM/Gemma/Gemma4Media.swift
 description: An attachment turned into the span a turn carries for it.
 sources:
-  - resource: LLM/src/Gemma/Gemma4Media.swift
+  - resource: LLM/Gemma/Gemma4Media.swift
 tags: [orientation]
 timestamp: 2026-09-05T00:30:00Z
 ---

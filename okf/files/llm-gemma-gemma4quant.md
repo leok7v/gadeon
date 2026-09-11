@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4Quant.swift
+title: LLM/Gemma/Gemma4Quant.swift
 description: The block types the gemma-4 repack emits.
 sources:
-  - resource: LLM/src/Gemma/Gemma4Quant.swift
+  - resource: LLM/Gemma/Gemma4Quant.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

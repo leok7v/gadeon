@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/TTS/Speech.swift
+title: LLM/TTS/Speech.swift
 description: Offline text to speech. Text in, samples out.
 sources:
-  - resource: LLM/src/TTS/Speech.swift
+  - resource: LLM/TTS/Speech.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

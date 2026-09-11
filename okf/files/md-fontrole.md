@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/FontRole.swift
+title: MD/FontRole.swift
 description: A semantic role mapped to a platform font.
 sources:
-  - resource: MD/src/FontRole.swift
+  - resource: MD/FontRole.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

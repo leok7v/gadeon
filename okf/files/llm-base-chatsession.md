@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/ChatSession.swift
+title: LLM/Base/ChatSession.swift
 description: The multi-turn loop that seeds a turn, decodes it, and runs
   its tools.
 sources:
-  - resource: LLM/src/Base/ChatSession.swift
+  - resource: LLM/Base/ChatSession.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/ChatML.swift
+title: LLM/Base/ChatML.swift
 description: One fixed empty-think ChatML prompt.
 sources:
-  - resource: LLM/src/Base/ChatML.swift
+  - resource: LLM/Base/ChatML.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

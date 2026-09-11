@@ -409,9 +409,6 @@ final class JinjaGoldenTests: XCTestCase {
     // empty-think prefix: assert the role markup renders, not a byte match.
 
     func testQwenTemplateSmoke() throws {
-        // Three components up from LLM/tests/<file> is the repo root. A
-        // downloaded set nests the template under its commit sha; a hand-made
-        // dev copy sits flat. Both are read, as ContinuationRenderTests does.
         let base = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()

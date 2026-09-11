@@ -64,7 +64,6 @@ final class KaTeXGoldenTests: XCTestCase {
         ("styles", "\\displaystyle \\frac{a}{b} \\textstyle \\frac{c}{d}"),
     ]
 
-    // Two components up from MD/tests/<file> is MD.
     static var goldenURL: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

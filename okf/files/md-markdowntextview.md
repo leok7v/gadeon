@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/MarkdownTextView.swift
+title: MD/MarkdownTextView.swift
 description: The whole document as one selectable native surface.
 sources:
-  - resource: MD/src/MarkdownTextView.swift
+  - resource: MD/MarkdownTextView.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

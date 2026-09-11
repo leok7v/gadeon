@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/GemmaTokenizer.swift
+title: LLM/Gemma/GemmaTokenizer.swift
 description: The SentencePiece-flavoured tokenizer gemma ships.
 sources:
-  - resource: LLM/src/Gemma/GemmaTokenizer.swift
+  - resource: LLM/Gemma/GemmaTokenizer.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

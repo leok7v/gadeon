@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Slugs/Slugs.swift
+title: LLM/Slugs/Slugs.swift
 description: On-device semantic search over a local corpus.
 sources:
-  - resource: LLM/src/Slugs/Slugs.swift
+  - resource: LLM/Slugs/Slugs.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

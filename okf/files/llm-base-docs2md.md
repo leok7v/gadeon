@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/Docs2md.swift
+title: LLM/Base/Docs2md.swift
 description: Vendored. The formats that state their own structure, read to
   Markdown.
 sources:
-  - resource: LLM/src/Base/Docs2md.swift
+  - resource: LLM/Base/Docs2md.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

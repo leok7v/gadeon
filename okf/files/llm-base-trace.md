@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Trace.swift
+title: LLM/Base/Trace.swift
 description: One structured event of a session's internal life.
 sources:
-  - resource: LLM/src/Base/Trace.swift
+  - resource: LLM/Base/Trace.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

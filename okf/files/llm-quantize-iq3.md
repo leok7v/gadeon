@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Quantize/IQ3.swift
+title: LLM/Quantize/IQ3.swift
 description: iq2_xs, iq2_s, iq3_xxs, iq3_s and iq4_xs decode -- the rest of
   the IQ family, all gated against ggml.
 sources:
-  - resource: LLM/src/Quantize/IQ3.swift
+  - resource: LLM/Quantize/IQ3.swift
 tags: [orientation]
 timestamp: 2026-08-22T18:38:00Z
 ---

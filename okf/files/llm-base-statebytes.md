@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/StateBytes.swift
+title: LLM/Base/StateBytes.swift
 description: The wire format a parked conversation is written in.
 sources:
-  - resource: LLM/src/Base/StateBytes.swift
+  - resource: LLM/Base/StateBytes.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

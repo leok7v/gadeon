@@ -1,9 +1,9 @@
 ---
 type: File
-title: App/tests/SentencesTests.swift
+title: App/AppTests/SentencesTests.swift
 description: The sentence splitter's cut rules, pinned.
 sources:
-  - resource: App/tests/SentencesTests.swift
+  - resource: App/AppTests/SentencesTests.swift
 tags: [orientation]
 timestamp: 2026-09-08T00:00:00Z
 ---

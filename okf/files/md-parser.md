@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/Parser.swift
+title: MD/Parser.swift
 description: The batch parser.
 sources:
-  - resource: MD/src/Parser.swift
+  - resource: MD/Parser.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

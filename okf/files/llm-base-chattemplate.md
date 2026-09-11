@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/ChatTemplate.swift
+title: LLM/Base/ChatTemplate.swift
 description: A conversation rendered through the model's own jinja
   template.
 sources:
-  - resource: LLM/src/Base/ChatTemplate.swift
+  - resource: LLM/Base/ChatTemplate.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

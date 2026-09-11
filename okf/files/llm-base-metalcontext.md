@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/MetalContext.swift
+title: LLM/Base/MetalContext.swift
 description: One device, one queue, the kernel library and the mapped
   weights.
 sources:
-  - resource: LLM/src/Base/MetalContext.swift
+  - resource: LLM/Base/MetalContext.swift
 tags: [orientation]
 timestamp: 2026-09-05T12:00:00Z
 ---

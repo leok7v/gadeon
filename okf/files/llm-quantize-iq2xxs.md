@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Quantize/IQ2XXS.swift
+title: LLM/Quantize/IQ2XXS.swift
 description: ggml IQ2_XXS and IQ1_M decode, both gated bit-for-bit against
   ggml's own dequantisation.
 sources:
-  - resource: LLM/src/Quantize/IQ2XXS.swift
+  - resource: LLM/Quantize/IQ2XXS.swift
 tags: [orientation]
 timestamp: 2026-08-22T18:30:00Z
 ---

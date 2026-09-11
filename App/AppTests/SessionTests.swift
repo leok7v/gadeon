@@ -3,10 +3,6 @@ import XCTest
 @testable import Chat
 import LLM
 
-// Offline structural checks that the DRIVER, not just ChatSession, gets a
-// turn from a mock backend to an event stream correctly -- the same script
-// shapes LLM/tests/ChatSessionTests.swift drives ChatSession with directly,
-// one layer up through Session.sendText.
 private final class MockBackend: AgentBackend, @unchecked Sendable {
     let eos: Int32 = -1
     private let scripts: [[Int32]]

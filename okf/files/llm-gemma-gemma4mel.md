@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4Mel.swift
+title: LLM/Gemma/Gemma4Mel.swift
 description: The log-mel frontend the gemma-4 audio tower expects.
 sources:
-  - resource: LLM/src/Gemma/Gemma4Mel.swift
+  - resource: LLM/Gemma/Gemma4Mel.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Tools.swift
+title: LLM/Base/Tools.swift
 description: The cross-platform half of the agentic tool layer.
 sources:
-  - resource: LLM/src/Base/Tools.swift
+  - resource: LLM/Base/Tools.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

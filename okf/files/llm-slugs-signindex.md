@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Slugs/SignIndex.swift
+title: LLM/Slugs/SignIndex.swift
 description: A 384-d embedding turned into a short list of matching
   articles.
 sources:
-  - resource: LLM/src/Slugs/SignIndex.swift
+  - resource: LLM/Slugs/SignIndex.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

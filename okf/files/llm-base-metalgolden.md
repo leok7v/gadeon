@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/MetalGolden.swift
+title: LLM/Base/MetalGolden.swift
 description: Byte-exact golden buffers for the kernels.
 sources:
-  - resource: LLM/src/Base/MetalGolden.swift
+  - resource: LLM/Base/MetalGolden.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

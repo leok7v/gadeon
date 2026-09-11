@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4MetalViT.swift
+title: LLM/Gemma/Gemma4MetalViT.swift
 description: The gemma-4 vision tower on the GPU.
 sources:
-  - resource: LLM/src/Gemma/Gemma4MetalViT.swift
+  - resource: LLM/Gemma/Gemma4MetalViT.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

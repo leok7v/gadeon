@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/VisionPositions.swift
+title: LLM/Base/VisionPositions.swift
 description: Where an image sits in the position stream, for mrope.
 sources:
-  - resource: LLM/src/Base/VisionPositions.swift
+  - resource: LLM/Base/VisionPositions.swift
 tags: [orientation]
 timestamp: 2026-08-26T02:00:00Z
 ---

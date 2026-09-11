@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Quantize/IQTablesEmit.swift
+title: LLM/Quantize/IQTablesEmit.swift
 description: The MSL codebook header, emitted from the Swift grids the SIMD
   engine already carries.
 sources:
-  - resource: LLM/src/Quantize/IQTablesEmit.swift
+  - resource: LLM/Quantize/IQTablesEmit.swift
 tags: [orientation]
 timestamp: 2026-09-10T03:00:00Z
 ---

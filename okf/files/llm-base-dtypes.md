@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/Dtypes.swift
+title: LLM/Base/Dtypes.swift
 description: BF16 and FP8 e4m3 decode, the two safetensors dtypes the
   loader meets that Swift has no native type for.
 sources:
-  - resource: LLM/src/Base/Dtypes.swift
+  - resource: LLM/Base/Dtypes.swift
 tags: [orientation]
 timestamp: 2026-08-25T12:10:00Z
 ---

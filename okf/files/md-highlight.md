@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/Highlight.swift
+title: MD/Highlight.swift
 description: Regex-driven syntax highlighting.
 sources:
-  - resource: MD/src/Highlight.swift
+  - resource: MD/Highlight.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

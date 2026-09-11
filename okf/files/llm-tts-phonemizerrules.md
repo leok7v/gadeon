@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/TTS/PhonemizerRules.swift
+title: LLM/TTS/PhonemizerRules.swift
 description: Rule application, covering replacements, context scoring and
   stress promotion.
 sources:
-  - resource: LLM/src/TTS/PhonemizerRules.swift
+  - resource: LLM/TTS/PhonemizerRules.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

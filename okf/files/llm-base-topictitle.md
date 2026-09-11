@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/TopicTitle.swift
+title: LLM/Base/TopicTitle.swift
 description: The title a conversation gets when the model will not give one.
 sources:
-  - resource: LLM/src/Base/TopicTitle.swift
+  - resource: LLM/Base/TopicTitle.swift
 tags: [orientation]
 timestamp: 2026-08-30T00:30:00Z
 ---

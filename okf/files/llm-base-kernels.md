@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Kernels.swift
+title: LLM/Base/Kernels.swift
 description: Elementwise, norm, rope and attention primitives.
 sources:
-  - resource: LLM/src/Base/Kernels.swift
+  - resource: LLM/Base/Kernels.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

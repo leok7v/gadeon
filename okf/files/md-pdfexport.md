@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/PdfExport.swift
+title: MD/PdfExport.swift
 description: Paginated PDF through CoreText.
 sources:
-  - resource: MD/src/PdfExport.swift
+  - resource: MD/PdfExport.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

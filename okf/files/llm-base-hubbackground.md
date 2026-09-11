@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/HubBackground.swift
+title: LLM/Base/HubBackground.swift
 description: The iOS background-session download path and the piece
   assembler that keeps resume equal to the .part file's length.
 sources:
-  - resource: LLM/src/Base/HubBackground.swift
+  - resource: LLM/Base/HubBackground.swift
 tags: [orientation]
 timestamp: 2026-08-24T18:35:00Z
 ---

@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/DiagGate.swift
+title: LLM/Base/DiagGate.swift
 description: Which diagnostic categories write to the log, and how each one
   is asked for.
 sources:
-  - resource: LLM/src/Base/DiagGate.swift
+  - resource: LLM/Base/DiagGate.swift
 tags: [orientation]
 timestamp: 2026-09-08T23:30:00Z
 ---

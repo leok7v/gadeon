@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Gemma/Gemma4Backend.swift
+title: LLM/Gemma/Gemma4Backend.swift
 description: The gemma-4 CPU engine adapted to the backend seam.
 sources:
-  - resource: LLM/src/Gemma/Gemma4Backend.swift
+  - resource: LLM/Gemma/Gemma4Backend.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

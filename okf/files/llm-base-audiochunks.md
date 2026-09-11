@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/AudioChunks.swift
+title: LLM/Base/AudioChunks.swift
 description: Cut a recording at its pauses, not at arbitrary offsets.
 sources:
-  - resource: LLM/src/Base/AudioChunks.swift
+  - resource: LLM/Base/AudioChunks.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Quantize/IQ3Grid.swift
+title: LLM/Quantize/IQ3Grid.swift
 description: The iq2xs, iq2s, iq3xxs and iq3s codebooks plus kvalues_iq4nl,
   transcribed from ggml.
 sources:
-  - resource: LLM/src/Quantize/IQ3Grid.swift
+  - resource: LLM/Quantize/IQ3Grid.swift
 tags: [orientation]
 timestamp: 2026-08-22T18:38:00Z
 ---

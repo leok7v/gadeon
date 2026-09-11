@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Jinja.swift
+title: LLM/Base/Jinja.swift
 description: A Jinja2 subset, enough to render a chat template.
 sources:
-  - resource: LLM/src/Base/Jinja.swift
+  - resource: LLM/Base/Jinja.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

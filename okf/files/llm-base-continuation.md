@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Continuation.swift
+title: LLM/Base/Continuation.swift
 description: Pure helpers for the turn loop.
 sources:
-  - resource: LLM/src/Base/Continuation.swift
+  - resource: LLM/Base/Continuation.swift
 tags: [orientation]
 timestamp: 2026-09-05T12:00:00Z
 ---

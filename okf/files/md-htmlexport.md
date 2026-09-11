@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/HtmlExport.swift
+title: MD/HtmlExport.swift
 description: Self-contained HTML export.
 sources:
-  - resource: MD/src/HtmlExport.swift
+  - resource: MD/HtmlExport.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

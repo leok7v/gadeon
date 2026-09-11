@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenMetalSelfTest.swift
+title: LLM/Qwen/QwenMetalSelfTest.swift
 description: Bring-up validation, before the full engine exists.
 sources:
-  - resource: LLM/src/Qwen/QwenMetalSelfTest.swift
+  - resource: LLM/Qwen/QwenMetalSelfTest.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

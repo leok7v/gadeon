@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/TTS/Phonemizer.swift
+title: LLM/TTS/Phonemizer.swift
 description: The stateful half of the phonemizer port.
 sources:
-  - resource: LLM/src/TTS/Phonemizer.swift
+  - resource: LLM/TTS/Phonemizer.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

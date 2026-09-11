@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Quantize/IQ2Grid.swift
+title: LLM/Quantize/IQ2Grid.swift
 description: The ggml iq2xxs_grid, ksigns_iq2xs and kmask_iq2xs tables,
   transcribed.
 sources:
-  - resource: LLM/src/Quantize/IQ2Grid.swift
+  - resource: LLM/Quantize/IQ2Grid.swift
 tags: [orientation]
 timestamp: 2026-08-22T18:30:00Z
 ---

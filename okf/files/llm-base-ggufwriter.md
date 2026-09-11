@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/GGUFWriter.swift
+title: LLM/Base/GGUFWriter.swift
 description: A GGUF v3 container writer, the mirror of the reader.
 sources:
-  - resource: LLM/src/Base/GGUFWriter.swift
+  - resource: LLM/Base/GGUFWriter.swift
 tags: [orientation]
 timestamp: 2026-08-18T21:32:34Z
 ---

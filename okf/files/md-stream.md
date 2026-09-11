@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/Stream.swift
+title: MD/Stream.swift
 description: The incremental parser for live output.
 sources:
-  - resource: MD/src/Stream.swift
+  - resource: MD/Stream.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

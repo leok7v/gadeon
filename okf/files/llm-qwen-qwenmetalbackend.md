@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenMetalBackend.swift
+title: LLM/Qwen/QwenMetalBackend.swift
 description: The GPU engine adapted to the backend seam.
 sources:
-  - resource: LLM/src/Qwen/QwenMetalBackend.swift
+  - resource: LLM/Qwen/QwenMetalBackend.swift
 tags: [orientation]
 timestamp: 2026-09-05T12:00:00Z
 ---

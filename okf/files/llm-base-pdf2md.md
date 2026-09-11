@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Pdf2md.swift
+title: LLM/Base/Pdf2md.swift
 description: Vendored. A PDF read to Markdown through its own geometry.
 sources:
-  - resource: LLM/src/Base/Pdf2md.swift
+  - resource: LLM/Base/Pdf2md.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

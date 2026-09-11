@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/JSONBytes.swift
+title: LLM/Base/JSONBytes.swift
 description: The encoder for a blob that will be compared, hashed or diffed.
 sources:
-  - resource: LLM/src/Base/JSONBytes.swift
+  - resource: LLM/Base/JSONBytes.swift
 tags: [orientation]
 timestamp: 2026-09-02T14:20:00Z
 ---

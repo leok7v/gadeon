@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/VideoFrames.swift
+title: LLM/Base/VideoFrames.swift
 description: Frames sampled from a video, each with its timestamp.
 sources:
-  - resource: LLM/src/Base/VideoFrames.swift
+  - resource: LLM/Base/VideoFrames.swift
 tags: [orientation]
 timestamp: 2026-09-05T03:30:00Z
 ---

@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/ModelCatalog.swift
+title: LLM/Base/ModelCatalog.swift
 description: Where each offered model comes from, and what it costs.
 sources:
-  - resource: LLM/src/Base/ModelCatalog.swift
+  - resource: LLM/Base/ModelCatalog.swift
 tags: [orientation]
 timestamp: 2026-08-26T02:30:00Z
 ---

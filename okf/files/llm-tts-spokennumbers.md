@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/TTS/SpokenNumbers.swift
+title: LLM/TTS/SpokenNumbers.swift
 description: Numerals turned into the words a voice says for them.
 sources:
-  - resource: LLM/src/TTS/SpokenNumbers.swift
+  - resource: LLM/TTS/SpokenNumbers.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

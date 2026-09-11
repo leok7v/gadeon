@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/Sampler.swift
+title: LLM/Base/Sampler.swift
 description: Every sampling filter, in a fixed order.
 sources:
-  - resource: LLM/src/Base/Sampler.swift
+  - resource: LLM/Base/Sampler.swift
 tags: [orientation]
 timestamp: 2026-09-05T12:00:00Z
 ---

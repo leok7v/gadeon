@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Base/MetalGates.swift
+title: LLM/Base/MetalGates.swift
 description: The two lock-backed flags every GPU forward polls.
 sources:
-  - resource: LLM/src/Base/MetalGates.swift
+  - resource: LLM/Base/MetalGates.swift
 tags: [orientation]
 timestamp: 2026-09-05T05:00:00Z
 ---

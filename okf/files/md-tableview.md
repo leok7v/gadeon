@@ -1,9 +1,9 @@
 ---
 type: File
-title: MD/src/TableView.swift
+title: MD/TableView.swift
 description: A GFM table in SwiftUI, with per-column alignment.
 sources:
-  - resource: MD/src/TableView.swift
+  - resource: MD/TableView.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

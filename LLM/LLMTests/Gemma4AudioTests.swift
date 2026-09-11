@@ -18,7 +18,6 @@ import Testing
 // The SAME sentence in two languages, so a pass is about the model and not
 // about one lucky clip. Fixtures + attribution in LLM/fixtures/audio/.
 //
-// Two components up from LLM/tests/<file> is LLM.
 private let audioFixtures = URL(fileURLWithPath: #filePath)
     .deletingLastPathComponent()
     .deletingLastPathComponent()

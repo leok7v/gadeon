@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenMetalEngine.swift
+title: LLM/Qwen/QwenMetalEngine.swift
 description: The ternary forward loop on the GPU.
 sources:
-  - resource: LLM/src/Qwen/QwenMetalEngine.swift
+  - resource: LLM/Qwen/QwenMetalEngine.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

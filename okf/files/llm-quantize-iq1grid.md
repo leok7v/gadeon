@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Quantize/IQ1Grid.swift
+title: LLM/Quantize/IQ1Grid.swift
 description: The 2048-entry ggml iq1s_grid_gpu table, transcribed, plus the
   0.125 delta constant.
 sources:
-  - resource: LLM/src/Quantize/IQ1Grid.swift
+  - resource: LLM/Quantize/IQ1Grid.swift
 tags: [orientation]
 timestamp: 2026-08-22T17:40:00Z
 ---

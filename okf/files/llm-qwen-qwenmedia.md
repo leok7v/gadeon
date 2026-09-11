@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenMedia.swift
+title: LLM/Qwen/QwenMedia.swift
 description: The Qwen VL family's attachment encoder over the resident
   Metal tower.
 sources:
-  - resource: LLM/src/Qwen/QwenMedia.swift
+  - resource: LLM/Qwen/QwenMedia.swift
 tags: [orientation]
 timestamp: 2026-09-05T03:30:00Z
 ---

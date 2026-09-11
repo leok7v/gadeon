@@ -167,7 +167,6 @@ struct Pdf2mdTests {
     // consumes and must not reach back into it -- the same reason the speech
     // and vision fixtures moved under LLM/fixtures. Replace the app's sample
     // and this wants replacing with it.
-    // Two components up from LLM/tests/<file> is LLM.
     private static let shipped = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()
         .deletingLastPathComponent()

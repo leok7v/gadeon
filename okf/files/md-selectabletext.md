@@ -1,10 +1,10 @@
 ---
 type: File
-title: MD/src/SelectableText.swift
+title: MD/SelectableText.swift
 description: Atomic units, and the incremental splice that streams into
   them.
 sources:
-  - resource: MD/src/SelectableText.swift
+  - resource: MD/SelectableText.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

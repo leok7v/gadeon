@@ -1,9 +1,9 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenGDN.swift
+title: LLM/Qwen/QwenGDN.swift
 description: The gated delta-net layer, one token at a time.
 sources:
-  - resource: LLM/src/Qwen/QwenGDN.swift
+  - resource: LLM/Qwen/QwenGDN.swift
 tags: [orientation]
 timestamp: 2026-08-10T00:10:24Z
 ---

@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Base/CommandArgs.swift
+title: LLM/Base/CommandArgs.swift
 description: One owner of a command line, so what a flag took is known
   rather than reconstructed.
 sources:
-  - resource: LLM/src/Base/CommandArgs.swift
+  - resource: LLM/Base/CommandArgs.swift
 tags: [orientation]
 timestamp: 2026-09-02T13:00:00Z
 ---

@@ -1,10 +1,10 @@
 ---
 type: File
-title: LLM/src/Qwen/QwenMetalMTP.swift
+title: LLM/Qwen/QwenMetalMTP.swift
 description: The nextn drafter block on the GPU, with its own KV pool that
   follows the base position.
 sources:
-  - resource: LLM/src/Qwen/QwenMetalMTP.swift
+  - resource: LLM/Qwen/QwenMetalMTP.swift
 tags: [orientation]
 timestamp: 2026-09-06T14:00:00Z
 ---
