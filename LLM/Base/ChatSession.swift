@@ -165,9 +165,6 @@ public actor ChatSession {
     private let toolDialectXML: Bool
     // The markup this model's template speaks, derived from it (ChatWire).
     private let wire: ChatWire
-    // Whether the template numbers attachments itself (see
-    // numbersAttachments); when it does, ChatSession must not do it too.
-    private let templateNumbers: Bool
     // The turn's base sampler (no grammar mask). The masked variant is swapped
     // in only while a <tool_call> is open -- a logitMask forces the engine to
     // materialize the full logit vector on CPU every token, so it must not ride
@@ -283,7 +280,6 @@ public actor ChatSession {
         self.thinkOpen = Array(wire.reasoningOpen.utf8)
         self.thinkClose = Array(wire.reasoningClose.utf8)
         self.toolDialectXML = template.contains("<function=")
-        self.templateNumbers = ChatSession.numbersAttachments(template)
         self.systemStable = system
         self.systemTail = systemTail
         self.runner = runner
@@ -779,7 +775,7 @@ public actor ChatSession {
     // delta rather than re-encoding the earlier ones.
     public nonisolated func replySoft(
         _ user: String, parts: [ContentPart], spans: [SoftSpan],
-        labelled: Bool = true, numberImages: Bool = false,
+        labelled: Bool = true,
         onReasoning: (@Sendable (String) -> Void)? = nil,
         onToolRound: (@Sendable (ToolRoundEvent) -> Void)? = nil
     ) -> AsyncStream<String> {
@@ -787,7 +783,6 @@ public actor ChatSession {
             let task = Task {
                 await self.runSoftTurn(
                     user, parts: parts, spans: spans, labelled: labelled,
-                    numberImages: numberImages,
                     onReasoning: onReasoning, onToolRound: onToolRound
                 ) { piece in cont.yield(piece) }
                 cont.finish()
@@ -1120,7 +1115,7 @@ public actor ChatSession {
               summary: String(user.prefix(80)), text: user)
         history.append(AgentMessage(role: "user", content: user))
         await installTurnSampler(vision: visionContext)
-        await runSeed(soft: [], numberImages: false, saved: saved,
+        await runSeed(soft: [], saved: saved,
                       onReasoning: onReasoning, onTool: onTool,
                       onToolRound: onToolRound, yield)
     }
@@ -1131,7 +1126,7 @@ public actor ChatSession {
     // changes; only where the embeddings come from at those positions.
     private func runSoftTurn(
         _ user: String, parts: [ContentPart], spans: [SoftSpan],
-        labelled: Bool, numberImages: Bool,
+        labelled: Bool,
         onReasoning: (@Sendable (String) -> Void)?,
         onToolRound: (@Sendable (ToolRoundEvent) -> Void)?,
         _ yield: @Sendable (String) -> Void) async {
@@ -1148,20 +1143,18 @@ public actor ChatSession {
                                     contentParts: numbered(parts,
                                                             labelled)))
         await installTurnSampler(vision: true)
-        await runSeed(soft: spans, numberImages: numberImages,
+        await runSeed(soft: spans,
                       saved: saved, onReasoning: onReasoning, onTool: nil,
                       onToolRound: onToolRound, yield)
     }
 
     private func runSeed(
-        soft: [SoftSpan],
-        numberImages: Bool, saved: SavedTurn,
+        soft: [SoftSpan], saved: SavedTurn,
         onReasoning: (@Sendable (String) -> Void)?,
         onTool: (@Sendable (String) -> Void)?,
         onToolRound: (@Sendable (ToolRoundEvent) -> Void)?,
         _ yield: @Sendable (String) -> Void) async {
-        let first = await seedOnce(fresh: committed.isEmpty,
-                                   numberImages: numberImages, soft: soft)
+        let first = await seedOnce(fresh: committed.isEmpty, soft: soft)
         if first.stopped {
             await rollbackTurn(saved)
         } else {
@@ -1295,16 +1288,14 @@ public actor ChatSession {
     // prefill the delta. Returns the first token to decode, the pp rate over
     // just that delta, and whether a prefill Stop aborted it.
     private func seedOnce(
-        fresh: Bool, numberImages: Bool, soft: [SoftSpan]
+        fresh: Bool, soft: [SoftSpan]
     ) async -> (seed: Int32, pp: Double, stopped: Bool) {
         let t0 = Date()
         var seed = backend.eos
         var added = 0
         var stopped = false
         do {
-            let r = try await seedDelta(fresh: fresh,
-                                        numberImages: numberImages,
-                                        soft: soft)
+            let r = try await seedDelta(fresh: fresh, soft: soft)
             seed = r.seed
             added = r.added
         } catch EngineError.stopped {
@@ -1335,7 +1326,7 @@ public actor ChatSession {
     // this turn's raw <think> and re-appends the stripped answer as a whole
     // block. Returns the first token to decode and the delta token count.
     private func seedDelta(
-        fresh: Bool, numberImages: Bool, soft: [SoftSpan]
+        fresh: Bool, soft: [SoftSpan]
     ) async throws -> (seed: Int32, added: Int) {
         // Non-fresh with only [system, user] in history = the first turn
         // over a precooked/primed prefix: the system block is already in the
@@ -1354,13 +1345,11 @@ public actor ChatSession {
             template: template, messages: deltaMsgs, tools: tools,
             addGenerationPrompt: false, enableThinking: enableThinking,
             reasoningEffort: reasoningEffort,
-            addVisionId: numberImages,
             bosToken: backend.bosToken)) ?? ""
         var fullText = (try? renderPrompt(
             template: template, messages: deltaMsgs, tools: tools,
             addGenerationPrompt: true, enableThinking: enableThinking,
             reasoningEffort: reasoningEffort,
-            addVisionId: numberImages,
             bosToken: backend.bosToken)) ?? ""
         // The delta model holds only while rendering [prev assistant, new
         // user] alone equals the tail of rendering the whole history. Gemma-4
@@ -1461,7 +1450,7 @@ public actor ChatSession {
                           _ labelled: Bool = true) -> [ContentPart] {
         var out: [ContentPart] = []
         for part in parts {
-            if let noun = ChatSession.noun(part), !templateNumbers, labelled {
+            if let noun = ChatSession.noun(part), labelled {
                 let n = (attachmentCounts[noun] ?? 0) + 1
                 attachmentCounts[noun] = n
                 out.append(.text("\(noun) \(n): "))
@@ -1469,23 +1458,6 @@ public actor ChatSession {
             out.append(part)
         }
         return out
-    }
-
-    // Whether the template numbers attachments on its own, DERIVED rather
-    // than assumed: render the same two-image turn with add_vision_id on and
-    // off and see whether it changed anything. Qwen renders "Picture 1: " and
-    // must not be numbered twice; gemma ignores the flag entirely.
-    private static func numbersAttachments(_ template: String) -> Bool {
-        let msg = AgentMessage(role: "user", content: "x",
-                               contentParts: [.image, .image, .text("x")])
-        func render(_ vid: Bool) -> String {
-            (try? renderPrompt(template: template, messages: [msg], tools: [],
-                               addGenerationPrompt: false,
-                               enableThinking: false,
-                               addVisionId: vid)) ?? ""
-        }
-        let on = render(true)
-        return !on.isEmpty && on != render(false)
     }
 
     // Pre-turn snapshot for a clean prefill-cancel rollback: the engine

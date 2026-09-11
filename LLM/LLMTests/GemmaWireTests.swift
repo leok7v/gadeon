@@ -522,9 +522,7 @@ final class GemmaWireTests: XCTestCase {
                       "parts did not render in caller order:\n\(kv)")
     }
 
-    // Qwen numbers attachments in its OWN template (add_vision_id), so
-    // ChatSession must not number them a second time.
-    func testTemplateThatNumbersIsNotDoubleNumbered() async throws {
+    func testASelfNumberingTemplateIsNeverAskedToNumber() async throws {
         let qwenish = "{%- for m in messages -%}"
             + "<|im_start|>{{ m.role }}\n"
             + "{%- for p in m.content -%}"
@@ -534,16 +532,22 @@ final class GemmaWireTests: XCTestCase {
             + "{%- endfor -%}<|im_end|>\n{%- endfor -%}"
             + "{%- if add_generation_prompt -%}<|im_start|>assistant\n"
             + "{%- endif -%}"
-        let backend = SoftTape(scripts: [[1001]], vocab: softVocab())
+        let backend = SoftTape(scripts: [[1001], [1002]], vocab: softVocab())
         let session = ChatSession(
             backend: backend, template: qwenish,
             system: "You are a bot.", vocabSize: 256)
         _ = await drain(session.replySoft("what?",
                                           parts: [.image, .text("what?")],
                                           spans: [imageSpan(2)]))
-        XCTAssertFalse(backend.kvText.contains("Picture 1:"),
-                       "a self-numbering template was numbered twice:\n"
-                       + backend.kvText)
+        _ = await drain(session.replySoft("and now?",
+                                          parts: [.image, .text("and now?")],
+                                          spans: [imageSpan(2)]))
+        let kv = backend.kvText
+        XCTAssertFalse(kv.contains("Picture 9:"),
+                       "the template was asked to number:\n\(kv)")
+        XCTAssertTrue(kv.contains("Picture 1:"), "turn one unnamed:\n\(kv)")
+        XCTAssertTrue(kv.contains("Picture 2:"),
+                      "turn two restarted the numbering:\n\(kv)")
     }
 
     // A block's OWN placeholders are soft positions, not further

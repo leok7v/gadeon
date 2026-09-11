@@ -759,7 +759,7 @@ public enum TurnEvent: Sendable {
     }
 
     private func softTurn(
-        _ typed: String, labelled: Bool, numberImages: Bool,
+        _ typed: String, labelled: Bool,
         thinkTokenCap: Int, thinkingActive: Bool,
         _ encode: @escaping @Sendable (
             @escaping @Sendable (VideoPeek) -> Void
@@ -777,7 +777,7 @@ public enum TurnEvent: Sendable {
                 ? Session.softDefaultPrompt(built.parts) : typed
             return session.replySoft(
                 ask, parts: built.parts + [.text(ask)], spans: built.spans,
-                labelled: labelled, numberImages: numberImages,
+                labelled: labelled,
                 onReasoning: hooks.onReasoning,
                 onToolRound: hooks.onToolRound)
         }
@@ -820,7 +820,6 @@ public enum TurnEvent: Sendable {
             asked.docs = docs
             asked.placeholder = placeholder
             let events = softTurn(typed, labelled: labelled,
-                                  numberImages: images.count > 1,
                                   thinkTokenCap: thinkTokenCap,
                                   thinkingActive: thinkingActive
             ) { onFrame in
@@ -842,7 +841,6 @@ public enum TurnEvent: Sendable {
                                 text: String(format: "Spoken, %.1fs", secs))
             asked.placeholder = true
             let events = softTurn(Session.spokenPrompt, labelled: false,
-                                  numberImages: false,
                                   thinkTokenCap: thinkTokenCap,
                                   thinkingActive: thinkingActive
             ) { _ in try await Session.encode(media, speech: said) }
