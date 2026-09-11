@@ -145,10 +145,6 @@ targets:
       # target (not LLM) so it lands in a product Metal actually loads from
       # -- see the LLM target comment above.
       - path: LLM/metal
-        excludes:
-          - IQTables.metal
-          - IQKernels.metal
-          - AssistKernels.metal
       # LLM's data blobs, excluded from the LLM target itself, copied in here
       # instead so they end up inside Gadeon.app. The pronunciation data
       # carries no file extension, which leaves xcodegen unable to infer a
@@ -230,10 +226,6 @@ targets:
         excludes:
           - Info.plist
       - path: LLM/metal
-        excludes:
-          - IQTables.metal
-          - IQKernels.metal
-          - AssistKernels.metal
     dependencies:
       - target: LLM
     settings:
@@ -286,10 +278,6 @@ targets:
       # The Metal kernel tests need a default.metallib of their own -- see
       # the LLM target comment; the same trap applies to a test bundle.
       - path: LLM/metal
-        excludes:
-          - IQTables.metal
-          - IQKernels.metal
-          - AssistKernels.metal
     dependencies:
       - target: LLM
     settings:

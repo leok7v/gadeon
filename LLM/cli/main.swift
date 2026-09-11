@@ -84,6 +84,11 @@ let greedyDecode = args.flag("--greedy")
 let stopAtVal = args.int("--stop-at")
 var stopArmed = true
 
+if args.flag("--emit-iq-tables") {
+    print(IQTablesEmit.header(), terminator: "")
+    exit(0)
+}
+
 try probeTTS()
 try probeVit()
 

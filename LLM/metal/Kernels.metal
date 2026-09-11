@@ -3,15 +3,13 @@
 // target compiles this file natively; the SwiftPM build runs the MetalBuild
 // plugin (LLM/plugins/MetalBuild). MetalContext loads the library from its
 // bundle -- no runtime source compile.
-//
 // Every kernel reproduces the numerics of the pure-Swift SIMD reference engine
 // (LLM/src/SIMD), which is itself at end-to-end parity with llama.cpp. The
 // SIMD engine is the op-by-op oracle: each kernel below has a named Swift
 // counterpart it must match (Q2_0.matvec, Kern.rmsnorm, GDN.step, ...).
-//
 // Weights live in a handful of no-copy buffers over the mmap'd GGUF; every
 // kernel that reads a weight takes a byte offset into the one it was handed.
-// [block-layout]
+//
 
 #include <metal_stdlib>
 using namespace metal;
@@ -36,7 +34,7 @@ inline float srq_side(float v, float s, float lo, float hi) {
 // W ne0=K (input, fastest), ne1=M (rows), at byte offset woff -- 64-bit,
 // because the weight buffer is the whole GGUF (>4 GB). The two-blocks-in-
 // flight shape below is TUNED, not incidental; do not simplify it without
-// re-measuring. [gemv-unroll]
+// re-measuring.
 struct GemvArgs { ulong woff; uint K; uint M; };
 
 kernel void q2_0_gemv(
@@ -132,7 +130,7 @@ kernel void q2_0_gemv(
 // Quantized simdgroup-matrix GEMM (prefill): out[N,M] = X[N,K] @ W[K,M].
 // One body for all three block types at both tile precisions. Weight rows are
 // [K,M]; X is token-major f32; out[n*M+m] matches GQ.matvec's column order.
-// [gemm-tiles]
+//
 struct block_q2_0 { half d; uchar qs[32]; };
 struct block_q4_0 { half d; uchar qs[16]; };
 struct block_q8_0 { half d; char qs[32]; };
@@ -143,7 +141,7 @@ struct block_iq4_nl { half d; uchar qs[16]; };
 // 2-bit, 4 per byte, w = (code-1)*d; Q8_0 is one signed byte each, w = q*d;
 // Q4_0 splits a byte into element j (LOW nibble) and j+16 (HIGH), w =
 // (q-8)*d -- so its two sub-blocks are every low nibble and every high one
-// rather than two contiguous spans. [gemm-tiles]
+// rather than two contiguous spans.
 static inline void dq_q2_0_h(device const block_q2_0 * xb, short il,
                              thread half4x4 & reg) {
     device const uchar * qs = xb->qs;
@@ -186,7 +184,7 @@ static inline void dq_q8_0_h(device const block_q8_0 * xb, short il,
 
 // The 8x8 matrix-unit product over one staged NK slice: four A tiles against
 // two B tiles, into the eight output tiles this simdgroup owns. Shared by
-// every GEMM here, quantized or not. [gemm-tiles]
+// every GEMM here, quantized or not.
 template <typename Reg>
 inline void simd_mm_slice(threadgroup const Reg * sa,
                           threadgroup const Reg * sb,
@@ -220,7 +218,7 @@ inline void simd_mm_slice(threadgroup const Reg * sa,
 // Write the accumulated tiles to dst, or stage them through threadgroup
 // memory when this tile runs off the end of M or N. The spill stages as F32
 // in the SAME shmem, which is why a partial tile needs 8192 B even at half
-// precision. [gemm-tiles]
+// precision.
 inline void store_mm_tile(thread simdgroup_float8x8 (&mc)[8],
                           device float * dst, threadgroup uchar * shmem,
                           int r0, int r1, int M, int N,
@@ -260,7 +258,7 @@ inline void store_mm_tile(thread simdgroup_float8x8 (&mc)[8],
 // they are the block walk, which is the one place the three types genuinely
 // differ. DQ is a TEMPLATE parameter, not a function pointer argument, so
 // the call is resolved at compile time by the language rather than by hoping
-// the optimizer devirtualizes it. [gemm-tiles]
+// the optimizer devirtualizes it.
 template <typename Block, typename Reg, short NSUB, int QK,
           void (*DQ)(device const Block *, short, thread matrix<Reg, 4, 4> &)>
 inline void gemm_mm_impl(
@@ -389,12 +387,1985 @@ GEMM_MM_KERNEL(f16_gemm_mm_h, block_f16x32, half, 2, 32, dq_f16_h)
 GEMM_MM_KERNEL(bf16_gemm_mm_h, block_bf16x32, half, 2, 32, dq_bf16_h)
 GEMM_MM_KERNEL(f32_gemm_mm_h, block_f32x32, half, 2, 32, dq_f32_h)
 
-// Included, not compiled on their own: the tables are the codebooks the
-// kernels index, and neither file is a translation unit by itself. They sit
-// BELOW simd_mm_slice and store_mm_tile because the IQ tile shares them.
-#include "IQTables.metal"
-#include "IQKernels.metal"
-#include "AssistKernels.metal"
+// The codebooks the IQ kernels index, generated from ggml-common.h and
+// so a header rather than a source. It sits BELOW simd_mm_slice and
+// store_mm_tile because the IQ tile shares them.
+#include "IQTables.h"
+
+
+// ggml IQ and K quant decode on the GPU, ported from LLM/src/Quantize (which
+// is gated bit-for-bit against ggml). dq_sub decodes ONE 32-weight sub-block;
+// gemv, dequant and the embedding gather all build on it, so eleven types
+// cost three kernels.
+
+#define TY_Q2K     10
+#define TY_Q3K     11
+#define TY_Q4K     12
+#define TY_Q5K     13
+#define TY_Q6K     14
+#define TY_IQ2XXS  16
+#define TY_IQ2XS   17
+#define TY_IQ3XXS  18
+#define TY_IQ1S    19
+#define TY_IQ3S    21
+#define TY_IQ2S    22
+#define TY_IQ4XS   23
+#define TY_IQ1M    29
+
+// A super-block is 50..144 bytes, so nothing inside one is reliably aligned
+// for a ushort/uint cast. Every multi-byte field is assembled from bytes.
+inline ushort iq_u16(device const uchar *p) {
+    return (ushort) p[0] | ((ushort) p[1] << 8);
+}
+
+inline uint iq_u32(device const uchar *p) {
+    return (uint) p[0] | ((uint) p[1] << 8)
+         | ((uint) p[2] << 16) | ((uint) p[3] << 24);
+}
+
+inline float iq_f16(device const uchar *p) {
+    return (float) as_type<half>(iq_u16(p));
+}
+
+inline float iq_sgn(uchar signs, uint j, float v) {
+    return (signs & kmask_iq2xs[j]) ? -v : v;
+}
+
+inline void dq_sub_iq1s(device const uchar *b, uint ib, thread float *w) {
+    const float d = iq_f16(b);
+    const ushort h = iq_u16(b + 34 + ib * 2);
+    const float dl = d * (float) (2 * ((h >> 12) & 7) + 1);
+    const float delta = (h & 0x8000) ? -0.125f : 0.125f;
+    for (uint l = 0; l < 4; ++l) {
+        const uint e = iq1s_grid_gpu[b[2 + ib * 4 + l]
+                                     | (((h >> (3 * l)) & 7) << 8)];
+        for (uint j = 0; j < 8; ++j) {
+            const float n = (float) ((e >> (8 * (j % 4) + 4 * (j / 4))) & 0xF);
+            w[l * 8 + j] = dl * (n - 1.0f + delta);
+        }
+    }
+}
+
+inline void dq_sub_iq1m(device const uchar *b, uint ib, thread float *w) {
+    ushort sc[4];
+    for (uint i = 0; i < 4; ++i) { sc[i] = iq_u16(b + 48 + i * 2); }
+    const ushort bits = (sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0)
+                      | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000);
+    const float d = (float) as_type<half>(bits);
+    const ushort s = sc[ib / 2];
+    const uint sh = 6 * (ib % 2);
+    const float dl1 = d * (float) (2 * ((s >> sh) & 7) + 1);
+    const float dl2 = d * (float) (2 * ((s >> (sh + 3)) & 7) + 1);
+    const uchar h0 = b[32 + ib * 2], h1 = b[33 + ib * 2];
+    for (uint l = 0; l < 4; ++l) {
+        const uchar h = (l < 2) ? h0 : h1;
+        const uint up = (l % 2 == 0) ? ((uint) h << 8) : ((uint) h << 4);
+        const uint e = iq1s_grid_gpu[b[ib * 4 + l] | (up & 0x700)];
+        const float delta = (h & ((l % 2 == 0) ? 0x08 : 0x80))
+                          ? -0.125f : 0.125f;
+        const float dl = (l < 2) ? dl1 : dl2;
+        for (uint j = 0; j < 8; ++j) {
+            const float n = (float) ((e >> (8 * (j % 4) + 4 * (j / 4))) & 0xF);
+            w[l * 8 + j] = dl * (n - 1.0f + delta);
+        }
+    }
+}
+
+inline void dq_sub_iq2xxs(device const uchar *b, uint ib, thread float *w) {
+    const float d = iq_f16(b);
+    const uint a0 = iq_u32(b + 2 + ib * 8);
+    const uint a1 = iq_u32(b + 6 + ib * 8);
+    const float db = d * (0.5f + (float) (a1 >> 28)) * 0.25f;
+    for (uint l = 0; l < 4; ++l) {
+        const uint gi = ((a0 >> (8 * l)) & 0xFF) * 2;
+        const uint lo = iq2xxs_grid_u32[gi], hi = iq2xxs_grid_u32[gi + 1];
+        const uchar signs = ksigns_iq2xs[(a1 >> (7 * l)) & 127];
+        for (uint j = 0; j < 8; ++j) {
+            const uint e = (j < 4) ? lo : hi;
+            const float g = (float) ((e >> (8 * (j % 4))) & 0xFF);
+            w[l * 8 + j] = iq_sgn(signs, j, db * g);
+        }
+    }
+}
+
+inline void dq_sub_iq2xs(device const uchar *b, uint ib, thread float *w) {
+    const float d = iq_f16(b);
+    const uchar sc = b[66 + ib];
+    const float db0 = d * (0.5f + (float) (sc & 0xF)) * 0.25f;
+    const float db1 = d * (0.5f + (float) (sc >> 4)) * 0.25f;
+    for (uint l = 0; l < 4; ++l) {
+        const ushort q = iq_u16(b + 2 + (ib * 4 + l) * 2);
+        const uint gi = (q & 511) * 2;
+        const uint lo = iq2xs_grid_u32[gi], hi = iq2xs_grid_u32[gi + 1];
+        const uchar signs = ksigns_iq2xs[q >> 9];
+        const float dl = (l < 2) ? db0 : db1;
+        for (uint j = 0; j < 8; ++j) {
+            const uint e = (j < 4) ? lo : hi;
+            const float g = (float) ((e >> (8 * (j % 4))) & 0xFF);
+            w[l * 8 + j] = iq_sgn(signs, j, dl * g);
+        }
+    }
+}
+
+inline void dq_sub_iq2s(device const uchar *b, uint ib, thread float *w) {
+    const float d = iq_f16(b);
+    const uchar sc = b[74 + ib];
+    const uchar qh = b[66 + ib];
+    const float db0 = d * (0.5f + (float) (sc & 0xF)) * 0.25f;
+    const float db1 = d * (0.5f + (float) (sc >> 4)) * 0.25f;
+    for (uint l = 0; l < 4; ++l) {
+        const uint gi = (b[2 + ib * 4 + l]
+                         | ((((uint) qh) << (8 - 2 * l)) & 0x300)) * 2;
+        const uint lo = iq2s_grid_u32[gi], hi = iq2s_grid_u32[gi + 1];
+        const uchar signs = b[34 + ib * 4 + l];
+        const float dl = (l < 2) ? db0 : db1;
+        for (uint j = 0; j < 8; ++j) {
+            const uint e = (j < 4) ? lo : hi;
+            const float g = (float) ((e >> (8 * (j % 4))) & 0xFF);
+            w[l * 8 + j] = iq_sgn(signs, j, dl * g);
+        }
+    }
+}
+
+inline void dq_sub_iq3xxs(device const uchar *b, uint ib, thread float *w) {
+    const float d = iq_f16(b);
+    const uint aux = iq_u32(b + 66 + ib * 4);
+    const float db = d * (0.5f + (float) (aux >> 28)) * 0.5f;
+    for (uint l = 0; l < 4; ++l) {
+        const uchar signs = ksigns_iq2xs[(aux >> (7 * l)) & 127];
+        const uint g1 = iq3xxs_grid[b[2 + ib * 8 + 2 * l]];
+        const uint g2 = iq3xxs_grid[b[2 + ib * 8 + 2 * l + 1]];
+        for (uint j = 0; j < 4; ++j) {
+            w[l * 8 + j] = iq_sgn(signs, j,
+                db * (float) ((g1 >> (8 * j)) & 0xFF));
+            w[l * 8 + j + 4] = iq_sgn(signs, j + 4,
+                db * (float) ((g2 >> (8 * j)) & 0xFF));
+        }
+    }
+}
+
+inline void dq_sub_iq3s(device const uchar *b, uint ib, thread float *w) {
+    const float d = iq_f16(b);
+    const uchar sc = b[106 + ib / 2];
+    const float db = (ib % 2 == 0) ? d * (float) (1 + 2 * (sc & 0xF))
+                                   : d * (float) (1 + 2 * (sc >> 4));
+    const uchar qh = b[66 + ib];
+    for (uint l = 0; l < 4; ++l) {
+        const uint base = 2 + ib * 8 + 2 * l;
+        const uint g1 = iq3s_grid[b[base]
+            | ((((uint) qh) << (8 - 2 * l)) & 256)];
+        const uint g2 = iq3s_grid[b[base + 1]
+            | ((((uint) qh) << (7 - 2 * l)) & 256)];
+        const uchar signs = b[74 + ib * 4 + l];
+        for (uint j = 0; j < 4; ++j) {
+            w[l * 8 + j] = iq_sgn(signs, j,
+                db * (float) ((g1 >> (8 * j)) & 0xFF));
+            w[l * 8 + j + 4] = iq_sgn(signs, j + 4,
+                db * (float) ((g2 >> (8 * j)) & 0xFF));
+        }
+    }
+}
+
+// Four nibbles of one 32-bit word as floats, byte 0 first (little endian),
+// so element 4i of a sub-block is the low byte of word i.
+__attribute__((always_inline))
+inline float4 nib4(uint word) {
+    return float4(as_type<uchar4>(word));
+}
+
+inline void put4(thread float *w, uint at, float4 v) {
+    w[at] = v.x;
+    w[at + 1] = v.y;
+    w[at + 2] = v.z;
+    w[at + 3] = v.w;
+}
+
+// A 136-byte block is 8-byte aligned, so the 16 codes of a sub-block are two
+// uint2 loads; the low nibble of byte j is element j and the high one j+16.
+inline void dq_sub_iq4xs(device const uchar *b, uint ib, thread float *w) {
+    const float d = iq_f16(b);
+    const ushort sh = iq_u16(b + 2);
+    const uchar sl = b[4 + ib / 2];
+    const int ls = (int) ((sl >> (4 * (ib % 2))) & 0xF)
+                 | (int) (((sh >> (2 * ib)) & 3) << 4);
+    const float dl = d * (float) (ls - 32);
+    device const uint2 * q2 = (device const uint2 *) (b + 8 + ib * 16);
+    #pragma clang loop unroll(full)
+    for (uint k = 0; k < 2; ++k) {
+        const uint2 v = q2[k];
+        #pragma clang loop unroll(full)
+        for (uint m = 0; m < 2; ++m) {
+            const uint word = m == 0 ? v.x : v.y;
+            const uchar4 lo = as_type<uchar4>(word & 0x0F0F0F0Fu);
+            const uchar4 hi = as_type<uchar4>((word >> 4) & 0x0F0F0F0Fu);
+            const uint at = (k * 2 + m) * 4;
+            put4(w, at, dl * float4(kvalues_iq4nl[lo.x], kvalues_iq4nl[lo.y],
+                                    kvalues_iq4nl[lo.z], kvalues_iq4nl[lo.w]));
+            put4(w, at + 16, dl * float4(kvalues_iq4nl[hi.x],
+                                         kvalues_iq4nl[hi.y],
+                                         kvalues_iq4nl[hi.z],
+                                         kvalues_iq4nl[hi.w]));
+        }
+    }
+}
+
+inline void dq_sub_q2k(device const uchar *b, uint ib, thread float *w) {
+    const float d = iq_f16(b + 80), dmin = iq_f16(b + 82);
+    const uint shift = 2 * (ib % 4);
+    const uint qOff = 16 + (ib / 4) * 32;
+    for (uint h = 0; h < 2; ++h) {
+        const uchar sc = b[ib * 2 + h];
+        const float dl = d * (float) (sc & 0xF);
+        const float ml = dmin * (float) (sc >> 4);
+        for (uint l = 0; l < 16; ++l) {
+            const uchar q = b[qOff + h * 16 + l];
+            w[h * 16 + l] = dl * (float) ((q >> shift) & 3) - ml;
+        }
+    }
+}
+
+inline void dq_sub_q3k(device const uchar *b, uint ib, thread float *w) {
+    const float dAll = iq_f16(b + 108);
+    uint aux[4];
+    aux[0] = iq_u32(b + 96);
+    aux[1] = iq_u32(b + 100);
+    aux[2] = iq_u32(b + 104);
+    const uint kmask1 = 0x03030303u, kmask2 = 0x0f0f0f0fu;
+    const uint tmp = aux[2];
+    aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+    aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+    aux[0] = (aux[0] & kmask2) | (((tmp >> 0) & kmask1) << 4);
+    aux[1] = (aux[1] & kmask2) | (((tmp >> 2) & kmask1) << 4);
+    const uint shift = 2 * (ib % 4);
+    const uint qOff = 32 + (ib / 4) * 32;
+    const uchar m = (uchar) (1u << ib);
+    for (uint h = 0; h < 2; ++h) {
+        const uint isc = ib * 2 + h;
+        const int s = (int) (char) ((aux[isc / 4] >> (8 * (isc % 4))) & 0xFF);
+        const float dl = dAll * (float) (s - 32);
+        for (uint l = 0; l < 16; ++l) {
+            const uint at = h * 16 + l;
+            const float bump = (b[at] & m) ? 0.0f : 4.0f;
+            w[at] = dl * ((float) ((b[qOff + at] >> shift) & 3) - bump);
+        }
+    }
+}
+
+// ggml's get_scale_min_k4 over the twelve packed pairs at byte 4, shared by
+// q4_K and q5_K.
+inline float2 dq_scale_min(device const uchar *b, uint j) {
+    float2 out;
+    if (j < 4) {
+        out.x = (float) (b[4 + j] & 63);
+        out.y = (float) (b[8 + j] & 63);
+    } else {
+        out.x = (float) ((b[8 + j] & 0xF) | ((b[j] >> 6) << 4));
+        out.y = (float) ((b[8 + j] >> 4) | ((b[4 + j] >> 6) << 4));
+    }
+    return out;
+}
+
+// A 144-byte block is 16-byte aligned, so a sub-block's 32 codes are two
+// uint4 loads; even and odd sub-blocks share the bytes, low and high nibble.
+inline void dq_sub_q4k(device const uchar *b, uint ib, thread float *w) {
+    const float d = iq_f16(b), dmin = iq_f16(b + 2);
+    const float2 sm = dq_scale_min(b, ib);
+    const float dv = d * sm.x, ov = dmin * sm.y;
+    device const uint4 * q4 = (device const uint4 *) (b + 16 + (ib / 2) * 32);
+    const uint sh = 4 * (ib & 1);
+    #pragma clang loop unroll(full)
+    for (uint k = 0; k < 2; ++k) {
+        const uint4 v = q4[k];
+        put4(w, k * 16, dv * nib4((v.x >> sh) & 0x0F0F0F0Fu) - ov);
+        put4(w, k * 16 + 4, dv * nib4((v.y >> sh) & 0x0F0F0F0Fu) - ov);
+        put4(w, k * 16 + 8, dv * nib4((v.z >> sh) & 0x0F0F0F0Fu) - ov);
+        put4(w, k * 16 + 12, dv * nib4((v.w >> sh) & 0x0F0F0F0Fu) - ov);
+    }
+}
+
+// Q4_K's shape plus the fifth bit: bit ib of qh[l] lifts element l by 16.
+inline void dq_sub_q5k(device const uchar *b, uint ib, thread float *w) {
+    const float d = iq_f16(b), dmin = iq_f16(b + 2);
+    const float2 sm = dq_scale_min(b, ib);
+    const float dv = d * sm.x, ov = dmin * sm.y;
+    device const uint4 * q4 = (device const uint4 *) (b + 48 + (ib / 2) * 32);
+    device const uint4 * h4 = (device const uint4 *) (b + 16);
+    const uint sh = 4 * (ib & 1);
+    #pragma clang loop unroll(full)
+    for (uint k = 0; k < 2; ++k) {
+        const uint4 v = q4[k];
+        const uint4 h = h4[k];
+        const uint4 n = ((v >> sh) & 0x0F0F0F0Fu)
+                      | (((h >> ib) & 0x01010101u) << 4);
+        put4(w, k * 16, dv * nib4(n.x) - ov);
+        put4(w, k * 16 + 4, dv * nib4(n.y) - ov);
+        put4(w, k * 16 + 8, dv * nib4(n.z) - ov);
+        put4(w, k * 16 + 12, dv * nib4(n.w) - ov);
+    }
+}
+
+// A 210-byte block is only 2-byte aligned, so the codes come in as ushort
+// pairs assembled into words: low nibble or high by r, the two high bits
+// from qh, one int8 scale per 16 elements.
+inline void dq_sub_q6k(device const uchar *b, uint ib, thread float *w) {
+    const float d = iq_f16(b + 208);
+    const uint n = ib / 4, r = ib % 4;
+    device const ushort * ql = (device const ushort *)
+        (b + n * 64 + (r % 2) * 32);
+    device const ushort * qh = (device const ushort *) (b + 128 + n * 32);
+    const uint scOff = 192 + n * 8 + 2 * r;
+    const float s0 = d * (float) (int) (char) b[scOff];
+    const float s1 = d * (float) (int) (char) b[scOff + 1];
+    const uint shq = (r < 2) ? 0 : 4;
+    const uint shh = 2 * r;
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < 8; ++i) {
+        const uint lw = (uint) ql[2 * i] | ((uint) ql[2 * i + 1] << 16);
+        const uint hw = (uint) qh[2 * i] | ((uint) qh[2 * i + 1] << 16);
+        const uint q = ((lw >> shq) & 0x0F0F0F0Fu)
+                     | (((hw >> shh) & 0x03030303u) << 4);
+        const float s = i < 4 ? s0 : s1;
+        put4(w, i * 4, s * (nib4(q) - 32.0f));
+    }
+}
+
+inline void dq_sub(uint ty, device const uchar *b, uint ib, thread float *w) {
+    switch (ty) {
+        case TY_IQ1S:   dq_sub_iq1s(b, ib, w);   break;
+        case TY_IQ1M:   dq_sub_iq1m(b, ib, w);   break;
+        case TY_IQ2XXS: dq_sub_iq2xxs(b, ib, w); break;
+        case TY_IQ2XS:  dq_sub_iq2xs(b, ib, w);  break;
+        case TY_IQ2S:   dq_sub_iq2s(b, ib, w);   break;
+        case TY_IQ3XXS: dq_sub_iq3xxs(b, ib, w); break;
+        case TY_IQ3S:   dq_sub_iq3s(b, ib, w);   break;
+        case TY_IQ4XS:  dq_sub_iq4xs(b, ib, w);  break;
+        case TY_Q2K:    dq_sub_q2k(b, ib, w);    break;
+        case TY_Q3K:    dq_sub_q3k(b, ib, w);    break;
+        case TY_Q5K:    dq_sub_q5k(b, ib, w);    break;
+        case TY_Q6K:    dq_sub_q6k(b, ib, w);    break;
+        case TY_Q4K:    dq_sub_q4k(b, ib, w);    break;
+        default:
+            for (uint j = 0; j < 32; ++j) { w[j] = NAN; }
+            break;
+    }
+}
+
+// The fused form the mat-vec kernels take: a lane's SPAN consecutive
+// sub-blocks (Q4_K and Q5_K pairs share their code bytes, so a lane takes
+// both nibbles of one 32-byte load) dotted against R1 staged activation
+// columns of SPAN*8 float4 each, the scale and minimum applied ONCE per
+// sub-block: Sum(dv*q - ov)*y is dv*Sum(q*y) - ov*Sum(y), and Sum(y) per
+// 16 elements (`sy16`, SPAN*2 per column) comes from the caller, computed
+// once per block rather than once per row.
+__attribute__((always_inline))
+inline float hsum(float4 v) { return v.x + v.y + v.z + v.w; }
+
+inline uint kq_byte(uint u, uint i) { return (u >> (8u * i)) & 0xFFu; }
+
+// get_scale_min_k4 over the 16-byte header {d, dmin, scales[12]} held in
+// one register, both sides three ops so the select is free of a branch.
+__attribute__((always_inline))
+inline float2 kq_sm(uint4 h, uint j) {
+    const uint k = j & 3u;
+    const uint u = kq_byte(h.y, k), v = kq_byte(h.z, k), t = kq_byte(h.w, k);
+    const uint sc = (j < 4u) ? (u & 63u) : ((t & 15u) | ((u >> 6) << 4));
+    const uint mn = (j < 4u) ? (v & 63u) : ((t >> 4) | ((v >> 6) << 4));
+    return float2((float) sc, (float) mn);
+}
+
+inline float kq_f16lo(uint u) {
+    return (float) as_type<half>((ushort) (u & 0xFFFFu));
+}
+
+inline float kq_f16hi(uint u) {
+    return (float) as_type<half>((ushort) (u >> 16));
+}
+
+// One decoded 32-weight sub-block: the codes as eight float4 with the
+// per-16 scale folded out, so a column costs eight FMAs and four scalars:
+// a0*Sum(f*y)[0..15] + a1*Sum(f*y)[16..31] + b0*Sum(y)[0..15]
+// + b1*Sum(y)[16..31].
+struct KqSub {
+    float4 f[8];
+    float a0, a1, b0, b1;
+};
+
+template <ushort R1, ushort CS, typename Y>
+__attribute__((always_inline))
+inline void kq_dot(const thread KqSub &w, Y yl, thread const float *sy16,
+                   thread float *s) {
+    #pragma clang loop unroll(full)
+    for (ushort c = 0; c < R1; ++c) {
+        Y y = yl + c * CS;
+        const float4 t0 = w.f[0] * y[0] + w.f[1] * y[1];
+        const float4 u0 = w.f[2] * y[2] + w.f[3] * y[3];
+        const float4 t1 = w.f[4] * y[4] + w.f[5] * y[5];
+        const float4 u1 = w.f[6] * y[6] + w.f[7] * y[7];
+        s[c] = w.a0 * hsum(t0 + u0) + w.a1 * hsum(t1 + u1)
+             + w.b0 * sy16[c * 2] + w.b1 * sy16[c * 2 + 1];
+    }
+}
+
+// Lanes 2j and 2j+1 own sub-blocks 2j and 2j+1, which share one 32-byte
+// code span, so each loads half and the pair exchanges over the simdgroup.
+__attribute__((always_inline))
+inline void kq_dq_q4k(device const uchar *b, uint ib, thread KqSub &w) {
+    const uint4 hd = *(device const uint4 *) b;
+    const float d = kq_f16lo(hd.x), dmin = kq_f16hi(hd.x);
+    const float2 sm = kq_sm(hd, ib);
+    device const uint4 * q4 = (device const uint4 *) (b + 16 + (ib / 2) * 32);
+    const uint4 mine = q4[ib & 1];
+    const uint4 other = simd_shuffle_xor(mine, 1);
+    const uint sh = 4 * (ib & 1);
+    #pragma clang loop unroll(full)
+    for (uint k = 0; k < 2; ++k) {
+        const uint4 v = (k == (ib & 1)) ? mine : other;
+        const uint4 lo = (v >> sh) & 0x0F0F0F0Fu;
+        w.f[k * 4] = nib4(lo.x);
+        w.f[k * 4 + 1] = nib4(lo.y);
+        w.f[k * 4 + 2] = nib4(lo.z);
+        w.f[k * 4 + 3] = nib4(lo.w);
+    }
+    w.a0 = d * sm.x;
+    w.a1 = w.a0;
+    w.b0 = -dmin * sm.y;
+    w.b1 = w.b0;
+}
+
+__attribute__((always_inline))
+inline void kq_dq_q5k(device const uchar *b, uint ib, thread KqSub &w) {
+    const uint4 hd = *(device const uint4 *) b;
+    const float d = kq_f16lo(hd.x), dmin = kq_f16hi(hd.x);
+    const float2 sm = kq_sm(hd, ib);
+    device const uint4 * q4 = (device const uint4 *) (b + 48 + (ib / 2) * 32);
+    device const uint4 * h4 = (device const uint4 *) (b + 16);
+    const uint4 mine = q4[ib & 1];
+    const uint4 other = simd_shuffle_xor(mine, 1);
+    const uint sh = 4 * (ib & 1);
+    #pragma clang loop unroll(full)
+    for (uint k = 0; k < 2; ++k) {
+        const uint4 v = (k == (ib & 1)) ? mine : other;
+        const uint4 h = h4[k];
+        const uint4 lo = ((v >> sh) & 0x0F0F0F0Fu)
+                       | (((h >> ib) & 0x01010101u) << 4);
+        w.f[k * 4] = nib4(lo.x);
+        w.f[k * 4 + 1] = nib4(lo.y);
+        w.f[k * 4 + 2] = nib4(lo.z);
+        w.f[k * 4 + 3] = nib4(lo.w);
+    }
+    w.a0 = d * sm.x;
+    w.a1 = w.a0;
+    w.b0 = -dmin * sm.y;
+    w.b1 = w.b0;
+}
+
+__attribute__((always_inline))
+inline void kq_dq_q6k(device const uchar *b, uint ib, thread KqSub &w) {
+    const float d = iq_f16(b + 208);
+    const uint n = ib / 4, r = ib % 4;
+    device const packed_ushort4 * ql = (device const packed_ushort4 *)
+        (b + n * 64 + (r % 2) * 32);
+    device const packed_ushort4 * qh = (device const packed_ushort4 *)
+        (b + 128 + n * 32);
+    const ushort ss = *(device const ushort *) (b + 192 + n * 8 + 2 * r);
+    const float s0 = d * (float) (char) (ss & 0xFFu);
+    const float s1 = d * (float) (char) (ss >> 8);
+    const uint shq = (r < 2) ? 0 : 4;
+    const uint shh = 2 * r;
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < 4; ++i) {
+        const uint2 lw = as_type<uint2>(ushort4(ql[i]));
+        const uint2 hw = as_type<uint2>(ushort4(qh[i]));
+        w.f[2 * i] = nib4(((lw.x >> shq) & 0x0F0F0F0Fu)
+                          | (((hw.x >> shh) & 0x03030303u) << 4));
+        w.f[2 * i + 1] = nib4(((lw.y >> shq) & 0x0F0F0F0Fu)
+                              | (((hw.y >> shh) & 0x03030303u) << 4));
+    }
+    w.a0 = s0;
+    w.a1 = s1;
+    w.b0 = -32.0f * s0;
+    w.b1 = -32.0f * s1;
+}
+
+__attribute__((always_inline))
+inline void kq_dq_iq4xs(device const uchar *b, uint ib, thread KqSub &w) {
+    const float d = iq_f16(b);
+    const ushort sh = iq_u16(b + 2);
+    const uchar sl = b[4 + ib / 2];
+    const int ls = (int) ((sl >> (4 * (ib % 2))) & 0xF)
+                 | (int) (((sh >> (2 * ib)) & 3) << 4);
+    device const uint2 * q2 = (device const uint2 *) (b + 8 + ib * 16);
+    #pragma clang loop unroll(full)
+    for (uint k = 0; k < 2; ++k) {
+        const uint2 v = q2[k];
+        #pragma clang loop unroll(full)
+        for (uint m = 0; m < 2; ++m) {
+            const uint word = m == 0 ? v.x : v.y;
+            const uchar4 lo = as_type<uchar4>(word & 0x0F0F0F0Fu);
+            const uchar4 hi = as_type<uchar4>((word >> 4) & 0x0F0F0F0Fu);
+            const uint at = k * 2 + m;
+            w.f[at] = float4(kvalues_iq4nl[lo.x], kvalues_iq4nl[lo.y],
+                             kvalues_iq4nl[lo.z], kvalues_iq4nl[lo.w]);
+            w.f[at + 4] = float4(kvalues_iq4nl[hi.x], kvalues_iq4nl[hi.y],
+                                 kvalues_iq4nl[hi.z], kvalues_iq4nl[hi.w]);
+        }
+    }
+    w.a0 = d * (float) (ls - 32);
+    w.a1 = w.a0;
+    w.b0 = 0.0f;
+    w.b1 = 0.0f;
+}
+
+template <ushort F4>
+struct KqSlice;
+
+template <typename D, ushort F4>
+__attribute__((always_inline))
+inline void kq_dq_generic_slice(device const uchar *b, uint ib, uint p,
+                                thread KqSlice<F4> &w) {
+    float v[32];
+    D::dq(b, ib, v);
+    #pragma clang loop unroll(full)
+    for (ushort j = 0; j < F4; ++j) {
+        const uint at = (p * F4 + j) * 4;
+        w.f[j] = float4(v[at], v[at + 1], v[at + 2], v[at + 3]);
+    }
+    w.a = 1.0f;
+    w.b = 0.0f;
+}
+
+// A decoder with no fused form: materialize, then dot.
+template <typename D>
+__attribute__((always_inline))
+inline void kq_dq_generic(device const uchar *b, uint ib, thread KqSub &w) {
+    float v[32];
+    D::dq(b, ib, v);
+    #pragma clang loop unroll(full)
+    for (ushort j = 0; j < 8; ++j) {
+        w.f[j] = float4(v[4 * j], v[4 * j + 1], v[4 * j + 2], v[4 * j + 3]);
+    }
+    w.a0 = 1.0f;
+    w.a1 = 1.0f;
+    w.b0 = 0.0f;
+    w.b1 = 0.0f;
+}
+
+// A slice of a sub-block, F4 float4 of its eight, with one scale pair, for
+// a kernel that cannot afford a column's 32 activations in registers. The
+// minimum term is linear, so it is applied per slice against that slice's
+// activation sum.
+template <ushort F4>
+struct KqSlice {
+    float4 f[F4];
+    float a, b;
+};
+
+template <ushort F4>
+__attribute__((always_inline))
+inline void kq_dq_q4k_slice(device const uchar *b, uint ib, uint p,
+                            thread KqSlice<F4> &w) {
+    const uint4 hd = *(device const uint4 *) b;
+    const float d = kq_f16lo(hd.x), dmin = kq_f16hi(hd.x);
+    const float2 sm = kq_sm(hd, ib);
+    device const uint4 * q4 = (device const uint4 *) (b + 16 + (ib / 2) * 32);
+    const uint4 mine = q4[ib & 1];
+    const uint4 other = simd_shuffle_xor(mine, 1);
+    const uint sh = 4 * (ib & 1);
+    const uint h = (p * F4) / 4;
+    const uint4 v = (h == (ib & 1)) ? mine : other;
+    const uint4 lo = (v >> sh) & 0x0F0F0F0Fu;
+    #pragma clang loop unroll(full)
+    for (ushort j = 0; j < F4; ++j) { w.f[j] = nib4(lo[(p * F4) % 4 + j]); }
+    w.a = d * sm.x;
+    w.b = -dmin * sm.y;
+}
+
+template <ushort F4>
+__attribute__((always_inline))
+inline void kq_dq_q5k_slice(device const uchar *b, uint ib, uint p,
+                            thread KqSlice<F4> &w) {
+    const uint4 hd = *(device const uint4 *) b;
+    const float d = kq_f16lo(hd.x), dmin = kq_f16hi(hd.x);
+    const float2 sm = kq_sm(hd, ib);
+    device const uint4 * q4 = (device const uint4 *) (b + 48 + (ib / 2) * 32);
+    device const uint4 * h4 = (device const uint4 *) (b + 16);
+    const uint4 mine = q4[ib & 1];
+    const uint4 other = simd_shuffle_xor(mine, 1);
+    const uint sh = 4 * (ib & 1);
+    const uint h = (p * F4) / 4;
+    const uint4 v = (h == (ib & 1)) ? mine : other;
+    const uint4 hb = h4[h];
+    const uint4 lo = ((v >> sh) & 0x0F0F0F0Fu)
+                   | (((hb >> ib) & 0x01010101u) << 4);
+    #pragma clang loop unroll(full)
+    for (ushort j = 0; j < F4; ++j) { w.f[j] = nib4(lo[(p * F4) % 4 + j]); }
+    w.a = d * sm.x;
+    w.b = -dmin * sm.y;
+}
+
+template <ushort F4>
+__attribute__((always_inline))
+inline void kq_dq_q6k_slice(device const uchar *b, uint ib, uint p,
+                            thread KqSlice<F4> &w) {
+    const float d = iq_f16(b + 208);
+    const uint n = ib / 4, r = ib % 4;
+    device const packed_ushort4 * ql = (device const packed_ushort4 *)
+        (b + n * 64 + (r % 2) * 32);
+    device const packed_ushort4 * qh = (device const packed_ushort4 *)
+        (b + 128 + n * 32);
+    const uint h = (p * F4) / 4;
+    const float sc = d * (float) (char) b[192 + n * 8 + 2 * r + h];
+    const uint shq = (r < 2) ? 0 : 4;
+    const uint shh = 2 * r;
+    #pragma clang loop unroll(full)
+    for (ushort j = 0; j < F4; j += 2) {
+        const uint i = (p * F4 + j) / 2;
+        const uint2 lw = as_type<uint2>(ushort4(ql[i]));
+        const uint2 hw = as_type<uint2>(ushort4(qh[i]));
+        w.f[j] = nib4(((lw.x >> shq) & 0x0F0F0F0Fu)
+                      | (((hw.x >> shh) & 0x03030303u) << 4));
+        w.f[j + 1] = nib4(((lw.y >> shq) & 0x0F0F0F0Fu)
+                          | (((hw.y >> shh) & 0x03030303u) << 4));
+    }
+    w.a = sc;
+    w.b = -32.0f * sc;
+}
+
+template <ushort F4>
+__attribute__((always_inline))
+inline void kq_dq_iq4xs_slice(device const uchar *b, uint ib, uint p,
+                              thread KqSlice<F4> &w) {
+    const float d = iq_f16(b);
+    const ushort sh = iq_u16(b + 2);
+    const uchar sl = b[4 + ib / 2];
+    const int ls = (int) ((sl >> (4 * (ib % 2))) & 0xF)
+                 | (int) (((sh >> (2 * ib)) & 3) << 4);
+    device const uint * q1 = (device const uint *) (b + 8 + ib * 16);
+    const uint h = (p * F4) / 4;
+    #pragma clang loop unroll(full)
+    for (ushort j = 0; j < F4; ++j) {
+        const uint at = (p * F4) % 4 + j;
+        const uchar4 q = as_type<uchar4>((q1[at] >> (4 * h)) & 0x0F0F0F0Fu);
+        w.f[j] = float4(kvalues_iq4nl[q.x], kvalues_iq4nl[q.y],
+                        kvalues_iq4nl[q.z], kvalues_iq4nl[q.w]);
+    }
+    w.a = d * (float) (ls - 32);
+    w.b = 0.0f;
+}
+
+// Q8_0 and IQ4_NL are 32-weight blocks; eight of them make the
+// 256-weight span these kernels walk, so sub-block ib is block ib and
+// `blk` is eight block strides. A block is 2-byte aligned, so its codes
+// come in as packed shorts.
+__attribute__((always_inline))
+inline uint2 kq_bytes8(device const uchar *p) {
+    return as_type<uint2>(ushort4(*(device const packed_ushort4 *) p));
+}
+
+__attribute__((always_inline))
+inline float4 kq_iq4nl(uint nib) {
+    const uchar4 q = as_type<uchar4>(nib);
+    return float4(kvalues_iq4nl[q.x], kvalues_iq4nl[q.y],
+                  kvalues_iq4nl[q.z], kvalues_iq4nl[q.w]);
+}
+
+__attribute__((always_inline))
+inline void kq_dq_iq4_nl(device const uchar *b, uint ib, thread KqSub &w) {
+    device const uchar * p = b + ib * 18;
+    const float d = (float) *(device const half *) p;
+    const uint2 lo = kq_bytes8(p + 2), hi = kq_bytes8(p + 10);
+    const uint4 wd = uint4(lo.x, lo.y, hi.x, hi.y);
+    #pragma clang loop unroll(full)
+    for (ushort j = 0; j < 4; ++j) {
+        w.f[j] = kq_iq4nl(wd[j] & 0x0F0F0F0Fu);
+        w.f[j + 4] = kq_iq4nl((wd[j] >> 4) & 0x0F0F0F0Fu);
+    }
+    w.a0 = d;
+    w.a1 = d;
+    w.b0 = 0.0f;
+    w.b1 = 0.0f;
+}
+
+__attribute__((always_inline))
+inline void kq_dq_q8_0(device const uchar *b, uint ib, thread KqSub &w) {
+    device const uchar * p = b + ib * 34;
+    const float d = (float) *(device const half *) p;
+    #pragma clang loop unroll(full)
+    for (ushort k = 0; k < 4; ++k) {
+        const uint2 q = kq_bytes8(p + 2 + 8 * k);
+        w.f[2 * k] = float4(as_type<char4>(q.x));
+        w.f[2 * k + 1] = float4(as_type<char4>(q.y));
+    }
+    w.a0 = d;
+    w.a1 = d;
+    w.b0 = 0.0f;
+    w.b1 = 0.0f;
+}
+
+template <ushort F4>
+__attribute__((always_inline))
+inline void kq_dq_iq4_nl_slice(device const uchar *b, uint ib, uint p,
+                               thread KqSlice<F4> &w) {
+    device const uchar * bp = b + ib * 18;
+    const float d = (float) *(device const half *) bp;
+    const uint2 lo = kq_bytes8(bp + 2), hi = kq_bytes8(bp + 10);
+    const uint4 wd = uint4(lo.x, lo.y, hi.x, hi.y);
+    #pragma clang loop unroll(full)
+    for (ushort j = 0; j < F4; ++j) {
+        const uint e = p * F4 + j;
+        w.f[j] = kq_iq4nl((wd[e % 4] >> (4 * (e / 4))) & 0x0F0F0F0Fu);
+    }
+    w.a = d;
+    w.b = 0.0f;
+}
+
+template <ushort F4>
+__attribute__((always_inline))
+inline void kq_dq_q8_0_slice(device const uchar *b, uint ib, uint p,
+                             thread KqSlice<F4> &w) {
+    device const uchar * bp = b + ib * 34;
+    const float d = (float) *(device const half *) bp;
+    #pragma clang loop unroll(full)
+    for (ushort j = 0; j < F4; ++j) {
+        const uint e = p * F4 + j;
+        const ushort2 q = *(device const packed_ushort2 *) (bp + 2 + 4 * e);
+        w.f[j] = float4(as_type<char4>(as_type<uint>(q)));
+    }
+    w.a = d;
+    w.b = 0.0f;
+}
+
+// Whether a decoder's span can end before a full 256: the packed blocks
+// serve rows of any multiple of 32, the super-block types never do.
+template <typename D> struct kq_tail {
+    static constant constexpr bool value = false;
+};
+
+struct DqQ4K {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_q4k_slice<F4>(b, ib, p, w);
+    }
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_q4k(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_q4k(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqQ5K {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_q5k_slice<F4>(b, ib, p, w);
+    }
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_q5k(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_q5k(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqQ6K {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_q6k_slice<F4>(b, ib, p, w);
+    }
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_q6k(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_q6k(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqQ2K {
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_q2k(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_generic<DqQ2K>(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqQ3K {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_generic_slice<DqQ3K, F4>(b, ib, p, w);
+    }
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_q3k(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_generic<DqQ3K>(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqIq2xxs {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_generic_slice<DqIq2xxs, F4>(b, ib, p, w);
+    }
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_iq2xxs(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_generic<DqIq2xxs>(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqIq2xs {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_generic_slice<DqIq2xs, F4>(b, ib, p, w);
+    }
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_iq2xs(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_generic<DqIq2xs>(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqIq2s {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_generic_slice<DqIq2s, F4>(b, ib, p, w);
+    }
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_iq2s(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_generic<DqIq2s>(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqIq3xxs {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_generic_slice<DqIq3xxs, F4>(b, ib, p, w);
+    }
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_iq3xxs(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_generic<DqIq3xxs>(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqIq3s {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_generic_slice<DqIq3s, F4>(b, ib, p, w);
+    }
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_iq3s(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_generic<DqIq3s>(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqIq1s {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_generic_slice<DqIq1s, F4>(b, ib, p, w);
+    }
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_iq1s(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_generic<DqIq1s>(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqIq1m {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_generic_slice<DqIq1m, F4>(b, ib, p, w);
+    }
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_iq1m(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_generic<DqIq1m>(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqIq4xs {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_iq4xs_slice<F4>(b, ib, p, w);
+    }
+    static void dq(device const uchar *b, uint ib, thread float *w) {
+        dq_sub_iq4xs(b, ib, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_iq4xs(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+
+struct DqQ80 {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_q8_0_slice<F4>(b, ib, p, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_q8_0(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+struct DqIq4nl {
+    template <ushort F4>
+    __attribute__((always_inline))
+    static void dqSlice(device const uchar *b, uint ib, uint p,
+                        thread KqSlice<F4> &w) {
+        kq_dq_iq4_nl_slice<F4>(b, ib, p, w);
+    }
+    static constant constexpr ushort span = 1;
+    template <ushort R1, ushort SPAN, ushort CS, typename Y>
+    __attribute__((always_inline))
+    static void dot(device const uchar *b, uint ib, Y yl,
+                    thread const float *sy16, thread float *s) {
+        KqSub w;
+        kq_dq_iq4_nl(b, ib, w);
+        kq_dot<R1, CS>(w, yl, sy16, s);
+    }
+};
+template <> struct kq_tail<DqQ80> {
+    static constant constexpr bool value = true;
+};
+template <> struct kq_tail<DqIq4nl> {
+    static constant constexpr bool value = true;
+};
+
+// `blk` is the byte count of a 256-weight span, handed down from
+// GGUF.rowByteCount so the stride has one home.
+struct IQArgs { ulong woff; uint K; uint M; uint ty; uint blk; };
+struct IQEmbedArgs {
+    ulong woff; uint K; uint M; uint rowBytes; uint ty; uint blk;
+};
+
+template <typename D>
+void iq_dq_row_impl(device const uchar * weights, device float * out,
+                    constant IQArgs & a, uint gid) {
+    if (gid < a.K / 256) {
+        device const uchar * bp = weights + a.woff + (ulong) gid * a.blk;
+        device float * o = out + (ulong) gid * 256;
+        float w[32];
+        for (uint sb = 0; sb < 8; ++sb) {
+            D::dq(bp, sb, w);
+            for (uint j = 0; j < 32; ++j) { o[sb * 32 + j] = w[j]; }
+        }
+    }
+}
+
+#define IQ_DQROW_KERNEL(NAME, D)                                   \
+kernel void NAME(                                                  \
+        device const uchar * weights [[buffer(0)]],                \
+        device       float * out     [[buffer(1)]],                \
+        constant IQArgs    & a       [[buffer(2)]],                \
+        uint gid [[thread_position_in_grid]]) {                    \
+    iq_dq_row_impl<D>(weights, out, a, gid);                       \
+}
+
+IQ_DQROW_KERNEL(q2_k_dequant_row, DqQ2K)
+IQ_DQROW_KERNEL(q4_k_dequant_row, DqQ4K)
+IQ_DQROW_KERNEL(q6_k_dequant_row, DqQ6K)
+
+template <typename D>
+void iq_embed_impl(device const uchar * weights, device const int * ids,
+                   device float * out, constant IQEmbedArgs & a, uint gid) {
+    const uint nblk = a.K / 256;
+    if (gid < a.M * nblk) {
+        const uint n = gid / nblk, ib = gid % nblk;
+        device const uchar * bp = weights + a.woff
+            + (ulong) ids[n] * a.rowBytes + (ulong) ib * a.blk;
+        device float * o = out + (ulong) n * a.K + ib * 256;
+        float w[32];
+        for (uint sb = 0; sb < 8; ++sb) {
+            D::dq(bp, sb, w);
+            for (uint j = 0; j < 32; ++j) { o[sb * 32 + j] = w[j]; }
+        }
+    }
+}
+
+#define IQ_EMBED_KERNEL(NAME, D)                                   \
+kernel void NAME(                                                  \
+        device const uchar   * weights [[buffer(0)]],              \
+        device const int     * ids     [[buffer(1)]],              \
+        device       float   * out     [[buffer(2)]],              \
+        constant IQEmbedArgs & a       [[buffer(3)]],              \
+        uint gid [[thread_position_in_grid]]) {                    \
+    iq_embed_impl<D>(weights, ids, out, a, gid);                   \
+}
+
+IQ_EMBED_KERNEL(q2_k_embed_batch, DqQ2K)
+IQ_EMBED_KERNEL(q4_k_embed_batch, DqQ4K)
+IQ_EMBED_KERNEL(q6_k_embed_batch, DqQ6K)
+
+kernel void iq_dequant_row(
+        device const uchar * weights [[buffer(0)]],
+        device       float * out     [[buffer(1)]],
+        constant IQArgs    & a       [[buffer(2)]],
+        uint gid [[thread_position_in_grid]]) {
+    if (gid < a.K / 256) {
+        device const uchar * bp = weights + a.woff + (ulong) gid * a.blk;
+        device float * o = out + (ulong) gid * 256;
+        float w[32];
+        for (uint sb = 0; sb < 8; ++sb) {
+            dq_sub(a.ty, bp, sb, w);
+            for (uint j = 0; j < 32; ++j) { o[sb * 32 + j] = w[j]; }
+        }
+    }
+}
+
+kernel void iq_embed_batch(
+        device const uchar   * weights [[buffer(0)]],
+        device const int     * ids     [[buffer(1)]],
+        device       float   * out     [[buffer(2)]],
+        constant IQEmbedArgs & a       [[buffer(3)]],
+        uint gid [[thread_position_in_grid]]) {
+    const uint nblk = a.K / 256;
+    if (gid < a.M * nblk) {
+        const uint n = gid / nblk, ib = gid % nblk;
+        device const uchar * bp = weights + a.woff
+            + (ulong) ids[n] * a.rowBytes + (ulong) ib * a.blk;
+        device float * o = out + (ulong) n * a.K + ib * 256;
+        float w[32];
+        for (uint sb = 0; sb < 8; ++sb) {
+            dq_sub(a.ty, bp, sb, w);
+            for (uint j = 0; j < 32; ++j) { o[sb * 32 + j] = w[j]; }
+        }
+    }
+}
+
+// The prefill tile, the same 64(M) x 32(N) x 32(K) shape gemm_mm_impl uses,
+// with the block walk made runtime: `blk` is the stride and `ty` picks the
+// decoder, where the macro's Block is a compile-time type. A thread stages
+// the 16 weights at `il*16` of its row, so it decodes the 32-weight
+// sub-block `il / 2` and keeps half.
+template <typename Reg>
+inline void iq_gemm_impl(
+        device const uchar * weights,
+        device const float * X,
+        device       float * dst,
+        constant IQArgs    & a,
+        constant uint      & N,
+        threadgroup uchar  * shmem,
+        uint3  tgpig,
+        ushort tiitg,
+        ushort sgitg) {
+    const int K = (int) a.K, M = (int) a.M;
+    const int NR0 = 64, NR1 = 32, NK = 32, NL0 = NK / 16, NL1 = NK / 8;
+    const ulong sbOff = sizeof(Reg) == 2 ? 4096 : 8192;
+    threadgroup Reg * sa = (threadgroup Reg *) (shmem);
+    threadgroup Reg * sb = (threadgroup Reg *) (shmem + sbOff);
+    const int r0 = tgpig.y * NR0;
+    const int r1 = tgpig.x * NR1;
+    const short nr0 = (M - r0 < NR0) ? (short) (M - r0) : NR0;
+    const short nr1 = ((int) N - r1 < NR1) ? (short) ((int) N - r1) : NR1;
+    const short lr0 = ((short) tiitg / NL0) < nr0 ? ((short) tiitg / NL0)
+                                                  : nr0 - 1;
+    const short lr1 = ((short) tiitg / NL1) < nr1 ? ((short) tiitg / NL1)
+                                                  : nr1 - 1;
+    const short il0 = tiitg % NL0;
+    short il = il0;
+    const ulong rowBytes = (ulong) (K / 256) * a.blk;
+    device const uchar * row = weights + a.woff + rowBytes * (r0 + lr0);
+    uint blkIdx = 0;
+    const short iy = 8 * (tiitg % NL1);
+    device const float * y = X + (ulong) (r1 + lr1) * K + iy;
+    simdgroup_float8x8 mc[8];
+    #pragma clang loop unroll(full)
+    for (short i = 0; i < 8; i++) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
+    }
+    float w[32];
+    for (int loop_k = 0; loop_k < K; loop_k += NK) {
+        matrix<Reg, 4, 4> temp_a;
+        dq_sub(a.ty, row + (ulong) blkIdx * a.blk, il / 2, w);
+        const short half0 = (il % 2) * 16;
+        for (short i = 0; i < 16; i++) {
+            temp_a[i / 4][i % 4] = (Reg) w[half0 + i];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (short i = 0; i < 16; i++) {
+            const short sx = 2 * il0 + i / 8;
+            const short sy = (tiitg / NL0) / 8;
+            const short lx = (tiitg / NL0) % 8;
+            const short ly = i % 8;
+            const short slot = 8 * sx + sy;
+            sa[64 * slot + 8 * ly + lx] = temp_a[i / 4][i % 4];
+        }
+        {
+            const short sx = tiitg % NL1;
+            const short sy = (tiitg / NL1) / 8;
+            const short ly = (tiitg / NL1) % 8;
+            const short slot = 4 * sx + sy;
+            threadgroup Reg * bp = sb + 64 * slot + 8 * ly;
+            for (short i = 0; i < 8; i++) { bp[i] = (Reg) y[i]; }
+        }
+        il = (il + 2 < 16) ? il + 2 : il % 2;
+        blkIdx = (il < 2) ? blkIdx + 1 : blkIdx;
+        y += NK;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simd_mm_slice(sa, sb, mc, sgitg);
+    }
+    store_mm_tile(mc, dst, shmem, r0, r1, M, (int) N, nr0, nr1,
+                  tiitg, sgitg);
+}
+
+kernel void iq_gemm_mm_h(
+        device const uchar * weights [[buffer(0)]],
+        device const float * X       [[buffer(1)]],
+        device       float * dst     [[buffer(2)]],
+        constant IQArgs    & a       [[buffer(3)]],
+        constant uint      & N       [[buffer(4)]],
+        threadgroup uchar  * shmem   [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    iq_gemm_impl<half>(weights, X, dst, a, N, shmem, tgpig, tiitg, sgitg);
+}
+
+// The K-quants get iq1_s_gemv's SHAPE without its ternary shortcut: eight
+// threads cooperate on one 256-weight block, activations staged once per
+// sub-block and reused across all NR0 rows, and ONE decoder inlined by the
+// template rather than thirteen behind a runtime switch.
+// Lanes: 8/SPAN sub-block owners per block, two block stripes, and the rest
+// of the 32 as row groups of 8/G rows each, so a K=2560 row's ten blocks
+// divide into five passes with no tail and the reduction stays inside the
+// contiguous lanes of one row group.
+template <typename D>
+void kq_gemv_impl(
+        device const uchar * weights,
+        device const float * x,
+        device       float * out,
+        constant IQArgs    & a,
+        uint3  tgpig,
+        ushort tiisg) {
+    const ushort SPAN = D::span;
+    const ushort L = 8 / SPAN;
+    const ushort LANES = L * 2;
+    const ushort G = 32 / LANES;
+    const ushort RPG = 8 / G;
+    const ushort owner = tiisg % L;
+    const ushort bg = (tiisg / L) % 2;
+    const ushort rg = tiisg / LANES;
+    const ushort sub = owner * SPAN;
+    const uint nblk = (a.K + 255) / 256;
+    const ulong rowBytes = (ulong) a.K * a.blk / 256;
+    device const uchar * W = weights + a.woff;
+    const uint r0 = tgpig.x * 8 + rg * RPG;
+    float acc[4] = { 0, 0, 0, 0 };
+    for (uint ib = bg; ib < nblk; ib += 2) {
+        const bool live = !kq_tail<D>::value || ib * 256 + sub * 32 < a.K;
+        device const float4 * y = (device const float4 *)
+            (x + (ulong) ib * 256 + sub * 32);
+        float4 yl[8 * SPAN];
+        float sy16[2 * SPAN];
+        #pragma clang loop unroll(full)
+        for (ushort i = 0; i < 8 * SPAN; ++i) { yl[i] = live ? y[i] : 0.0f; }
+        #pragma clang loop unroll(full)
+        for (ushort h = 0; h < 2 * SPAN; ++h) {
+            sy16[h] = hsum(yl[h * 4] + yl[h * 4 + 1]
+                           + yl[h * 4 + 2] + yl[h * 4 + 3]);
+        }
+        #pragma clang loop unroll(full)
+        for (ushort rr = 0; rr < RPG; ++rr) {
+            const uint row = r0 + rr;
+            if (row < a.M && live) {
+                device const uchar * bp = W + (ulong) row * rowBytes
+                                            + (ulong) ib * a.blk;
+                float s;
+                D::template dot<1, SPAN, 8>(bp, sub, yl, sy16, &s);
+                acc[rr] += s;
+            }
+        }
+    }
+    #pragma clang loop unroll(full)
+    for (ushort rr = 0; rr < RPG; ++rr) {
+        float v = acc[rr];
+        #pragma clang loop unroll(full)
+        for (ushort sh = 1; sh < LANES; sh <<= 1) {
+            v += simd_shuffle_xor(v, sh);
+        }
+        if (tiisg % LANES == 0 && r0 + rr < a.M) { out[r0 + rr] = v; }
+    }
+}
+
+
+#define KQ_GEMV_KERNEL(NAME, D)                                    \
+kernel void NAME(                                                  \
+        device const uchar * weights [[buffer(0)]],                \
+        device const float * x       [[buffer(1)]],                \
+        device       float * out     [[buffer(2)]],                \
+        constant IQArgs    & a       [[buffer(3)]],                \
+        uint3  tgpig [[threadgroup_position_in_grid]],             \
+        ushort tiisg [[thread_index_in_simdgroup]]) {              \
+    kq_gemv_impl<D>(weights, x, out, a, tgpig, tiisg);             \
+}
+
+
+KQ_GEMV_KERNEL(q4_k_gemv, DqQ4K)
+KQ_GEMV_KERNEL(q5_k_gemv, DqQ5K)
+KQ_GEMV_KERNEL(q6_k_gemv, DqQ6K)
+KQ_GEMV_KERNEL(q2_k_gemv, DqQ2K)
+KQ_GEMV_KERNEL(q3_k_gemv, DqQ3K)
+KQ_GEMV_KERNEL(iq2_xxs_gemv, DqIq2xxs)
+KQ_GEMV_KERNEL(iq2_xs_gemv, DqIq2xs)
+KQ_GEMV_KERNEL(iq2_s_gemv, DqIq2s)
+KQ_GEMV_KERNEL(iq3_xxs_gemv, DqIq3xxs)
+KQ_GEMV_KERNEL(iq3_s_gemv, DqIq3s)
+KQ_GEMV_KERNEL(iq4_xs_gemv, DqIq4xs)
+KQ_GEMV_KERNEL(q8_0_gemv, DqQ80)
+KQ_GEMV_KERNEL(iq4_nl_gemv, DqIq4nl)
+
+// The narrow-batch twin of kq_gemv: the same block walk, each weight
+// sub-block decoded ONCE and dotted against R1 staged activation columns,
+// so a verify pass streams the trunk once instead of once per column.
+//
+template <typename D, ushort R1, ushort SG>
+void kq_gemm_nb_impl(
+        device const uchar * weights,
+        device const float * X,
+        device       float * out,
+        constant IQArgs    & a,
+        threadgroup float4 * ys,
+        uint3  tgpig,
+        ushort tiitg,
+        ushort tiisg,
+        ushort sgitg) {
+    const ushort LANES = 16;
+    const ushort RPG = 4;
+    const ushort CS = 128;
+    const ushort F4 = R1 >= 4 ? 2 : 4;
+    const ushort sub = tiisg % 8;
+    const ushort bg = (tiisg / 8) % 2;
+    const ushort rg = tiisg / LANES;
+    const uint nblk = (a.K + 255) / 256;
+    const uint k4 = a.K / 4;
+    const ulong rowBytes = (ulong) a.K * a.blk / 256;
+    device const uchar * W = weights + a.woff;
+    device const float4 * X4 = (device const float4 *) X;
+    const uint r0 = tgpig.x * (8 * SG) + sgitg * 8 + rg * RPG;
+    float acc[RPG * R1];
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < RPG * R1; ++i) { acc[i] = 0.0f; }
+    for (uint ib0 = 0; ib0 < nblk; ib0 += 2) {
+        for (ushort e = tiitg; e < R1 * CS; e += 32 * SG) {
+            const ushort c = e / CS, i = e % CS;
+            const uint at = ib0 * 64 + i;
+            if (at < k4) { ys[e] = X4[(ulong) c * k4 + at]; }
+        }
+        if (SG == 1) {
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+        } else {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        const uint ib = ib0 + bg;
+        const bool live = kq_tail<D>::value ? ib * 256 + sub * 32 < a.K
+                                            : ib < nblk;
+        threadgroup const float4 * yl = ys + bg * 64 + sub * 8;
+        #pragma clang loop unroll(full)
+        for (uint p = 0; p < 8 / F4; ++p) {
+            float4 yp[R1 * F4];
+            float sy[R1];
+            #pragma clang loop unroll(full)
+            for (ushort c = 0; c < R1; ++c) {
+                float4 t = 0.0f;
+                #pragma clang loop unroll(full)
+                for (ushort j = 0; j < F4; ++j) {
+                    yp[c * F4 + j] = yl[c * CS + p * F4 + j];
+                    t += yp[c * F4 + j];
+                }
+                sy[c] = hsum(t);
+            }
+            #pragma clang loop unroll(full)
+            for (ushort rr = 0; rr < RPG; ++rr) {
+                const uint row = r0 + rr;
+                if (row < a.M && live) {
+                    device const uchar * bp = W + (ulong) row * rowBytes
+                                                + (ulong) ib * a.blk;
+                    KqSlice<F4> w;
+                    D::template dqSlice<F4>(bp, sub, p, w);
+                    #pragma clang loop unroll(full)
+                    for (ushort c = 0; c < R1; ++c) {
+                        float4 t = w.f[0] * yp[c * F4];
+                        #pragma clang loop unroll(full)
+                        for (ushort j = 1; j < F4; ++j) {
+                            t += w.f[j] * yp[c * F4 + j];
+                        }
+                        acc[rr * R1 + c] += w.a * hsum(t) + w.b * sy[c];
+                    }
+                }
+            }
+        }
+        if (SG == 1) {
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+        } else {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < RPG * R1; ++i) {
+        float v = acc[i];
+        #pragma clang loop unroll(full)
+        for (ushort sh = 1; sh < LANES; sh <<= 1) {
+            v += simd_shuffle_xor(v, sh);
+        }
+        const uint row = r0 + i / R1;
+        if (tiisg % LANES == 0 && row < a.M) {
+            out[(ulong) (i % R1) * a.M + row] = v;
+        }
+    }
+}
+
+// The narrow kernel in the old Q4_0 kernel's shape: no threadgroup
+// staging, sixteen rows a simdgroup, a lane's activations read from device
+// memory per quarter slice, and the row bound a select on the sum rather
+// than a branch around the pair exchange.
+template <typename D, ushort R1>
+void kq_gemm_nw_impl(
+        device const uchar * weights,
+        device const float * X,
+        device       float * out,
+        constant IQArgs    & a,
+        uint3  tgpig,
+        ushort tiisg) {
+    const ushort F4 = 2;
+    const ushort RPG = 4;
+    const ushort sub = tiisg % 8;
+    const ushort rg = tiisg / 8;
+    const uint nblk = (a.K + 255) / 256;
+    const uint k4 = a.K / 4;
+    const ulong rowBytes = (ulong) a.K * a.blk / 256;
+    device const uchar * W = weights + a.woff;
+    device const float4 * X4 = (device const float4 *) X;
+    const uint r0 = tgpig.x * 16 + rg * RPG;
+    float acc[RPG * R1];
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < RPG * R1; ++i) { acc[i] = 0.0f; }
+    for (uint ib = 0; ib < nblk; ++ib) {
+        const bool live = kq_tail<D>::value ? ib * 256 + sub * 32 < a.K
+                                            : true;
+        const uint at = ib * 64 + sub * 8;
+        #pragma clang loop unroll(full)
+        for (uint p = 0; p < 8 / F4; ++p) {
+            float4 yp[R1 * F4];
+            float sy[R1];
+            #pragma clang loop unroll(full)
+            for (ushort c = 0; c < R1; ++c) {
+                float4 t = 0.0f;
+                #pragma clang loop unroll(full)
+                for (ushort j = 0; j < F4; ++j) {
+                    const uint e = at + p * F4 + j;
+                    yp[c * F4 + j] = live ? X4[(ulong) c * k4 + e] : 0.0f;
+                    t += yp[c * F4 + j];
+                }
+                sy[c] = hsum(t);
+            }
+            #pragma clang loop unroll(full)
+            for (ushort rr = 0; rr < RPG; ++rr) {
+                const uint row = min(r0 + rr, a.M - 1);
+                const float keep = (r0 + rr < a.M && live) ? 1.0f : 0.0f;
+                device const uchar * bp = W + (ulong) row * rowBytes
+                                            + (ulong) ib * a.blk;
+                KqSlice<F4> w;
+                D::template dqSlice<F4>(bp, sub, p, w);
+                #pragma clang loop unroll(full)
+                for (ushort c = 0; c < R1; ++c) {
+                    float4 t = w.f[0] * yp[c * F4];
+                    #pragma clang loop unroll(full)
+                    for (ushort j = 1; j < F4; ++j) {
+                        t += w.f[j] * yp[c * F4 + j];
+                    }
+                    acc[rr * R1 + c] += keep * (w.a * hsum(t) + w.b * sy[c]);
+                }
+            }
+        }
+    }
+    #pragma clang loop unroll(full)
+    for (ushort i = 0; i < RPG * R1; ++i) {
+        float v = acc[i];
+        v += simd_shuffle_down(v, 4);
+        v += simd_shuffle_down(v, 2);
+        v += simd_shuffle_down(v, 1);
+        const uint row = r0 + i / R1;
+        if (sub == 0 && row < a.M) {
+            out[(ulong) (i % R1) * a.M + row] = v;
+        }
+    }
+}
+
+#define KQ_NW_KERNEL(NAME, D, R1)                                  \
+kernel void NAME(                                                  \
+        device const uchar * weights [[buffer(0)]],                \
+        device const float * X       [[buffer(1)]],                \
+        device       float * out     [[buffer(2)]],                \
+        constant IQArgs    & a       [[buffer(3)]],                \
+        uint3  tgpig [[threadgroup_position_in_grid]],             \
+        ushort tiisg [[thread_index_in_simdgroup]]) {              \
+    kq_gemm_nw_impl<D, R1>(weights, X, out, a, tgpig, tiisg);      \
+}
+
+KQ_NW_KERNEL(q4_k_gemm_nw_r3, DqQ4K, 3)
+KQ_NW_KERNEL(q5_k_gemm_nw_r3, DqQ5K, 3)
+KQ_NW_KERNEL(q6_k_gemm_nw_r3, DqQ6K, 3)
+KQ_NW_KERNEL(iq4_xs_gemm_nw_r3, DqIq4xs, 3)
+
+#define KQ_NB_KERNEL(NAME, D, R1, SG)                              \
+kernel void NAME(                                                  \
+        device const uchar * weights [[buffer(0)]],                \
+        device const float * X       [[buffer(1)]],                \
+        device       float * out     [[buffer(2)]],                \
+        constant IQArgs    & a       [[buffer(3)]],                \
+        threadgroup float4 * ys      [[threadgroup(0)]],           \
+        uint3  tgpig [[threadgroup_position_in_grid]],             \
+        ushort tiitg [[thread_index_in_threadgroup]],              \
+        ushort tiisg [[thread_index_in_simdgroup]],                \
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {         \
+    kq_gemm_nb_impl<D, R1, SG>(weights, X, out, a, ys, tgpig,      \
+                               tiitg, tiisg, sgitg);               \
+}
+
+#define KQ_NB_KERNELS(T, D)                                        \
+KQ_NB_KERNEL(T##_gemm_nb_r2s1, D, 2, 1)                            \
+KQ_NB_KERNEL(T##_gemm_nb_r2s8, D, 2, 8)                            \
+KQ_NB_KERNEL(T##_gemm_nb_r3s1, D, 3, 1)                            \
+KQ_NB_KERNEL(T##_gemm_nb_r3s8, D, 3, 8)                            \
+KQ_NB_KERNEL(T##_gemm_nb_r4s8, D, 4, 8)                            \
+KQ_NB_KERNEL(T##_gemm_nb_r5s8, D, 5, 8)
+
+KQ_NB_KERNELS(q4_k, DqQ4K)
+KQ_NB_KERNELS(q5_k, DqQ5K)
+KQ_NB_KERNELS(q6_k, DqQ6K)
+KQ_NB_KERNELS(iq4_xs, DqIq4xs)
+KQ_NB_KERNELS(q8_0, DqQ80)
+KQ_NB_KERNELS(iq4_nl, DqIq4nl)
+KQ_NB_KERNELS(q3_k, DqQ3K)
+KQ_NB_KERNELS(iq2_s, DqIq2s)
+KQ_NB_KERNELS(iq3_xxs, DqIq3xxs)
+KQ_NB_KERNELS(iq3_s, DqIq3s)
+KQ_NB_KERNELS(iq2_xxs, DqIq2xxs)
+KQ_NB_KERNELS(iq2_xs, DqIq2xs)
+KQ_NB_KERNELS(iq1_s, DqIq1s)
+KQ_NB_KERNELS(iq1_m, DqIq1m)
+
+// iq1_s and iq1_m get their own gemv, outside dq_sub's thirteen-way switch,
+// in q2_0_gemv's shape: EIGHT threads cooperate on one 256-weight block (one
+// 32-weight sub-block each) with four blocks in flight, activations staged in
+// registers, and the ternary grid ({0,1,2} nibbles) collapsed to one multiply
+// per sub-block.
+kernel void iq1_s_gemv(
+        device const uchar * weights [[buffer(0)]],
+        device const float * x       [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant IQArgs    & a       [[buffer(3)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint NR0 = 8;
+    const ushort TPB = 8, STEP = 32 / TPB;
+    const uint row0 = tgpig.x * NR0;
+    const uint nblk = a.K / 256;
+    const ulong rowBytes = (ulong) nblk * 50;
+    device const uchar * W = weights + a.woff;
+    const ushort grp = tiisg / TPB;
+    const ushort sub = tiisg % TPB;
+    float acc[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (uint ib = grp; ib < nblk; ib += STEP) {
+        device const float * y = x + (ulong) ib * 256 + sub * 32;
+        float yl[32];
+        float sy = 0.0f;
+        for (ushort i = 0; i < 32; i++) { yl[i] = y[i]; sy += y[i]; }
+        for (uint r = 0; r < NR0; r++) {
+            const uint row = row0 + r;
+            if (row < a.M) {
+                device const uchar * bp = W + (ulong) row * rowBytes
+                                            + (ulong) ib * 50;
+                const float d = iq_f16(bp);
+                const ushort h = iq_u16(bp + 34 + sub * 2);
+                const float dl = d * (float) (2 * ((h >> 12) & 7) + 1);
+                const float delta = (h & 0x8000) ? -0.125f : 0.125f;
+                float lo = 0.0f, hi = 0.0f;
+                for (ushort l = 0; l < 4; l++) {
+                    const uint e = iq1s_grid_gpu[bp[2 + sub * 4 + l]
+                        | (((h >> (3 * l)) & 7) << 8)];
+                    for (ushort j = 0; j < 8; j++) {
+                        const uint n = (e >> (8 * (j % 4) + 4 * (j / 4))) & 0xF;
+                        const float v = yl[l * 8 + j];
+                        if (n == 1) { lo += v; }
+                        if (n == 2) { hi += v; }
+                    }
+                }
+                acc[r] += dl * (lo + 2.0f * hi + (delta - 1.0f) * sy);
+            }
+        }
+    }
+    for (uint r = 0; r < NR0; r++) {
+        const float s = simd_sum(acc[r]);
+        if (tiisg == 0 && row0 + r < a.M) { out[row0 + r] = s; }
+    }
+}
+
+kernel void iq1_m_gemv(
+        device const uchar * weights [[buffer(0)]],
+        device const float * x       [[buffer(1)]],
+        device       float * out     [[buffer(2)]],
+        constant IQArgs    & a       [[buffer(3)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint NR0 = 8;
+    const ushort TPB = 8, STEP = 32 / TPB;
+    const uint row0 = tgpig.x * NR0;
+    const uint nblk = a.K / 256;
+    const ulong rowBytes = (ulong) nblk * 56;
+    device const uchar * W = weights + a.woff;
+    const ushort grp = tiisg / TPB;
+    const ushort sub = tiisg % TPB;
+    float acc[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (uint ib = grp; ib < nblk; ib += STEP) {
+        device const float * y = x + (ulong) ib * 256 + sub * 32;
+        float yl[32];
+        for (ushort i = 0; i < 32; i++) { yl[i] = y[i]; }
+        for (uint r = 0; r < NR0; r++) {
+            const uint row = row0 + r;
+            if (row < a.M) {
+                device const uchar * bp = W + (ulong) row * rowBytes
+                                            + (ulong) ib * 56;
+                ushort sc[4];
+                for (ushort i = 0; i < 4; i++) { sc[i] = iq_u16(bp + 48 + i * 2); }
+                const ushort bits = (sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0)
+                                  | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000);
+                const float d = (float) as_type<half>(bits);
+                const ushort sv = sc[sub / 2];
+                const ushort shf = 6 * (sub % 2);
+                const float dl1 = d * (float) (2 * ((sv >> shf) & 7) + 1);
+                const float dl2 = d * (float) (2 * ((sv >> (shf + 3)) & 7) + 1);
+                const uchar h0 = bp[32 + sub * 2], h1 = bp[33 + sub * 2];
+                float s = 0.0f;
+                for (ushort l = 0; l < 4; l++) {
+                    const uchar h = (l < 2) ? h0 : h1;
+                    const uint up = (l % 2 == 0) ? ((uint) h << 8)
+                                                 : ((uint) h << 4);
+                    const uint e = iq1s_grid_gpu[bp[sub * 4 + l] | (up & 0x700)];
+                    const float delta = (h & ((l % 2 == 0) ? 0x08 : 0x80))
+                                      ? -0.125f : 0.125f;
+                    float lo = 0.0f, hi = 0.0f, sy = 0.0f;
+                    for (ushort j = 0; j < 8; j++) {
+                        const uint n = (e >> (8 * (j % 4) + 4 * (j / 4))) & 0xF;
+                        const float v = yl[l * 8 + j];
+                        sy += v;
+                        if (n == 1) { lo += v; }
+                        if (n == 2) { hi += v; }
+                    }
+                    s += ((l < 2) ? dl1 : dl2)
+                       * (lo + 2.0f * hi + (delta - 1.0f) * sy);
+                }
+                acc[r] += s;
+            }
+        }
+    }
+    for (uint r = 0; r < NR0; r++) {
+        const float s = simd_sum(acc[r]);
+        if (tiisg == 0 && row0 + r < a.M) { out[row0 + r] = s; }
+    }
+}
+
+struct block_q4_K { uchar b[144]; };
+struct block_q5_K { uchar b[176]; };
+struct block_q6_K { uchar b[210]; };
+struct block_iq4_XS { uchar b[136]; };
+
+// Slice `il` (0..15) of a super-block is sub-block il/2, half il%2.
+static inline void dq_q4_k_h(device const block_q4_K * xb, short il,
+                             thread half4x4 & reg) {
+    device const uchar * b = xb->b;
+    const uint ib = il / 2, h = il % 2;
+    const uint4 hd = *(device const uint4 *) b;
+    const float d = kq_f16lo(hd.x), dmin = kq_f16hi(hd.x);
+    const float2 sm = kq_sm(hd, ib);
+    const float dv = d * sm.x, ov = dmin * sm.y;
+    device const uint4 * q4 = (device const uint4 *) (b + 16 + (ib / 2) * 32);
+    const uint4 v = q4[h];
+    const uint sh = 4 * (ib & 1);
+    const uint4 lo = (v >> sh) & 0x0F0F0F0Fu;
+    reg[0] = half4(dv * nib4(lo.x) - ov);
+    reg[1] = half4(dv * nib4(lo.y) - ov);
+    reg[2] = half4(dv * nib4(lo.z) - ov);
+    reg[3] = half4(dv * nib4(lo.w) - ov);
+}
+
+static inline void dq_q5_k_h(device const block_q5_K * xb, short il,
+                             thread half4x4 & reg) {
+    device const uchar * b = xb->b;
+    const uint ib = il / 2, h = il % 2;
+    const uint4 hd = *(device const uint4 *) b;
+    const float d = kq_f16lo(hd.x), dmin = kq_f16hi(hd.x);
+    const float2 sm = kq_sm(hd, ib);
+    const float dv = d * sm.x, ov = dmin * sm.y;
+    device const uint4 * q4 = (device const uint4 *) (b + 48 + (ib / 2) * 32);
+    device const uint4 * h4 = (device const uint4 *) (b + 16);
+    const uint4 v = q4[h];
+    const uint4 hb = h4[h];
+    const uint sh = 4 * (ib & 1);
+    const uint4 n = ((v >> sh) & 0x0F0F0F0Fu)
+                  | (((hb >> ib) & 0x01010101u) << 4);
+    reg[0] = half4(dv * nib4(n.x) - ov);
+    reg[1] = half4(dv * nib4(n.y) - ov);
+    reg[2] = half4(dv * nib4(n.z) - ov);
+    reg[3] = half4(dv * nib4(n.w) - ov);
+}
+
+static inline void dq_q6_k_h(device const block_q6_K * xb, short il,
+                             thread half4x4 & reg) {
+    device const uchar * b = xb->b;
+    const uint ib = il / 2, h = il % 2;
+    const float d = iq_f16(b + 208);
+    const uint n = ib / 4, r = ib % 4;
+    device const packed_ushort4 * ql = (device const packed_ushort4 *)
+        (b + n * 64 + (r % 2) * 32);
+    device const packed_ushort4 * qh = (device const packed_ushort4 *)
+        (b + 128 + n * 32);
+    const float s = d * (float) (int) (char) b[192 + n * 8 + 2 * r + h];
+    const uint shq = (r < 2) ? 0 : 4;
+    const uint shh = 2 * r;
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < 2; ++i) {
+        const uint2 lw = as_type<uint2>(ushort4(ql[2 * h + i]));
+        const uint2 hw = as_type<uint2>(ushort4(qh[2 * h + i]));
+        const uint q0 = ((lw.x >> shq) & 0x0F0F0F0Fu)
+                      | (((hw.x >> shh) & 0x03030303u) << 4);
+        const uint q1 = ((lw.y >> shq) & 0x0F0F0F0Fu)
+                      | (((hw.y >> shh) & 0x03030303u) << 4);
+        reg[2 * i] = half4(s * (nib4(q0) - 32.0f));
+        reg[2 * i + 1] = half4(s * (nib4(q1) - 32.0f));
+    }
+}
+
+static inline void dq_iq4_xs_h(device const block_iq4_XS * xb, short il,
+                               thread half4x4 & reg) {
+    device const uchar * b = xb->b;
+    const uint ib = il / 2, h = il % 2;
+    const float d = iq_f16(b);
+    const ushort sh = iq_u16(b + 2);
+    const uchar sl = b[4 + ib / 2];
+    const int ls = (int) ((sl >> (4 * (ib % 2))) & 0xF)
+                 | (int) (((sh >> (2 * ib)) & 3) << 4);
+    const float dl = d * (float) (ls - 32);
+    device const uint * q1 = (device const uint *) (b + 8 + ib * 16);
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < 4; ++i) {
+        const uchar4 q = as_type<uchar4>((q1[i] >> (4 * h)) & 0x0F0F0F0Fu);
+        reg[i] = half4(dl * float4(kvalues_iq4nl[q.x], kvalues_iq4nl[q.y],
+                                   kvalues_iq4nl[q.z], kvalues_iq4nl[q.w]));
+    }
+}
+
+GEMM_MM_KERNEL(q4_k_gemm_mm_h, block_q4_K, half, 16, 256, dq_q4_k_h)
+GEMM_MM_KERNEL(q5_k_gemm_mm_h, block_q5_K, half, 16, 256, dq_q5_k_h)
+GEMM_MM_KERNEL(q6_k_gemm_mm_h, block_q6_K, half, 16, 256, dq_q6_k_h)
+GEMM_MM_KERNEL(iq4_xs_gemm_mm_h, block_iq4_XS, half, 16, 256, dq_iq4_xs_h)
+
+// The codebook types decode a whole sub-block and keep the staged half.
+template <typename D, typename Block>
+static inline void dq_generic_h(device const Block * xb, short il,
+                                thread half4x4 & reg) {
+    float v[32];
+    D::dq(xb->b, il / 2, v);
+    const short at = (il % 2) * 16;
+    for (int i = 0; i < 4; i++) {
+        reg[i] = half4(v[at + i * 4], v[at + i * 4 + 1], v[at + i * 4 + 2],
+                       v[at + i * 4 + 3]);
+    }
+}
+
+struct block_q3_K { uchar b[110]; };
+struct block_iq2_S { uchar b[82]; };
+struct block_iq3_XXS { uchar b[98]; };
+struct block_iq3_S { uchar b[110]; };
+struct block_iq2_XXS { uchar b[66]; };
+struct block_iq2_XS { uchar b[74]; };
+struct block_iq1_S { uchar b[50]; };
+struct block_iq1_M { uchar b[56]; };
+
+static inline void dq_q3_k_h(device const block_q3_K * xb, short il,
+                             thread half4x4 & reg) {
+    dq_generic_h<DqQ3K, block_q3_K>(xb, il, reg);
+}
+static inline void dq_iq2_s_h(device const block_iq2_S * xb, short il,
+                              thread half4x4 & reg) {
+    dq_generic_h<DqIq2s, block_iq2_S>(xb, il, reg);
+}
+static inline void dq_iq3_xxs_h(device const block_iq3_XXS * xb, short il,
+                                thread half4x4 & reg) {
+    dq_generic_h<DqIq3xxs, block_iq3_XXS>(xb, il, reg);
+}
+static inline void dq_iq3_s_h(device const block_iq3_S * xb, short il,
+                              thread half4x4 & reg) {
+    dq_generic_h<DqIq3s, block_iq3_S>(xb, il, reg);
+}
+static inline void dq_iq2_xxs_h(device const block_iq2_XXS * xb, short il,
+                                thread half4x4 & reg) {
+    dq_generic_h<DqIq2xxs, block_iq2_XXS>(xb, il, reg);
+}
+static inline void dq_iq2_xs_h(device const block_iq2_XS * xb, short il,
+                               thread half4x4 & reg) {
+    dq_generic_h<DqIq2xs, block_iq2_XS>(xb, il, reg);
+}
+static inline void dq_iq1_s_h(device const block_iq1_S * xb, short il,
+                              thread half4x4 & reg) {
+    dq_generic_h<DqIq1s, block_iq1_S>(xb, il, reg);
+}
+static inline void dq_iq1_m_h(device const block_iq1_M * xb, short il,
+                              thread half4x4 & reg) {
+    dq_generic_h<DqIq1m, block_iq1_M>(xb, il, reg);
+}
+
+GEMM_MM_KERNEL(q3_k_gemm_mm_h, block_q3_K, half, 16, 256, dq_q3_k_h)
+GEMM_MM_KERNEL(iq2_s_gemm_mm_h, block_iq2_S, half, 16, 256, dq_iq2_s_h)
+GEMM_MM_KERNEL(iq3_xxs_gemm_mm_h, block_iq3_XXS, half, 16, 256, dq_iq3_xxs_h)
+GEMM_MM_KERNEL(iq3_s_gemm_mm_h, block_iq3_S, half, 16, 256, dq_iq3_s_h)
+GEMM_MM_KERNEL(iq2_xxs_gemm_mm_h, block_iq2_XXS, half, 16, 256, dq_iq2_xxs_h)
+GEMM_MM_KERNEL(iq2_xs_gemm_mm_h, block_iq2_XS, half, 16, 256, dq_iq2_xs_h)
+GEMM_MM_KERNEL(iq1_s_gemm_mm_h, block_iq1_S, half, 16, 256, dq_iq1_s_h)
+GEMM_MM_KERNEL(iq1_m_gemm_mm_h, block_iq1_M, half, 16, 256, dq_iq1_m_h)
+
+
+// The drafting head's cheap output projection: score 2048 CLUSTERS, keep the
+// best few, and score only the tokens they own. Included by Kernels.metal.
+// The token table stays in ORIGINAL token order -- `token_ordering` is a
+// permutation whose VALUES are token ids, so cluster c owns ordered positions
+// [c*per, (c+1)*per) and the ids there are arbitrary. The gather is therefore
+// scattered, and the winning candidate is already a token id with no inverse
+// permutation to apply.
+
+struct AssistTopArgs { uint n; uint k; };
+
+// Top-k by k masked argmax passes over a staged copy. n is small (2048), so
+// staging costs 8 KB of threadgroup memory and every pass is one reduction.
+kernel void assist_top_clusters(
+        device const float    * x   [[buffer(0)]],
+        device       uint     * out [[buffer(1)]],
+        constant AssistTopArgs & a  [[buffer(2)]],
+        uint tpitg [[thread_position_in_threadgroup]],
+        uint ntg   [[threads_per_threadgroup]]) {
+    threadgroup float s[2048];
+    threadgroup float bv[32];
+    threadgroup uint  bi[32];
+    for (uint i = tpitg; i < a.n; i += ntg) { s[i] = x[i]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint pass = 0; pass < a.k; pass++) {
+        float best = -INFINITY;
+        uint  at = 0;
+        for (uint i = tpitg; i < a.n; i += ntg) {
+            if (s[i] > best) { best = s[i]; at = i; }
+        }
+        const uint lane = tpitg % 32;
+        const uint warp = tpitg / 32;
+        for (uint off = 16; off > 0; off >>= 1) {
+            const float ov = simd_shuffle_down(best, off);
+            const uint  oi = simd_shuffle_down(at, off);
+            if (ov > best || (ov == best && oi < at)) { best = ov; at = oi; }
+        }
+        if (lane == 0) { bv[warp] = best; bi[warp] = at; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tpitg == 0) {
+            float tv = bv[0];
+            uint  ti = bi[0];
+            for (uint w = 1; w < ntg / 32; w++) {
+                if (bv[w] > tv || (bv[w] == tv && bi[w] < ti)) {
+                    tv = bv[w];
+                    ti = bi[w];
+                }
+            }
+            out[pass] = ti;
+            s[ti] = -INFINITY;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+struct AssistPickArgs {
+    ulong woff;
+    ulong ooff;
+    uint  dim;
+    uint  per;
+    uint  clusters;
+    uint  rowBytes;
+};
+
+// One Q4_0 row against the hidden vector. Byte j carries element j in its LOW
+// nibble and j+16 in its HIGH one, w = (q - 8) * d -- the same layout
+// q4_0_dequant_row reads.
+inline float assist_row_dot(device const uchar * row, device const float * h,
+                            uint dim) {
+    float acc = 0.0f;
+    const uint blocks = dim / 32;
+    for (uint b = 0; b < blocks; b++) {
+        device const uchar * bp = row + b * 18;
+        const float d = (float) (*(device const half *) bp);
+        device const uchar * qs = bp + 2;
+        const uint base = b * 32;
+        float s = 0.0f;
+        for (uint i = 0; i < 16; i++) {
+            const uchar byte = qs[i];
+            s += ((float) (byte & 0x0F) - 8.0f) * h[base + i];
+            s += ((float) (byte >> 4) - 8.0f) * h[base + i + 16];
+        }
+        acc += s * d;
+    }
+    return acc;
+}
+
+// The winning TOKEN ID over the tokens the chosen clusters own.
+kernel void assist_cluster_argmax(
+        device const uchar     * weights  [[buffer(0)]],
+        device const float     * h        [[buffer(1)]],
+        device const uchar     * obase    [[buffer(2)]],
+        device const uint      * clusters [[buffer(3)]],
+        device       int       * out      [[buffer(4)]],
+        constant AssistPickArgs & a       [[buffer(5)]],
+        uint tpitg [[thread_position_in_threadgroup]],
+        uint ntg   [[threads_per_threadgroup]]) {
+    threadgroup float bv[32];
+    threadgroup int   bi[32];
+    device const uchar * table = weights + a.woff;
+    device const float * ordering =
+        (device const float *) (obase + a.ooff);
+    const uint total = a.clusters * a.per;
+    float best = -INFINITY;
+    int   at = 0;
+    for (uint i = tpitg; i < total; i += ntg) {
+        const uint ordered = clusters[i / a.per] * a.per + (i % a.per);
+        const int token = (int) rint(ordering[ordered]);
+        const float score = assist_row_dot(
+            table + (ulong) token * a.rowBytes, h, a.dim);
+        if (score > best || (score == best && token < at)) {
+            best = score;
+            at = token;
+        }
+    }
+    const uint lane = tpitg % 32;
+    const uint warp = tpitg / 32;
+    for (uint off = 16; off > 0; off >>= 1) {
+        const float ov = simd_shuffle_down(best, off);
+        const int   oi = simd_shuffle_down(at, off);
+        if (ov > best || (ov == best && oi < at)) { best = ov; at = oi; }
+    }
+    if (lane == 0) { bv[warp] = best; bi[warp] = at; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tpitg == 0) {
+        float tv = bv[0];
+        int   ti = bi[0];
+        for (uint w = 1; w < ntg / 32; w++) {
+            if (bv[w] > tv || (bv[w] == tv && bi[w] < ti)) {
+                tv = bv[w];
+                ti = bi[w];
+            }
+        }
+        out[0] = ti;
+    }
+}
 
 static inline void dq_iq4_nl_h(device const block_iq4_nl * xb, short il,
                                thread half4x4 & reg) {
@@ -867,7 +2838,7 @@ kernel void f32_gemv(
 // One threadgroup's sum of a per-thread value: simd_sum within each
 // simdgroup, then simd_sum over those partials in simdgroup 0. `shmem` needs
 // one float per simdgroup (<= 32) and is CLOBBERED, so two reductions in one
-// kernel must pass disjoint regions -- see vit_layernorm. [tg-reduce]
+// kernel must pass disjoint regions -- see vit_layernorm.
 inline float tg_reduce_sum(float v, threadgroup float * shmem,
                            uint ntg, uint sgi, uint tii) {
     float s = simd_sum(v);
@@ -892,7 +2863,7 @@ struct NormArgs { ulong woff; uint n; float eps; };
 // the winning index. A draft only ever needs the index, so this is what
 // keeps a 248320-wide row on the GPU instead of copying it back and
 // wrapping it in a host array. Ties go to the lower index, matching the
-// host argmax it replaces. [gpu-argmax]
+// host argmax it replaces.
 kernel void argmax_rows(
         device const float * x    [[buffer(0)]],
         device       int   * out  [[buffer(1)]],
@@ -1202,13 +3173,13 @@ kernel void rmsnorm_rows_noweight(
 
 // Half-rotation RoPE with an explicit rotated-pair count (gemma). Mirrors
 // GK.rope. TRAP: pairs (j, j + headDim/2), NOT rope_neox's (i, i + nRot/2).
-// [rope-pairing]
+//
 struct RopeGemmaArgs {
     uint headDim; uint nHead; uint rotated; float base; uint pos;
 };
 
 // One RoPE butterfly: rotate the pair (i1, i2) by the given cos/sin.
-// The PAIRING stays the CALLER's, deliberately -- see [rope-pairing].
+// The PAIRING stays the CALLER's, deliberately -- see.
 inline void rope_pair(device float * x, uint i1, uint i2,
                       float c, float s) {
     const float p = x[i1];
@@ -1259,7 +3230,7 @@ kernel void rmsnorm_batch_bf16(
 
 // gemma's vision rope is TWO-dimensional: the head's first half rotates by
 // the patch's x and the second by its y. TRAP: pairs WITHIN each axis half,
-// not across the head like vit_rope. [rope-pairing]
+// not across the head like vit_rope.
 struct GVRopeArgs {
     uint rowStride; uint off; uint headDim; uint nHead; uint N;
 };
@@ -1485,7 +3456,7 @@ kernel void add_inplace(device float * x [[buffer(0)]],
 // dt (ssm_dt.bias) and aNeg (ssm_a = -exp(A_log)) are f32 tensors; one thread
 // per value head (GDN.step gate loop). They are SEPARATE tensors and take a
 // buffer each, since nothing puts two tensors in one weight window.
-// [block-layout]
+//
 struct GateArgs { ulong dtOff; ulong aOff; uint nV; };
 
 kernel void gdn_gate(
@@ -1561,7 +3532,7 @@ kernel void split_qgate(
     }
 }
 
-// kargs for attn_head. [kv-pages] [flash-attn]
+// kargs for attn_head.
 struct AttnArgs {
     uint hd; uint nH; uint nKV; uint T; uint kvDim; uint P;
     float scale; uint gated; uint lo;
@@ -1569,12 +3540,12 @@ struct AttnArgs {
 
 // A page table = an array of device pointers, one per P-position page, held
 // as raw gpuAddresses. KV_MAXP * P bounds the context (2048 * 512 = 1M
-// positions). K/V are stored HALF and accumulated f32. [kv-pages]
+// positions). K/V are stored HALF and accumulated f32.
 #define KV_MAXP 2048
 struct KVTable { device const half * pages[KV_MAXP]; };
 
 // One position's row in a paged K or V table. The same arithmetic serves
-// both, and it was written twice. [kv-pages]
+// both, and it was written twice.
 inline device const half * kv_row(device const KVTable & tab, uint t,
                                   uint P, uint kvDim, uint kvh, uint hd) {
     return tab.pages[t / P] + (t % P) * kvDim + kvh * hd;
@@ -1634,7 +3605,7 @@ inline void attn_combine(threadgroup const float * redM,
 
 // The flash / online-softmax body, shared by the one-token and the batched
 // attention kernels. q, gate and out arrive ALREADY OFFSET to this
-// (row, head). [flash-attn]
+// (row, head).
 inline void attn_stripes(
         device const float   * qh,
         device const KVTable & kT,
@@ -1661,7 +3632,7 @@ inline void attn_stripes(
     float m = -INFINITY, l = 0.0f;
     // The V accumulator is sliced FOUR-WIDE: lane L owns dims 4L..4L+3 of each
     // 128-dim slice, so one half4 load per lane per key covers what four
-    // scalar loads used to. [flash-attn]
+    // scalar loads used to.
     const ushort VS = (ushort) ((hd + 127) / 128);
     float4 acc4[4];
     for (ushort u = 0; u < VS; u++) {
@@ -1851,7 +3822,7 @@ kernel void attn_head(
 
 // Append this token's K,V rows at position pos. The f32 -> half narrowing
 // happens HERE, once per position, so every later read moves half the bytes.
-// [kv-pages]
+//
 struct KVArgs { uint kvDim; uint pos; };
 
 kernel void kv_append(
@@ -1875,7 +3846,7 @@ kernel void kv_append(
 // scan) and gridding N for the parallel ones.
 
 // embed_batch: dequant N token-embedding rows. woff = token_embd base, K =
-// nEmbd, M = N, rowBytes = this tensor type's row stride. [embed-stride]
+// nEmbd, M = N, rowBytes = this tensor type's row stride.
 struct EmbedArgs { ulong woff; uint K; uint M; uint rowBytes; };
 
 kernel void embed_batch(
@@ -1981,7 +3952,7 @@ kernel void f32_embed_batch(
 // gdn_conv_batch: N tokens sequentially per channel; the ring lives in
 // registers
 // across the batch and is written back to convState. Mirrors gdn_conv looped.
-// slots/slot0/stateElems as in ScanBatchArgs. [gdn-ring]
+// slots/slot0/stateElems as in ScanBatchArgs.
 struct ConvBatchArgs {
     ulong cwOff; uint convDim; uint dConv; uint N;
     uint slot0; uint slots; uint stateElems;
@@ -2011,7 +3982,7 @@ kernel void gdn_conv_batch(
             outN[n * a.convDim + c] = siluf(acc);
             for (uint j = 0; j + 2 < kc; j++) { ring[j] = ring[j + 1]; }
             if (kc >= 2) { ring[kc - 2] = cur; }
-            // [gdn-ring] the window after token n, from registers.
+            // the window after token n, from registers.
             if (a.slots > 1 || n + 1 == a.N) {
                 device float * So = convState
                     + (ulong) ((a.slot0 + 1 + n) % a.slots) * a.stateElems;
@@ -2029,7 +4000,7 @@ kernel void gdn_conv_batch(
 // slots/slot0/stateElems drive the rollback ring: the scan READS slot0 and
 // writes the state after token t to slot (slot0+1+t) % slots, from the
 // registers it already holds. slots == 1 collapses to the in-place update
-// the plain decode path wants. [gdn-ring]
+// the plain decode path wants.
 struct ScanBatchArgs {
     uint nV; uint nK; uint dS; float qScale;
     uint N; uint convDim; uint keyDim; uint valueDim;
@@ -2051,7 +4022,7 @@ kernel void gdn_scan_batch(
         const uint hk = hv % a.nK;
         device float * Sh = S + (ulong) a.slot0 * a.stateElems + hv * dS * dS;
         for (uint n = 0; n < a.N; n++) {
-            // [gdn-ring] carry into the next slot BEFORE updating, so slot0
+            // carry into the next slot BEFORE updating, so slot0
             // survives as the pre-pass state this kernel may be rolled to.
             if (a.slots > 1) {
                 device float * So = S
@@ -2090,7 +4061,7 @@ kernel void gdn_scan_batch(
 // gdn_scan_batch_k*: the delta-rule scan with the recurrent state held
 // RESIDENT in registers across the whole N-token sequence, KS = dS / 32
 // slices per lane fixed at compile time; the host routes any other dS to
-// gdn_scan_batch. [gdn-scan2]
+// gdn_scan_batch.
 template <ushort KS>
 __attribute__((always_inline))
 inline void gdn_scan_slice(device const float * k, device const float * q,
@@ -2166,7 +4137,7 @@ inline void gdn_scan_impl(
         }
         const float o = simd_sum(osum) * a.qScale;
         if (tiisg == 0) { oN[n * a.valueDim + hv * dS + j] = o; }
-        // [gdn-ring]
+        //
         if (a.slots > 1 || n + 1 == a.N) {
             device float * So = S
                 + (ulong) ((a.slot0 + 1 + n) % a.slots) * a.stateElems
@@ -2247,7 +4218,7 @@ kernel void rope_batch(
 }
 
 // gemma's rope for N tokens at basePos..basePos+N-1. TRAP: same pairing as
-// rope_gemma, NOT rope_batch's. [rope-pairing]
+// rope_gemma, NOT rope_batch's.
 struct RopeGemmaBatchArgs {
     uint headDim; uint nHead; uint rotated; float base; uint basePos; uint N;
 };
@@ -2272,7 +4243,7 @@ kernel void rope_gemma_batch(
 
 // Interleaved M-RoPE for N tokens with per-token 3D positions (t,h,w). Text
 // has t==h==w and degenerates to rope_batch. Frequency i takes component
-// i % 3, reproducing HF's apply_interleaved_mrope. [rope-pairing]
+// i % 3, reproducing HF's apply_interleaved_mrope.
 struct RopeMBatchArgs {
     uint headDim; uint nHead; uint nRot; float base; uint N;
 };
@@ -2322,14 +4293,13 @@ kernel void kv_append_batch(
 
 // Causal attention for N query tokens over the paged KV: token n (absolute
 // position basePos+n) attends to keys 0..basePos+n, one threadgroup per
-// (token, head). [flash-attn]
-//
+// (token, head).
 // The `blk` buffer carries the vision block each chunk ROW belongs to, two
 // absolute uints (lo, hi) per row and 0/0 for none, so one chunk may hold
 // several blocks. A query inside one reads the WHOLE block, which is the only
 // place attention passes its own position. It is read up to FA_Q rows past N
 // (attn_batch_mm masks a partial tail tile rather than branching around it),
-// so the host sizes it past the batch. [vision-block]
+// so the host sizes it past the batch.
 struct AttnBatchArgs {
     uint hd; uint nH; uint nKV; uint kvDim; uint P; float scale;
     uint basePos; uint N; uint gated; uint window;
@@ -2361,7 +4331,7 @@ kernel void attn_batch(
     // query row in the batch has its own start. window == 0 is unwindowed.
     const uint lo = a.window == 0 || T <= a.window ? 0 : T - a.window;
     // attn_flash reads [lo, hi) with no further mask -- the RANGE is the mask
-    // -- so a vision block needs nothing but a longer bound. [vision-block]
+    // -- so a vision block needs nothing but a longer bound.
     const uint hi = attn_end(a.basePos + n, T, blk[2 * n], blk[2 * n + 1]);
     const uint group = a.nH / a.nKV;
     const uint off = n * a.nH * a.hd + h * a.hd;
@@ -2370,8 +4340,7 @@ kernel void attn_batch(
                shmem, sgitg, tiisg);
 }
 
-// The SAME causal attention on the 8x8 matrix units. [flash-attn-mm]
-//
+// The SAME causal attention on the 8x8 matrix units.
 // FA_Q query rows and FA_K keys per iteration; the four simdgroups split the
 // KEY range for the scores and the HEAD DIM for the context, so neither
 // product is computed twice. Everything that is not a matmul -- the paged row
@@ -2557,7 +4526,7 @@ kernel void attn_batch_mm(
     // has to cover; fa_mask still bounds each row on its own, so a key past
     // one row's end contributes nothing to it. Rows past nq are excluded
     // deliberately -- their `blk` pair is padding, and folding it in would
-    // sweep keys no live row can reach. [vision-block]
+    // sweep keys no live row can reach.
     const uint tLast = a.basePos + n0 + nq;
     uint tEnd = tLast;
     for (ushort q = 0; q < nq; q++) {
@@ -2592,11 +4561,11 @@ kernel void attn_batch_mm(
 }
 
 // ViT (Qwen3-VL vision tower) kernels. Each mirrors the CPU ViT
-// (Qwen/QwenViT.swift) op for op; that engine is the oracle. [vit-tower]
+// (Qwen/QwenViT.swift) op for op; that engine is the oracle.
 
 // f16-weight simdgroup GEMM: dst[N,M] = X[N,K] @ W[M,K]^T, W a plain
 // row-major [M][K] half buffer. Unlike the quantized GEMMs it needs a K-tail
-// guard: ViT K values are NOT all multiples of 32. [vit-tower]
+// guard: ViT K values are NOT all multiples of 32.
 struct F16WArgs { uint K; uint M; };
 
 kernel void f16w_gemm_mm(
@@ -2660,7 +4629,7 @@ kernel void f16w_gemm_mm(
 
 // LayerNorm with bias: the ViT is pre-LN, mean-centered with a learned bias,
 // unlike the LM's rmsnorm. x -> y so x survives for the residual. Needs TWO
-// reductions, hence the disjoint shmem halves. [tg-reduce]
+// reductions, hence the disjoint shmem halves.
 struct LNArgs { uint n; float eps; };
 
 kernel void vit_layernorm(
@@ -2686,7 +4655,7 @@ kernel void vit_layernorm(
     // Disjoint scratch halves, because tg_reduce_sum clobbers what it is
     // handed: the second reduction would otherwise overwrite the first's
     // result before it is read. Two calls cost two extra barriers against the
-    // hand-fused form; the arithmetic is untouched. [tg-reduce]
+    // hand-fused form; the arithmetic is untouched.
     const float sum = tg_reduce_sum(s1, shmem, ntg, sgi, tii);
     const float sumsq = tg_reduce_sum(s2, shmem + 32, ntg, sgi, tii);
     const float mean = sum / (float) a.n;
@@ -2720,7 +4689,7 @@ kernel void gelu_tanh(device float * x [[buffer(0)]],
 
 // Vision M-RoPE over the q or k span of the fused qkv rows; cos/sin come
 // precomputed per (slot, pair) from ViT.ropeTables. `off` selects q (0) or
-// k (e) inside a 3e row. [rope-pairing]
+// k (e) inside a 3e row.
 struct VRopeArgs {
     uint rowStride; uint off; uint headDim; uint nHead; uint N;
 };
@@ -2746,12 +4715,12 @@ kernel void vit_rope(
 
 // Bidirectional attention over the fused qkv rows ([N][3e]), no causal mask
 // and no GQA. The 4 x 32 lane slice caps hd at 128; the host asserts it.
-// [vit-attn]
+//
 struct VAttnArgs { uint n; uint e; uint hd; uint nHead; float scale; };
 
 // Stage one TK-key tile of K and V into threadgroup memory. Reads the fused
 // qkv rows, writes the two tiles, touches nothing else -- so it lifts out of
-// the softmax cleanly. [vit-attn]
+// the softmax cleanly.
 inline void vit_stage_kv(device const float * qkv,
                          threadgroup float * kt, threadgroup float * vt,
                          uint t0, uint tk, uint h, uint row,
@@ -2913,14 +4882,14 @@ kernel void scale_head_dims(device       float * x [[buffer(0)]],
 // gemma audio attention: Transformer-XL relative attention over blocked
 // local windows. TRAP: the window holds `chunk` positions INCLUDING self, so
 // `rel` runs 1..past and allowing 0 hands every query one extra key.
-// [audio-attn]
+//
 struct AAttnArgs {
     uint n; uint e; uint heads; uint hd; uint chunk; uint ctx; uint past;
     float cap;
 };
 
 // The absolute key position a window slot maps to. Both loops below need it,
-// and it was computed in each -- the mask rule written twice. [audio-attn]
+// and it was computed in each -- the mask rule written twice.
 inline int audio_key_at(uint b, uint o, uint chunk, uint past) {
     return (int) (b * chunk + o) - (int) past;
 }
@@ -2932,7 +4901,7 @@ inline bool audio_key_live(int kAbs, uint n) {
 
 // One query's window scores, and their max for the softmax shift.
 // TRAP: `rel` runs 1..past, NOT 0..past -- the window holds `chunk` positions
-// INCLUDING self, so allowing 0 hands every query one extra key. [audio-attn]
+// INCLUDING self, so allowing 0 hands every query one extra key.
 inline float audio_scores(device const float * q, device const float * k,
                           device const float * relk,
                           thread float (&sc)[32],
@@ -3011,11 +4980,11 @@ kernel void gemma_audio_attn(
 // not a compression step. `rint` rounds half to EVEN to match torch.round;
 // anything else drifts on the exact .5 the trained scales hit. Two entry
 // points because an input buffer is usually shared and an output is not.
-// [srq-clamp]
+//
 struct SrqArgs { uint n; float s; float lo; float hi; };
 
 // A nonzero scale is the mobile lineage's fake-quant; otherwise the export's
-// literal two-sided bound, which does NOT round. [srq-clamp]
+// literal two-sided bound, which does NOT round.
 inline float srq_bound(float v, constant SrqArgs & a) {
     return a.s != 0.0f ? clamp(rint(v / a.s), -128.0f, 127.0f) * a.s
                        : clamp(v, a.lo, a.hi);
@@ -3037,404 +5006,3 @@ kernel void srq_to(device const float * src [[buffer(0)]],
         dst[gid] = srq_bound(src[gid], a);
     }
 }
-
-/* FOOTNOTES
-
-Rationale and measurements live here rather than beside the code, so a
-kernel body reads as its op sequence and one explanation can serve several
-call sites instead of being copied to each. Referenced by a [tag] at the
-site. Tags are NAMES and are never renumbered, so inserting one below
-disturbs nothing and a stale reference is findable with grep.
-
-A TRAP stays inline. Anything that is silently wrong if you change it --
-a pairing rule, a stride, a type width -- keeps a one-line warning at the
-code, because someone editing that line must not have to follow a link to
-learn it. Only the reasoning and the numbers move here.
-
-### [block-layout]  how a quantized weight is addressed
-
-Weights are read straight out of the mapped GGUF, so every kernel that touches
-one takes a 64-bit byte offset rather than a pointer. 64-bit because a window
-can exceed 4 GB.
-
-The mapping is covered by SEVERAL no-copy buffers, not one, because
-maxBufferLength is a hard per-device ceiling (2048 MB on an A14) that a 2.5 GB
-set cannot fit however much memory is free. A kernel is handed the one buffer
-holding its tensor and an offset INSIDE that buffer; it never sees a
-file-relative offset. Windows are cut at tensor boundaries, so no tensor
-straddles two of them and a row offset can be added to a tensor's base without
-leaving its buffer. gdn_gate is the only kernel reading two tensors at once
-and therefore the only one taking two weight buffers.
-
-The three block formats, byte for byte as the repackers write them:
-
-    Q2_0  128 weights / 34 bytes  { half d; uchar qs[32] }  w = (code-1)*d
-          codes are 2-bit, 4 per byte, LSB-first
-    Q4_0   32 weights / 18 bytes  { half d; uchar qs[16] }  w = (q-8)*d
-          byte j holds element j in the LOW nibble and j+16 in the HIGH one
-    Q8_0   32 weights / 34 bytes  { half d; char  qs[32] }  w = q*d
-
-Q2_0 is a PrismML fork type, not upstream ggml, so there is no llama.cpp
-cross-check for it -- which is what makes the SIMD oracle load-bearing.
-
-The GEMV path addresses blocks by manual byte arithmetic (stride, d at +0, qs
-at +2) rather than through a struct, to avoid depending on any MSL packing
-assumption. The GEMM path does use structs, which is safe because it only ever
-reads whole sub-blocks.
-
-Activation and state buffers are shared-storage f32 (unified memory), and all
-dispatches for one token ride ONE command encoder -- so Metal's hazard
-tracking serializes the dependent steps and scratch is safely reused across
-layers.
-
-### [embed-stride]  why the embedding kernels are handed their row stride
-
-Every other kernel is given a byte offset that already points at the row it
-must read, so it never needs to know how wide a row is. The embedding gathers
-are the exception: they index by token id, so the stride is theirs to apply.
-
-It used to be the literal `a.K / 128 * 34`, which is right for exactly the two
-2-bit types and silently wrong for every other. A token_embd of any other type
-then read from the wrong offset and returned a plausible-looking garbage row.
-So the stride now arrives in EmbedArgs from GGUF.rowByteCount, the same
-function the reader sizes tensors with, and adding a type is a switch arm
-rather than a constant to notice.
-
-### [gemv-unroll]  why `q2_0_gemv` looks hand-rolled
-
-Decode is LATENCY-bound here, not bandwidth-bound: measured 8.1 t/s against
-a 12.4 t/s memory wall, and only 12% of compute peak. So each lane keeps
-TWO blocks in flight per iteration, in DISTINCT scalar arrays -- a
-loop-indexed yl[u][i] spills to local memory and regresses. UN=2 is the
-sweet spot; UN=4 blows the register budget to 5.7 t/s. Net +8%, 8.1 -> 8.7.
-
-The scalar lo/hi select-add beats every alternative tried: float4-dot,
-scalar-fma and NSG=4 all regressed. TPB=8 lanes cooperate on one 128-weight
-block so their 32 qs bytes are read 4 consecutive bytes each, which is what
-makes the weight stream coalesce. Per-block dot is d*(lo + 2*hi - sumy) =
-d*sum((code-1)*x), matching `Q2_0.matvec`.
-
-This is the most tuned kernel in the file and the one least worth
-"simplifying". It is also why gemv did not get folded into a shared
-template: the shape that makes it fast is not the shape q4_0/q8_0 have.
-
-### [kv-pages]  the bindless page table, and why K/V are half
-
-MSL forbids a top-level buffer whose pointee is a pointer, but ALLOWS a
-device pointer as a struct member (a tier-2 argument buffer). On Apple
-Silicon each `device half*` slot is just its 8-byte gpuAddress, so the host
-writes raw addresses and no `MTLArgumentEncoder` is involved.
-
-K/V are stored half because decode cost is LINEAR in cached positions, so
-at any real context the KV read dominates what a token moves: on the dense
-1.7B at 4K it is ~0.9 GB against a 0.46 GB weight stream. The pages are
-~112 MB per 512 positions, which is what actually bounds context on a 3 GB
-phone. llama.cpp has shipped f16 KV by default for years, so this is parity
-rather than new ground.
-
-### [gdn-scan2]  the register-resident delta-rule scan
-
-`gdn_scan_batch` round-trips the dS x dS state matrix through device memory
-every token -- about 4 device passes over S per token, which is its
-bandwidth wall. Here one simdgroup owns (value head hv, output column j)
-and its 32 lanes split the key dimension into KS = dS/32 register slices,
-so S is loaded ONCE at entry and stored ONCE at exit. The two reductions
-(`sk = sum_i S[i,j]*k[i]` and `o = sum_i S[i,j]*q[i]`) become `simd_sum`
-over the key dim. KS is a template parameter so the slice arrays unroll
-into registers, and a lane's slice is contiguous, so at KS == 4 its q and
-k are one float4 load each. Decode is the same kernel at N == 1.
-
-Numerics match `GDN.step`: the only change is the key-dim reduction ORDER,
-and fp non-associativity stays well under the parity gate. COLS
-(simdgroups per threadgroup, = output columns owned) is fixed at 4,
-independent of dS.
-
-### [srq-clamp]  why the clamp is arithmetic
-
-The QAT trained with each quantized linear's input and output rounded to a
-per-linear scale, so removing it does not merely lose precision -- it
-changes the model. Measured: the same weights unclamped answer "the content
-is unclear" where the clamped ones transcribe.
-
-Two entry points because an INPUT is usually a shared buffer (one norm
-feeds q, k and v), so clamping in place would corrupt the next reader,
-while an OUTPUT belongs to its own linear alone and is safe in place.
-
-This is also the mechanism behind the batched-prefill gap in
-[gemm-tiles]: `rint()` is a step function, so ANY reordering of a reduction
-moves some element a whole quantization step.
-
-### [vit-attn]  the Qwen3-VL vision attention, and what was tried
-
-One threadgroup per (head, tile of ntg/32 queries), one simdgroup per
-query, K/V streamed in TK=32-key tiles through threadgroup memory shared by
-all the simdgroups. Within a tile the softmax is LANE-PER-KEY: each lane
-computes its key's whole dot (float4-vectorized) and one exp, and the
-online-softmax state (m, l, lane-sliced acc) updates once per TILE rather
-than per key.
-
-Measured alternatives, all SLOWER: a per-key `simd_sum` + exp chain is
-latency-bound at ~2x; half-staged tiles lose to 2-byte scalar loads; TK=16
-pays more per-tile overhead than the occupancy gain returns.
-
-The context lands at the head's slot of out [N][e].
-
-### [vit-tower]  the mmproj tower on the GPU
-
-f16 weights (dequanted once at load by `QwenMetalViT` into plain half buffers) x
-f32 activations, f32 accumulation. Each kernel mirrors the CPU ViT
-(Qwen/QwenViT.swift) op for op and that engine is the oracle --
-`gadeon-cli --vit` cross-gates the two forwards.
-
-`f16w_gemm_mm`'s W is row-major [M][K] half in ggml's native [out][in] order,
-so the CPU path's load-time transpose does not exist here. It shares the
-64(M) x 32(N) tile, the half staging tiles (6144 B), the f32 accumulate and
-the bounds-checked f32 spill path with the quantized GEMMs; what it does
-NOT share is the K-tail guard, because ViT K values are not all multiples
-of 32 and out-of-range lanes must load 0.
-
-### [audio-attn]  the window that holds `chunk` positions including self
-
-The bug this footnote exists to prevent, found once by bisection: the local
-window holds `chunk` positions INCLUDING self, so the lag runs 0..past-1
-and the encoding row `rel = o - qi` runs 1..past. Allowing rel = 0 hands
-every query ONE EXTRA key. It is invisible in the first block, where that
-key falls before position zero and is masked anyway, so the whole tower
-looks structurally right and only the numbers are wrong.
-
-What found it was dumping the reference's attn_weights and COUNTING the
-nonzeros per query. No amount of staring at the formula did.
-
-One thread per (position, head) -- the whole tower is a few hundred of
-them, so there is nothing to gain from a fancier decomposition.
-
-### [tg-reduce]  the two-stage threadgroup sum
-
-`simd_sum` reduces 32 lanes in one instruction, and a threadgroup is at most
-1024 threads = 32 simdgroups, so a SECOND `simd_sum` over the per-simdgroup
-partials finishes any legal threadgroup in one more step. That is why there
-is no loop here and why the scratch is 32 floats regardless of size.
-
-Both barriers are load-bearing. The first orders the per-simdgroup writes
-before simdgroup 0 reads them; the second orders that write of the total
-before every thread reads it back. The `tii < (ntg + 31) / 32` guard zeroes
-the lanes past the live simdgroup count, whose scratch slots were never
-written.
-
-The helper returns shmem[0] rather than the register it just computed
-because only lane 0 of simdgroup 0 holds that value; every other thread has
-to read it from memory, which is what the second barrier makes safe.
-
-### [vision-block]  why a bidirectional block needs no mask term
-
-A gemma-4 checkpoint with `use_bidirectional_attention: vision` lets the
-tokens of ONE image attend to each other in both directions, on EVERY layer.
-HF builds the sliding one as `AND(sliding_window, OR(causal, blockwise))`.
-
-Do not trust `create_masks_for_vision_model`'s docstring here, which says the
-global layers stay causal: that function is not the one the forward runs. The
-forward puts `block_sequence_ids` into mask_kwargs and lets
-`create_masks_for_generate` build BOTH masks from it. Measured against the
-reference, sliding-only leaves layer 5 at 0.95 where both reach six nines.
-
-Written literally that is a per-key predicate. It does not have to be. The
-block always CONTAINS the query, so `[lo, T)` and `[blockLo, blockHi)` always
-overlap, and their union is the single contiguous range
-`[lo, max(T, blockHi))`. The window still bounds it from below, so an image
-longer than the window is cut by `lo` exactly as HF's AND cuts it.
-
-That is why `attn_end` returns a bound rather than a mask, and why
-`attn_batch` needed one changed argument instead of a third kernel. Only
-`fa_mask` tests it per row, because a matrix-unit tile carries eight queries
-whose ends differ.
-
-THE CONSTRAINT this puts on the host: the block's forward keys must already
-be in the pool when the query runs, so a whole vision block must ride ONE
-chunk. A per-token prefill cannot express this mask at all -- at query q only
-0..q have been appended.
-
-### [rope-pairing]  why `rope_pair` takes indices and not a pairing rule
-
-Seven kernels rotate a pair, and they do NOT agree on which two elements
-are a pair. Three regimes are live at once:
-
-  rope_neox / rope_batch / rope_mrope_batch   (i, i + nRot/2)
-  rope_gemma / rope_gemma_batch / vit_rope    (j, j + headDim/2)
-  gemma_vit_rope                              (j, j + per/2) WITHIN an axis
-                                              half, the halves driven by
-                                              the patch's x and y
-
-These are different permutations of the same head, not different constants.
-A helper that derived the partner index would have to be told which regime
-it was in, which is the same decision moved somewhere the caller cannot
-see -- and getting it wrong is silent: every variant still fills the buffer
-with finite numbers and still produces fluent text. Reusing vit_rope's
-pairing for gemma's vision tower scored 0.69 and read as a weight bug.
-
-So the caller computes both indices and the helper only rotates. It takes
-cos/sin rather than an angle for the same reason: the two vision ropes read
-theirs from host-built tables, and an angle-taking helper would have shut
-them out of the sharing.
-
-### [gemm-tiles]  the simdgroup-matrix GEMM, its tile precision, and its cost
-
-TILE PRECISION. Half tiles are the shipping default. They halve the
-staging memory (6144 B against 12288), and since prefill is compute-bound
-the win is more resident threadgroups in flight rather than fewer bytes
-moved. MEASURED on an M3, interleaved A/B with a cooldown before every run
--- uncooled runs throttle and can invert the result: 27B 42.7 -> 47.6 t/s
-(+11.5%, four reps 1.104-1.127), 1.7B 602 -> 638 t/s (+6.0%). Parity holds
-at 1.9e-4 RELATIVE error, inside fp16's own 4.9e-4 epsilon.
-
-THE SPILL PATH. A tile that runs off the end of M or N cannot
-`simdgroup_store` straight to dst, so it stages through threadgroup memory as
-F32 and copies out row by row. That is why a partial tile needs 8192 B even
-at half precision -- the host allocates 6144 only when M % 64 == 0 and
-N % 32 == 0. Getting that wrong is a threadgroup-memory overrun, not a
-wrong answer.
-
-WHY THE WEIGHTS STAY QUANTIZED. Blocks are read straight out of the mapped
-GGUF and expanded in registers. The gemma vision tower alone is 0.167 B
-parameters, which would be 336 MB dequantized to resident f16 and is
-nothing at all this way.
-
-### [gdn-ring]  why a rollback is an index and not a copy
-
-A verify pass mutates the recurrent state as it walks its tokens, so
-accepting only m of them has to put that state back. Snapshotting it and
-replaying the scan costs a copy of the whole state per cycle; keeping one
-slot per token costs nothing extra, because the scan already holds the state
-in REGISTERS across its token loop and can store it to a different slot on
-the way past.
-
-`slot0`/`slots`/`stateElems` say which slot to read and how many to write
-forward into. `slots == 1` is the plain decode path: read slot 0, write slot
-0, i.e. the in-place update these kernels always did.
-
-`gdn_scan_batch_k*` keeps the state in registers, so slot0 survives
-untouched, and with one slot it and `gdn_conv_batch` write the state once,
-after the last token: the per-token store exists for the ring alone, and on the 9B it
-was a gigabyte of strided stores per layer per 512-token chunk.
-`gdn_scan_batch` does NOT -- it updates in device memory, so it must carry
-into the next slot BEFORE updating or it would destroy the very state a
-rollback returns to. Our geometry always takes the register path, so the
-scalar one is the untested branch.
-
-### [gpu-argmax]  why a draft never copies its logits back
-
-A draft token is an INDEX. Reading the 248320-wide row back to find it costs
-993 KB over PCIe-equivalent bandwidth per draft step, plus a host allocation
-to wrap it, and the whole row is discarded immediately. `argmax_rows` leaves
-the row where it was written and moves 4 bytes.
-
-Ties resolve to the LOWER index so the result is identical to the host
-`argmax` it replaces, which scans ascending and keeps the first strict
-maximum -- otherwise a tie would silently change a draft and show up as an
-acceptance difference rather than an error.
-
-### [flash-attn]  the shared attention body, and why it is shared
-
-`attn_head` (one query) and `attn_batch` (N queries) were 120-line twins whose
-ONLY differences were where T and lo come from and the base offset into
-q / gate / out. Everything subtle -- the tile striping, the online softmax,
-the four-wide V accumulator, the NSG combine -- was written twice. That is
-the dangerous kind of duplication here: it is precisely the seam where the
-batched path can drift from the per-token one, and the SRQ noise floor
-(see [gemm-tiles]) is wide enough to hide a small drift from cosine gates.
-Passing q, gate and out ALREADY OFFSET removes the difference entirely, so
-the loop exists once and the two cannot disagree.
-
-WHY O(hd) THREADGROUP MEMORY. A scores[T] buffer capped context near 8K on
-the 32 KB threadgroup budget while the page pool advertises 1M positions.
-The online softmax keeps only (max, denom, dim-sliced acc) per simdgroup,
-so the request is 5*hd+8 floats and is CONSTANT in T -- which is what lets
-a long prefill chunk run at all.
-
-WHY half4 LOADS. Each LANE walks a whole head vector while the 32 lanes sit
-kvDim apart, so a scalar loop issues 32 SCATTERED requests per step and
-never fills a cache line. Vectorizing quarters the request count, and half
-storage halves the bytes each one moves. Once the K dot was vectorized, the
-V gather became the request count that set the pace, so its slice was
-widened to four-wide too: lane L takes bytes 8L..8L+7, so a warp sweeps 256
-contiguous bytes. Vector only when hd % 4 == 0, which is also what makes
-the kvh * hd row base 8B-aligned; the scalar tail covers any other
-geometry.
-
-THE WINDOW IS A READ BOUND, not an eviction. `lo` starts the key sweep late
-rather than dropping pages, so a shared layer windows its SOURCE's full
-history exactly as HF does and the pool stays append-only -- which is what
-makes index-based rollback possible. In the batched kernel every query row
-computes its own lo, since each sits at its own absolute position.
-
-### [flash-attn-mm]  the same attention on the matrix units, and why
-
-WHY A SECOND BODY AT ALL, when [flash-attn] exists to stop exactly that. The
-two are not variants of one algorithm: the scalar body is lane-per-key with a
-per-lane online softmax, the matrix body is tile-per-block with the softmax in
-threadgroup memory between two products. Merging them would mean a kernel
-carrying both decompositions behind a flag, which is worse than two honest
-bodies. What IS shared is everything that is not the product itself -- the
-paged row addressing (`kv_row`), the KV table, `AttnBatchArgs`, the causal and
-window masks, and the same per-row algebra in the same order. And the scalar
-body is not vestigial: it is the ONLY path on a GPU without matrix units.
-
-WHY IT IS FASTER, in one number. Per 32-key tile the scalar kernel issues 256
-float4 FMAs per lane and performs exactly the useful MACs -- it is already at
-~100% ALU efficiency, so there is no waste to reclaim. A
-`simdgroup_multiply_accumulate` does 8x8x8 = 512 MACs per issue against a
-float4 FMA's 32x4 = 128. Four times the MACs per instruction is the entire
-available win, and it lands on the term that grows with context.
-
-MEASURED, M3, gemma-4-12B, ctx 4096, one binary with LLM_ATTN_MM as the knob,
-ABBA with a cooldown before every run, scoring the warm-up prefill pass's GPU
-milliseconds:
-
-    rep   scalar            matrix            speedup
-      1   67830 ms  60.4    45155 ms  90.7    1.502
-      2   76666 ms  53.4    45577 ms  89.9    1.682
-      3   95725 ms  42.8    42861 ms  95.6    2.233
-
-Take 1.5x, not 2.2x: the scalar arm DEGRADES across the run (67830 -> 95725, a
-41% thermal loss over ~15 minutes) while the matrix arm is flat (45155 /
-45577 / 42861). The rising ratio is the baseline collapsing. Rep 1 is the
-coldest machine AND puts the matrix arm in the warmer slot, so 1.5x is a lower
-bound. That the matrix arm barely moves under sustained load is its own
-finding -- long sessions are where this model actually lives.
-
-Per chunk at pos 3968: 2028 -> 1518 ms. Against the measured attention-free
-base (~1040 ms, flat in context) that is attention 988 -> 478 ms, and the
-growth slope above the window 0.24 -> 0.106 ms/position.
-
-THE SHAPE. FA_Q=8 query rows and FA_K=32 keys per iteration; the four
-simdgroups split the KEY range for the scores and the HEAD DIM for the
-context, so neither product is computed twice. The correction rides a DIAGONAL
-matrix because a simdgroup matrix has no scalar multiply -- one extra product
-per dim tile against the sixteen the context costs.
-
-THREE THINGS THAT WOULD SHIP BROKEN. Every simdgroup storing to one scratch
-window in the final normalize (they need their own; FA_Q*FA_K is exactly
-NSG*64). The correction matrix's off-diagonal left uninitialized on the first
-tile. And the PAGE ALIGNMENT: an 8-key block is read as ONE strided
-`simdgroup_load`, which is contiguous only inside a single page, so the host
-gates on `P % 8 == 0`. The self-test's P=4 pool scored 0/12 before that term
-existed -- shipping pools are 512, and depending on that silently is how a
-kernel acquires an assumption nobody wrote down.
-
-PARITY. The ternary self-test passes whole, including `batched prefill 8/8`
-and `long-context 6/6` on exact token ids through this kernel; gemma is 15/15
-against the SIMD oracle. Both `attn_head` byte-goldens are UNCHANGED, so
-decode is untouched. The four `attn_batch` goldens move by 1.4e-4, which is
-the fp16-operand magnitude (Q is staged half, P is stored half) and sits
-inside fp16's own 4.9e-4 epsilon, as [gemm-tiles] already records for the
-shipping half-tile GEMM.
-
-WHAT `f16w_gemm_mm` SHARES, and what it does not. It was first judged
-unshareable because its A tile comes from a plain dequantized half array
-rather than block-quantized bytes in the mmap, and it needs a K-tail guard
-the quantized six never do (their K is always a multiple of the block size).
-That was the wrong conclusion drawn from a true premise: it differs on ONE
-axis, and the units it agrees on extract cleanly. It now shares
-`simd_mm_slice` and `store_mm_tile` with `gemm_mm_impl` and keeps only its
-own A/B tile staging. The lesson generalizes -- when two bodies differ on
-one axis, extract the axes they AGREE on rather than giving up on sharing.
-*/

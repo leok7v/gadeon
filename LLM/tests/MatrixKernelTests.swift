@@ -28,7 +28,6 @@ struct MatrixKernelTests {
 
     @Test func everyMatrixKernelIsSkippedWithoutMatrixUnits() throws {
         var names = try emitted(source("Kernels.metal"))
-        names += try emitted(source("IQKernels.metal"))
         names += ["attn_batch_mm", "f16w_gemm_mm", "iq_gemm_mm_h"]
         #expect(names.count > 20)
         for name in names {
