@@ -553,7 +553,10 @@ struct ContentView: View {
             .lineLimit(1)
             .minimumScaleFactor(0.4)
             .frame(maxWidth: .infinity)
-            .modifier(Shimmer(active: true))
+            .contentTransition(.opacity)
+            .animation(.easeInOut(duration: 0.45),
+                       value: phrase.wrappedValue)
+            .modifier(Whimsy())
             .task {
                 while !Task.isCancelled {
                     phrase.wrappedValue = Whimsical.current(stage)
@@ -1167,7 +1170,9 @@ struct ContentView: View {
         Text(model.thinkStatus)
             .appFont(.caption)
             .foregroundStyle(.secondary)
-            .modifier(Shimmer(active: true))
+            .contentTransition(.opacity)
+            .animation(.easeInOut(duration: 0.45), value: model.thinkStatus)
+            .modifier(Whimsy())
     }
 
     private func answerText(_ m: Message) -> String? {
@@ -1575,6 +1580,40 @@ private struct ToolRoundDetail: View {
             .frame(height: min(max(contentHeight, 20), 280 * k))
         }
         .padding(12)
+    }
+
+}
+
+private struct Whimsy: ViewModifier {
+
+    @State private var travel: CGFloat = -2
+    private static let dim: CGFloat = 0.55
+    private static let sweep: TimeInterval = 2.6
+
+    func body(content: Content) -> some View {
+        content
+            .mask {
+                GeometryReader { geo in
+                    let w = max(geo.size.width, 1)
+                    LinearGradient(stops: [
+                        .init(color: .white.opacity(Whimsy.dim),
+                              location: 0),
+                        .init(color: .white.opacity(Whimsy.dim),
+                              location: 0.34),
+                        .init(color: .white, location: 0.5),
+                        .init(color: .white.opacity(Whimsy.dim),
+                              location: 0.66),
+                        .init(color: .white.opacity(Whimsy.dim),
+                              location: 1),
+                    ], startPoint: .leading, endPoint: .trailing)
+                        .frame(width: w * 3)
+                        .offset(x: travel * w)
+                }
+            }
+            .onAppear {
+                withAnimation(.linear(duration: Whimsy.sweep)
+                    .repeatForever(autoreverses: false)) { travel = 0 }
+            }
     }
 
 }
