@@ -857,10 +857,19 @@ import UniformTypeIdentifiers
     private func loadPoster(_ id: UUID, _ url: URL) {
         Task { @MainActor in
             let data = await VideoFrames.poster(url: url, maxPx: 640)
-            if let data, let cg = VisionPreprocess.image(data),
-               let at = attachedClips.firstIndex(where: { c in c.id == id }) {
-                attachedClips[at].thumbnail = cg
+            if let data, let cg = VisionPreprocess.image(data) {
+                adoptPoster(cg, id: id, url: url)
             }
+        }
+    }
+
+    private func adoptPoster(_ cg: CGImage, id: UUID, url: URL) {
+        if let at = attachedClips.firstIndex(where: { c in c.id == id }) {
+            attachedClips[at].thumbnail = cg
+        }
+        for i in messages.indices
+        where messages[i].posters.isEmpty && messages[i].clips.contains(url) {
+            messages[i].posters = [cg]
         }
     }
 

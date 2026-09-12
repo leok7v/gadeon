@@ -61,15 +61,12 @@ struct TableBlock: View {
         var result: (widths: [CGFloat]?, wrap: Bool) = (nil, false)
         let usable = available - CGFloat(max(n - 1, 0)) * 12 - 16
         if available > 0, n > 0 {
-            let natural = naturalWidths(n, headers: h, rows: r)
-            if natural.reduce(0, +) <= usable {
-                result = (natural, false)
-            } else {
-                let widths = TableMetrics.pointWidths(
-                    headers: h, rows: r, available: usable,
-                    minimums: minimumWidths(n, headers: h, rows: r))
-                if !widths.isEmpty { result = (widths, true) }
-            }
+            let fit = TableMetrics.columnLayout(
+                headers: h, rows: r,
+                natural: naturalWidths(n, headers: h, rows: r),
+                minimums: minimumWidths(n, headers: h, rows: r),
+                available: usable)
+            if !fit.widths.isEmpty { result = (fit.widths, fit.wrap) }
         }
         return result
     }

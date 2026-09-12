@@ -45,36 +45,44 @@ extension DocumentText {
         return attachment
     }
 
-    // What this builder actually lays out, not what the content would like:
-    // the tab stops are pinned to this whatever the view is, and cells
-    // truncate rather than overflow, so asking the surface to be wider than
-    // this would buy empty space and nothing else.
-    private static var tabStopExtent: CGFloat { 320 }
+    private static var columnGap: CGFloat { 10 }
 
     static func tableMinimumWidth(headers: [String], rows: [[String]],
                                   style: MarkdownStyle) -> CGFloat {
+        var result: CGFloat = 0
         let cols = max(headers.count, rows.map { r in r.count }.max() ?? 0)
-        return cols > 0 ? tabStopExtent : 0
+        if cols > 0 {
+            let mins = columnMinimums(headers: headers, rows: rows,
+                                      cols: cols, style: style)
+            result = ceil(mins.reduce(0, +)) + CGFloat(cols) * columnGap
+        }
+        return result
     }
 
     static func table(headers: [String], rows: [[String]],
                       alignments: [Markdown.Alignment], style: MarkdownStyle,
-                      images: [URL: PlatformImage]) -> NSAttributedString {
+                      images: [URL: PlatformImage],
+                      width: CGFloat) -> NSAttributedString {
         let m = NSMutableAttributedString()
         let cols = max(headers.count, rows.map { r in r.count }.max() ?? 0)
         if cols > 0 {
             let atomicId = UUID().uuidString
-            let widths = TableMetrics.pointWidths(headers: headers, rows: rows,
-                                                  available: tabStopExtent)
-            var stops: [NSTextTab] = []
-            var x: CGFloat = 0
-            for (col, w) in widths.enumerated() {
-                x += w
-                stops.append(NSTextTab(textAlignment: tabAlignment(col,
-                             alignments), location: x))
-            }
+            let natural = columnNaturals(headers: headers, rows: rows,
+                                         cols: cols, style: style)
+                .map { w in w + columnGap }
+            let minimums = columnMinimums(headers: headers, rows: rows,
+                                          cols: cols, style: style)
+                .map { w in w + columnGap }
+            let room = width > 0 ? width : natural.reduce(0, +)
+            let widths = TableMetrics.columnLayout(
+                headers: headers, rows: rows, natural: natural,
+                minimums: minimums, available: room).widths
+            let texts = widths.map { w in max(w - columnGap, 1) }
+            let stops = tabStops(widths: widths, texts: texts,
+                                 alignments: alignments)
             if !headers.isEmpty {
-                m.append(tableRow(headers, stops: stops, bold: true,
+                m.append(tableRow(headers, stops: stops, texts: texts,
+                                  bold: true,
                                   tint: platformWhite(0.5, alpha: 0.14),
                                   atomicId: atomicId, style: style,
                                   images: images))
@@ -82,7 +90,8 @@ extension DocumentText {
             for (idx, row) in rows.enumerated() {
                 let tint: PlatformColor = idx % 2 == 1
                     ? platformWhite(0.5, alpha: 0.07) : platformClearColor
-                m.append(tableRow(row, stops: stops, bold: false, tint: tint,
+                m.append(tableRow(row, stops: stops, texts: texts,
+                                  bold: false, tint: tint,
                                   atomicId: atomicId, style: style,
                                   images: images))
             }
@@ -102,25 +111,52 @@ extension DocumentText {
         return m
     }
 
+    private static func tabStops(widths: [CGFloat], texts: [CGFloat],
+                                 alignments: [Markdown.Alignment])
+        -> [NSTextTab] {
+        var out: [NSTextTab] = []
+        var left: CGFloat = 0
+        for (col, w) in widths.enumerated() {
+            if col > 0 {
+                let align = tabAlignment(col, alignments)
+                var at = left
+                if align == .right { at = left + texts[col] }
+                if align == .center { at = left + texts[col] / 2 }
+                out.append(NSTextTab(textAlignment: align, location: at))
+            }
+            left += w
+        }
+        return out
+    }
+
     private static func tableRow(_ cells: [String], stops: [NSTextTab],
-                                 bold: Bool, tint: PlatformColor,
+                                 texts: [CGFloat], bold: Bool,
+                                 tint: PlatformColor,
                                  atomicId: String, style: MarkdownStyle,
                                  images: [URL: PlatformImage])
         -> NSAttributedString {
         let para = NSMutableParagraphStyle()
         para.tabStops = stops
-        para.lineBreakMode = .byTruncatingTail
+        para.lineBreakMode = .byWordWrapping
         let base = bold ? boldFont(of: bodyFont(style)) : bodyFont(style)
-        let m = NSMutableAttributedString()
-        for (i, cell) in cells.enumerated() {
-            if i > 0 {
-                m.append(NSAttributedString(string: "\t",
-                                            attributes: [.font: base]))
-            }
-            m.append(tableCell(cell, base: base, style: style,
-                               images: images))
+        let columns = cells.enumerated().map { pair in
+            wrapCell(tableCell(pair.element, base: base, style: style,
+                               images: images),
+                     width: pair.offset < texts.count ? texts[pair.offset] : 1)
         }
-        m.append(NSAttributedString(string: "\n", attributes: [.font: base]))
+        let m = NSMutableAttributedString()
+        let height = max(columns.map { lines in lines.count }.max() ?? 0, 1)
+        for line in 0 ..< height {
+            for (i, lines) in columns.enumerated() {
+                if i > 0 {
+                    m.append(NSAttributedString(string: "\t",
+                                                attributes: [.font: base]))
+                }
+                if line < lines.count { m.append(lines[line]) }
+            }
+            m.append(NSAttributedString(string: "\n",
+                                        attributes: [.font: base]))
+        }
         let full = NSRange(location: 0, length: m.length)
         m.addAttribute(.paragraphStyle, value: para, range: full)
         m.addAttribute(.backgroundColor, value: tint, range: full)

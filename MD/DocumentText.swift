@@ -1,3 +1,4 @@
+import CoreText
 import Foundation
 
 // Flattens a document into one NSAttributedString for the single selectable
@@ -13,17 +14,20 @@ import Foundation
 
     static func attributed(from document: Markdown.Document,
                            style: MarkdownStyle,
-                           images: [URL: PlatformImage] = [:])
+                           images: [URL: PlatformImage] = [:],
+                           width: CGFloat = 0)
         -> NSAttributedString {
         let m = NSMutableAttributedString()
         for item in document.items {
-            m.append(render(item.block, style: style, images: images))
+            m.append(render(item.block, style: style, images: images,
+                            width: width))
         }
         return m
     }
 
     static func render(_ block: Markdown.Block, style: MarkdownStyle,
-                       images: [URL: PlatformImage]) -> NSAttributedString {
+                       images: [URL: PlatformImage],
+                       width: CGFloat = 0) -> NSAttributedString {
         let result: NSAttributedString
         switch block {
             case .paragraph(let attr):
@@ -33,14 +37,15 @@ import Foundation
             case .code(let lang, let text):
                 result = code(language: lang, text: text, style: style)
             case .quote(let inner):
-                result = quote(inner, style: style, images: images)
+                result = quote(inner, style: style, images: images,
+                               width: width - 18)
             case .list(let items, let tight):
                 result = list(items: items, tight: tight, depth: 0,
-                              style: style, images: images)
+                              style: style, images: images, width: width)
             case .table(let headers, let rows, let aligns):
                 result = table(headers: headers, rows: rows,
                                alignments: aligns, style: style,
-                               images: images)
+                               images: images, width: width)
             case .math(let tex):
                 result = math(tex, style: style)
             case .rule:
@@ -212,6 +217,49 @@ import Foundation
         return out
     }
 
+    static func columnNaturals(headers: [String], rows: [[String]],
+                               cols: Int,
+                               style: MarkdownStyle) -> [CGFloat] {
+        let body = bodyFont(style)
+        let bold = boldFont(of: body)
+        var out = [CGFloat](repeating: 0, count: cols)
+        for c in 0..<cols {
+            var widest: CGFloat = 0
+            if c < headers.count {
+                let w = cellWidth(headers[c], font: bold)
+                if w > widest { widest = w }
+            }
+            for row in rows where c < row.count {
+                let w = cellWidth(row[c], font: body)
+                if w > widest { widest = w }
+            }
+            out[c] = ceil(widest)
+        }
+        return out
+    }
+
+    private static func cellWidth(_ cell: String,
+                                  font: PlatformFont) -> CGFloat {
+        (renderedText(of: cell) as NSString)
+            .size(withAttributes: [.font: font]).width
+    }
+
+    static func wrapCell(_ cell: NSAttributedString,
+                         width: CGFloat) -> [NSAttributedString] {
+        var out: [NSAttributedString] = []
+        let setter = CTTypesetterCreateWithAttributedString(cell)
+        var at = 0
+        while at < cell.length {
+            let suggested = CTTypesetterSuggestLineBreak(
+                setter, at, Double(max(width, 1)))
+            let take = min(max(suggested, 1), cell.length - at)
+            out.append(cell.attributedSubstring(
+                from: NSRange(location: at, length: take)))
+            at += take
+        }
+        return out
+    }
+
     static func tableCell(_ text: String, base: PlatformFont,
                           style: MarkdownStyle,
                           images: [URL: PlatformImage]) -> NSAttributedString {
@@ -262,11 +310,13 @@ import Foundation
 
     private static func quote(_ blocks: [Markdown.Block],
                               style: MarkdownStyle,
-                              images: [URL: PlatformImage])
+                              images: [URL: PlatformImage],
+                              width: CGFloat)
         -> NSAttributedString {
         let m = NSMutableAttributedString()
         for inner in blocks {
-            m.append(render(inner, style: style, images: images))
+            m.append(render(inner, style: style, images: images,
+                            width: width))
         }
         let full = NSRange(location: 0, length: m.length)
         m.enumerateAttribute(.paragraphStyle, in: full,
@@ -286,7 +336,8 @@ import Foundation
 
     private static func list(items: [Markdown.ListItem], tight: Bool,
                              depth: Int, style: MarkdownStyle,
-                             images: [URL: PlatformImage])
+                             images: [URL: PlatformImage],
+                             width: CGFloat)
         -> NSAttributedString {
         let m = NSMutableAttributedString()
         let indent = CGFloat(depth + 1) * 20
@@ -298,7 +349,8 @@ import Foundation
         para.paragraphSpacingBefore = tight ? 2 : 4
         for item in items {
             m.append(listItem(item, para: para, depth: depth,
-                              style: style, images: images))
+                              style: style, images: images,
+                              width: width - indent))
         }
         return m
     }
@@ -306,7 +358,8 @@ import Foundation
     private static func listItem(_ item: Markdown.ListItem,
                                  para: NSParagraphStyle, depth: Int,
                                  style: MarkdownStyle,
-                                 images: [URL: PlatformImage])
+                                 images: [URL: PlatformImage],
+                                 width: CGFloat)
         -> NSAttributedString {
         let marker = item.checked.map { c in
             c ? "\u{2611}" : "\u{2610}"
@@ -327,11 +380,13 @@ import Foundation
             headHandled = true
         }
         if !headHandled, let first = item.blocks.first {
-            line.append(render(first, style: style, images: images))
+            line.append(render(first, style: style, images: images,
+                               width: width))
         }
         line.append(NSAttributedString(string: "\n"))
         for rest in item.blocks.dropFirst() {
-            line.append(render(rest, style: style, images: images))
+            line.append(render(rest, style: style, images: images,
+                               width: width))
         }
         return line
     }

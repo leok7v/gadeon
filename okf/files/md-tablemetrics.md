@@ -10,4 +10,6 @@ timestamp: 2026-08-10T00:10:24Z
 
 And for the monospaced copy serialisation, so a copied table matches the
 rendered one. Widths use a sqrt-damped character count so a wide column does
-not starve the narrow ones.
+not starve the narrow ones, capped at each column's natural width so a short
+one is not padded past its content. Every renderer measures its own cells and
+asks `columnLayout` to make the choice.

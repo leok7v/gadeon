@@ -228,7 +228,8 @@ extension DocumentText {
 
     static func table(headers: [String], rows: [[String]],
                       alignments: [Markdown.Alignment], style: MarkdownStyle,
-                      images: [URL: PlatformImage]) -> NSAttributedString {
+                      images: [URL: PlatformImage],
+                      width: CGFloat) -> NSAttributedString {
         let m = NSMutableAttributedString()
         let cols = max(headers.count, rows.map { r in r.count }.max() ?? 0)
         if cols > 0 {

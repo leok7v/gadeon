@@ -1031,6 +1031,8 @@ struct ContentView: View {
             Image(systemName: "arrow.down.circle.fill")
                 .appFont(.title)
                 .symbolRenderingMode(.hierarchical)
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
     }
@@ -1287,7 +1289,25 @@ private struct ClipPoster: View {
             .scaledToFit()
             .frame(maxWidth: 300, maxHeight: 260)
             .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay { PlayGlyph() }
+            .overlay(alignment: .bottomLeading) {
+                FilmMark().padding(8)
+            }
+    }
+
+}
+
+private struct FilmMark: View {
+
+    var body: some View {
+        Image(systemName: "film.fill")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.white)
+            .shadow(color: .black.opacity(0.35), radius: 1.5, y: 1)
+            .frame(width: 28, height: 28)
+            .background(.black.opacity(0.28), in: Circle())
+            .background(.ultraThinMaterial, in: Circle())
+            .overlay { Circle().stroke(.white.opacity(0.35), lineWidth: 1) }
+            .allowsHitTesting(false)
     }
 
 }

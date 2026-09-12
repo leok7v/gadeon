@@ -44,6 +44,36 @@ enum TableMetrics {
         return result
     }
 
+    static func columnLayout(headers: [String], rows: [[String]],
+                             natural: [CGFloat], minimums: [CGFloat],
+                             available: CGFloat)
+        -> (widths: [CGFloat], wrap: Bool) {
+        var result = (widths: natural, wrap: false)
+        if natural.reduce(0, +) > available {
+            let shared = pointWidths(headers: headers, rows: rows,
+                                     available: available, minimums: minimums)
+            result = (capped(shared, natural), true)
+        }
+        return result
+    }
+
+    private static func capped(_ widths: [CGFloat],
+                               _ natural: [CGFloat]) -> [CGFloat] {
+        var out = widths
+        let want = (0 ..< out.count).map { c in max(natural[c] - out[c], 0) }
+        let short = want.reduce(0, +)
+        var slack: CGFloat = 0
+        for c in 0 ..< out.count where out[c] > natural[c] {
+            slack += out[c] - natural[c]
+            out[c] = natural[c]
+        }
+        let give = min(slack, short)
+        for c in 0 ..< out.count where short > 0 {
+            out[c] += give * want[c] / short
+        }
+        return out
+    }
+
     private static func distribute(available: CGFloat, weights: [CGFloat],
                                    sum: CGFloat,
                                    minimums: [CGFloat]) -> [CGFloat] {

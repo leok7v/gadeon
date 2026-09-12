@@ -80,6 +80,35 @@ final class AttachmentRefsTests: XCTestCase {
 
 }
 
+@MainActor final class StoredMessageTests: XCTestCase {
+
+    private func msg(posters: [Data]?) -> ConversationStore.Msg {
+        ConversationStore.Msg(
+            fromUser: true, text: "watch this", reasoning: "",
+            rounds: [], images: [], loopStopped: false, clips: nil,
+            docs: nil, posters: posters)
+    }
+
+    func testAPosterSurvivesTheRoundTrip() throws {
+        let frame = Data([0xFF, 0xD8, 0xFF])
+        let data = try JSONEncoder().encode(msg(posters: [frame]))
+        let back = try JSONDecoder().decode(ConversationStore.Msg.self,
+                                            from: data)
+        XCTAssertEqual(back.posters, [frame])
+    }
+
+    func testARecordWrittenBeforePostersStillDecodes() throws {
+        let json = "{\"fromUser\":true,\"text\":\"watch this\","
+            + "\"reasoning\":\"\",\"rounds\":[],\"images\":[],"
+            + "\"loopStopped\":false}"
+        let back = try JSONDecoder().decode(ConversationStore.Msg.self,
+                                            from: Data(json.utf8))
+        XCTAssertNil(back.posters)
+        XCTAssertEqual(back.text, "watch this")
+    }
+
+}
+
 @MainActor final class ConversationSearchTests: XCTestCase {
 
     func testShortQueryIsNotActive() {

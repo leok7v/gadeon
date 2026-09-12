@@ -20,6 +20,7 @@ public struct MarkdownTextView: View {
     // The sentence being read aloud right now, tinted where it appears.
     let speaking: String?
     @State private var images: [URL: PlatformImage] = [:]
+    @State private var available: CGFloat = 0
 
     public init(_ document: Markdown.Document,
                 style: MarkdownStyle = .default,
@@ -51,10 +52,15 @@ public struct MarkdownTextView: View {
     public var body: some View {
         SelectableText(
             ns: DocumentText.attributed(from: document, style: style,
-                                        images: images),
+                                        images: images, width: available),
             font: FontRole.body(style.bodySize).platformFont,
             selectable: style.selectable, scrolls: scrolls, find: find,
             findId: findId, speaking: speaking)
+            .onGeometryChange(for: CGFloat.self, of: { proxy in
+                proxy.size.width
+            }, action: { w in
+                if w > 0, w != available { available = w }
+            })
             // Key the fetch on the image URLs, not the whole document: a
             // streaming answer changes `document` on every appended token, and
             // keying on it would cancel and restart the fetch each time (never
