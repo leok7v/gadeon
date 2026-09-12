@@ -928,7 +928,7 @@ struct ContentView: View {
             })
             .coordinateSpace(.named(transcriptSpace))
             .overlay { toolCallout }
-            .overlay(alignment: .bottom) {
+            .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 8) {
                     if isReasoningLive { quickAnswerButton }
                     if !follow { toBottomButton(proxy) }
@@ -1065,7 +1065,8 @@ struct ContentView: View {
                                   active: isThinking(m),
                                   label: isThinking(m)
                                          ? model.thinkLabel : "Thoughts",
-                                  maxHeight: chatHeight / 3)
+                                  maxHeight: chatHeight / 3,
+                                  first: m.id == firstReasoningId)
                 }
                 if !m.fromUser, !m.toolRounds.isEmpty {
                     ToolCallStrip(messageId: m.id, rounds: m.toolRounds,
@@ -1212,6 +1213,12 @@ struct ContentView: View {
         isLive(m) && m.text.isEmpty
     }
 
+    private var firstReasoningId: UUID? {
+        model.messages.first { m in
+            !m.fromUser && !m.reasoning.isEmpty
+        }?.id
+    }
+
 }
 
 private struct ClipPlayer: View {
@@ -1324,8 +1331,22 @@ private struct ReasoningView: View {
     let active: Bool
     let label: String
     let maxHeight: CGFloat
-    @State private var expanded = isOS
+    @State private var expanded: Bool
+    @State private var touched = false
     @State private var innerFollow = true
+
+    init(text: String, doc: Markdown.Document, style: MarkdownStyle,
+         markdown: Bool, active: Bool, label: String, maxHeight: CGFloat,
+         first: Bool) {
+        self.text = text
+        self.doc = doc
+        self.style = style
+        self.markdown = markdown
+        self.active = active
+        self.label = label
+        self.maxHeight = maxHeight
+        _expanded = State(initialValue: isOS && first && active)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -1334,36 +1355,36 @@ private struct ReasoningView: View {
                 reasoning
             }
         }
+        .onChange(of: active) { _, live in
+            if !live, !touched { expanded = false }
+        }
     }
 
     private var marqueeing: Bool { active && !expanded }
 
     private var header: some View {
-        HStack(spacing: 6) {
-            Button {
-                expanded.toggle()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: expanded
-                          ? "chevron.down" : "chevron.right")
-                        .appFont(.caption2)
+        Button {
+            touched = true
+            expanded.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: expanded
+                      ? "chevron.down" : "chevron.right")
+                    .appFont(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 18, minHeight: 22)
+                if marqueeing {
+                    ThinkingMarquee(text: text)
+                } else {
+                    Text(label)
+                        .appFont(.caption)
                         .foregroundStyle(.secondary)
-                        .frame(minWidth: marqueeing ? 18 : 0,
-                               minHeight: marqueeing ? 20 : 0)
-                    if !marqueeing {
-                        Text(label)
-                            .appFont(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Spacer(minLength: 0)
                 }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .fixedSize()
-            if marqueeing {
-                ThinkingMarquee(text: text)
-            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     private var reasoning: some View {
