@@ -90,7 +90,7 @@ public enum Models {
         var band: Set<String> = []
         if isOS {
             if let rung = gemmaRung(gb) { band.insert(rung) }
-            band.insert("Ternary-Bonsai-1.7B")
+            if gb <= 3 { band.insert("Ternary-Bonsai-1.7B") }
         } else {
             if gb >= 8 { band.insert("Qwen3.5-4B") }
             if gb >= 16 { band.insert("Qwen3.5-9B") }
